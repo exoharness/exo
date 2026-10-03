@@ -228,6 +228,10 @@ pub trait ManagedSandboxHandle: Send + Sync {
         None
     }
 
+    async fn command_environment(&self) -> Result<HashMap<String, String>> {
+        Ok(HashMap::new())
+    }
+
     async fn is_running(&self) -> Result<Option<bool>> {
         Ok(None)
     }
@@ -298,6 +302,10 @@ pub trait ManagedSandboxHandle: Send + Sync {
     /// kinds or writable mounts before capture; never silently omit filesystem state.
     async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload>;
 
+    async fn snapshot_template(&self) -> Result<SnapshotPayload> {
+        bail!("sandbox handle does not support template capture")
+    }
+
     async fn delete_snapshot(&self, _payload: SnapshotPayload) -> Result<()> {
         bail!("sandbox handle does not support snapshot deletion")
     }
@@ -337,6 +345,13 @@ pub struct ResolvedSandboxImage {
 
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
+    fn with_external_proxy(
+        &self,
+        _proxy: crate::egress::ExternalProxyConfig,
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
+        bail!("sandbox backend does not support external proxies")
+    }
+
     async fn materialize_resources(
         &self,
         _request: crate::resources::MaterializeResourcesRequest,

@@ -188,11 +188,7 @@ fn open_capture(
 }
 
 fn allocated_bytes(directory: &Path) -> Result<u64> {
-    snapshot_directory_bytes(directory, |file| {
-        file.blocks()
-            .checked_mul(512)
-            .context("snapshot size overflow")
-    })
+    snapshot_directory_bytes(directory, &mut HashSet::new())
 }
 
 fn publish_capture(
@@ -325,6 +321,7 @@ impl FirecrackerSandboxBackend {
         self.egress
             .restore(
                 request.clone(),
+                self.external_proxy.as_ref(),
                 |policy| async move { self.egress_transport(&policy).await },
                 |egress| {
                     let backend = self.clone();

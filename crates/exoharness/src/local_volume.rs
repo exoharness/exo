@@ -19,13 +19,19 @@ fn checked(command: &mut Command) -> Result<Output> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn create_volume(directory: &Path) -> Result<()> {
+    create_sized_volume(directory, 1024)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn create_sized_volume(directory: &Path, size_gib: u64) -> Result<()> {
+    ensure!(size_gib > 0, "resource volume size must be positive");
     checked(
         Command::new("hdiutil")
             .args([
                 "create",
                 "-quiet",
                 "-size",
-                "1t",
+                &format!("{size_gib}g"),
                 "-type",
                 "SPARSE",
                 "-fs",

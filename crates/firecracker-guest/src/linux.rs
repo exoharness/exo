@@ -437,6 +437,10 @@ impl AgentState {
             } => self.process_bridge(&process_id, request),
             Request::KillProcess { process_id } => self.kill_process(&process_id),
             Request::SyncFilesystem { path } => sync_filesystem(&path),
+            Request::MountResources { mounts } => match mount_resources(mounts) {
+                Ok(()) => Response::ok(),
+                Err(error) => Response::error(error),
+            },
             Request::ConfigureNetwork {
                 address,
                 gateway,
@@ -1014,16 +1018,22 @@ fn initialize_guest() -> Result<(), String> {
             .map_err(|error| error.to_string())?;
         let mounts: Vec<exo_firecracker_protocol::GuestResourceMount> =
             serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        for mount in mounts {
-            wait_for_device(&mount.device)?;
-            fs::create_dir_all(&mount.path).map_err(|error| error.to_string())?;
-            let flags = libc::MS_NOSUID
-                | libc::MS_NODEV
-                | if mount.read_only { libc::MS_RDONLY } else { 0 };
-            mount_filesystem(Some(&mount.device), &mount.path, Some("ext4"), flags, None)?;
-        }
+        mount_resources(mounts)?;
     }
     std::env::set_current_dir(&workspace).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn mount_resources(
+    mounts: Vec<exo_firecracker_protocol::GuestResourceMount>,
+) -> Result<(), String> {
+    for mount in mounts {
+        wait_for_device(&mount.device)?;
+        fs::create_dir_all(&mount.path).map_err(|error| error.to_string())?;
+        let flags =
+            libc::MS_NOSUID | libc::MS_NODEV | if mount.read_only { libc::MS_RDONLY } else { 0 };
+        mount_filesystem(Some(&mount.device), &mount.path, Some("ext4"), flags, None)?;
+    }
     Ok(())
 }
 

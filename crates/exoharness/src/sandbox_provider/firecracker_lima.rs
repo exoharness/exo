@@ -65,6 +65,7 @@ const BRIDGE_INSTALL_PATH: &str = "/usr/local/libexec/exo-firecracker-bridge";
 
 #[derive(Clone)]
 pub struct LimaFirecrackerSandboxBackend {
+    external_proxy: Option<crate::egress::ExternalProxyConfig>,
     egress: Arc<EgressRuntime<LimaFirecrackerSandboxHandle>>,
     config: FirecrackerConfig,
     bridge: Arc<LimaBridgeManager>,
@@ -189,6 +190,7 @@ impl LimaFirecrackerSandboxBackend {
         bridge.prepare_bridge(&lima.target_dir).await?;
         bridge.connection().await?;
         Ok(Self {
+            external_proxy: None,
             config,
             bridge,
             egress: Arc::new(EgressRuntime::new(resolver, upstream)),
@@ -229,6 +231,17 @@ impl LimaFirecrackerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
+    fn with_external_proxy(
+        &self,
+        proxy: crate::egress::ExternalProxyConfig,
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
+        proxy.validate()?;
+        Ok(Arc::new(Self {
+            external_proxy: Some(proxy),
+            ..self.clone()
+        }))
+    }
+
     async fn materialize_resources(
         &self,
         request: crate::resources::MaterializeResourcesRequest,
@@ -292,6 +305,7 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         self.egress
             .acquire(
                 request.clone(),
+                self.external_proxy.as_ref(),
                 |policy| async move { self.egress_transport(&policy).await },
                 |egress| async move {
                     let mut handle = self
@@ -431,6 +445,7 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         self.egress
             .restore(
                 request.clone(),
+                self.external_proxy.as_ref(),
                 |policy| async move { self.egress_transport(&policy).await },
                 |egress| async move {
                     let mut handle = self
@@ -1731,6 +1746,7 @@ mod egress_cleanup_tests {
                 next_id: AtomicU64::new(1),
             });
             let backend = LimaFirecrackerSandboxBackend {
+                external_proxy: None,
                 egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
                 config: FirecrackerConfig::default(),
                 bridge: Arc::new(LimaBridgeManager {
@@ -1950,6 +1966,7 @@ mod egress_cleanup_tests {
         let handle = runtime
             .acquire(
                 request.clone(),
+                None,
                 |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
                 |egress| async {
                     Ok(LimaFirecrackerSandboxHandle {

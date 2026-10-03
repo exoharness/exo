@@ -15,6 +15,8 @@
 mod egress;
 #[cfg(target_os = "macos")]
 mod image_cache;
+#[cfg(unix)]
+mod terminal;
 
 use egress::SmolvmProxy;
 
@@ -114,24 +116,26 @@ pub struct SmolvmBackendConfig {
 }
 
 /// Backend driving the `smolvm` CLI.
+#[derive(Clone)]
 pub struct SmolvmSandboxBackend {
+    external_proxy: Option<crate::egress::ExternalProxyConfig>,
     binary_override: Option<PathBuf>,
-    binary: OnceCell<PathBuf>,
+    binary: Arc<OnceCell<PathBuf>>,
     /// Configured boot binary, if the caller pinned one.
     boot_binary_override: Option<PathBuf>,
     /// Serves `_boot-vm`; arms the parent-death watchdog for ephemeral VMs.
     /// Derived on first use rather than in the constructor: deriving it walks
     /// `PATH` and stats candidates, and a constructor cannot await.
-    boot_binary: OnceCell<Option<PathBuf>>,
+    boot_binary: Arc<OnceCell<Option<PathBuf>>>,
     mode: SmolvmExecutionMode,
     #[cfg(target_os = "macos")]
     image_cache: Option<PathBuf>,
     /// Probed once: re-asking per `acquire` would spawn a process per sandbox.
-    capabilities: OnceCell<Capabilities>,
+    capabilities: Arc<OnceCell<Capabilities>>,
     /// Last use of each warm machine this process created, for TTL reaping.
-    warm_seen: Mutex<HashMap<String, Instant>>,
+    warm_seen: Arc<Mutex<HashMap<String, Instant>>>,
     abandoned_reap_running: Arc<AtomicBool>,
-    egress: EgressRuntime<SmolvmWarmHandle, SmolvmProxy>,
+    egress: Arc<EgressRuntime<SmolvmWarmHandle, SmolvmProxy>>,
 }
 
 impl SmolvmSandboxBackend {
@@ -158,22 +162,26 @@ impl SmolvmSandboxBackend {
             .boot_binary
             .or_else(|| std::env::var_os(SMOLVM_BOOT_BIN_ENV).map(PathBuf::from));
         Self {
+            external_proxy: None,
             binary_override,
-            binary: OnceCell::new(),
+            binary: Arc::new(OnceCell::new()),
             boot_binary_override,
-            boot_binary: OnceCell::new(),
+            boot_binary: Arc::new(OnceCell::new()),
             mode: config.mode,
             #[cfg(target_os = "macos")]
             image_cache: config.image_cache,
-            capabilities: OnceCell::new(),
-            warm_seen: Mutex::new(HashMap::new()),
+            capabilities: Arc::new(OnceCell::new()),
+            warm_seen: Arc::new(Mutex::new(HashMap::new())),
             abandoned_reap_running: Arc::new(AtomicBool::new(false)),
-            egress: EgressRuntime::new(None, Arc::new(PublicUpstreamResolver)),
+            egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
         }
     }
 
     pub fn with_credentials(mut self, resolver: Arc<dyn EgressCredentialResolver>) -> Self {
-        self.egress = EgressRuntime::new(Some(resolver), Arc::new(PublicUpstreamResolver));
+        self.egress = Arc::new(EgressRuntime::new(
+            Some(resolver),
+            Arc::new(PublicUpstreamResolver),
+        ));
         self
     }
 
@@ -183,7 +191,7 @@ impl SmolvmSandboxBackend {
         resolver: Arc<dyn EgressCredentialResolver>,
         upstream: Arc<dyn UpstreamResolver>,
     ) -> Self {
-        self.egress = EgressRuntime::new(Some(resolver), upstream);
+        self.egress = Arc::new(EgressRuntime::new(Some(resolver), upstream));
         self
     }
 
@@ -710,12 +718,38 @@ impl Default for SmolvmSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for SmolvmSandboxBackend {
+    fn with_external_proxy(
+        &self,
+        proxy: crate::egress::ExternalProxyConfig,
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
+        proxy.validate()?;
+        Ok(Arc::new(Self {
+            external_proxy: Some(proxy),
+            ..self.clone()
+        }))
+    }
+
     fn is_local(&self) -> bool {
         true
     }
 
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
         &CONSUMABLE_SNAPSHOT_FORMATS
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn resolve_image(&self, image: &str) -> Result<crate::ResolvedSandboxImage> {
+        let cache = self
+            .image_cache
+            .clone()
+            .context("SmolVM image resolution requires an image cache")?;
+        let binary = self.binary().await?.clone();
+        let boot_binary = self.boot_binary().await?.clone();
+        let image = image.to_owned();
+        tokio::task::spawn_blocking(move || {
+            image_cache::resolve_image(&binary, boot_binary.as_deref(), &cache, &image)
+        })
+        .await?
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
@@ -758,6 +792,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .egress
             .acquire_with_proxy(
                 request.clone(),
+                self.external_proxy.as_ref(),
                 SmolvmProxy::start,
                 |egress| async {
                     let image = self.prepare_image(&request.spec.image).await?;
@@ -953,7 +988,7 @@ struct SmolvmWarmHandle {
 }
 
 impl SmolvmWarmHandle {
-    fn build(&self, command: &SandboxCommand, cwd: &str, interactive: bool) -> Command {
+    fn build(&self, command: &SandboxCommand, cwd: &str, interactive: bool, tty: bool) -> Command {
         let mut process = Command::new(&self.binary);
         process
             .arg("machine")
@@ -962,6 +997,9 @@ impl SmolvmWarmHandle {
             .arg(&self.machine);
         if interactive {
             process.arg("--interactive");
+        }
+        if tty {
+            process.arg("--tty");
         }
         configure_command_args(&mut process, command, cwd);
         process.arg("--");
@@ -973,6 +1011,13 @@ impl SmolvmWarmHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for SmolvmWarmHandle {
+    async fn command_environment(&self) -> Result<HashMap<String, String>> {
+        match &self.egress {
+            Some(egress) => egress.environment(),
+            None => Ok(HashMap::new()),
+        }
+    }
+
     fn id(&self) -> &str {
         &self.id
     }
@@ -1006,7 +1051,7 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
         let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
-        let process = self.build(command, &cwd, false);
+        let process = self.build(command, &cwd, false, false);
         run_command(process, &with_backstop_timeout(command), cwd).await
     }
 
@@ -1014,8 +1059,19 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
         let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
-        let process = self.build(command, &cwd, true);
+        let process = self.build(command, &cwd, true, false);
         spawn_sandbox_process(process, command).await
+    }
+
+    #[cfg(unix)]
+    async fn start_terminal(
+        &self,
+        command: &SandboxCommand,
+        size: crate::SandboxTerminalSize,
+    ) -> Result<crate::SandboxTerminalParts> {
+        let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
+        let cwd = resolve_cwd(&command, &self.request.spec);
+        terminal::spawn(self.build(&command, &cwd, true, true), size)
     }
 
     async fn is_running(&self) -> Result<Option<bool>> {
