@@ -94,17 +94,13 @@ export class HarnessToolRegistry {
       this.tools.get(toolCall.request.functionName) ?? null;
     try {
       const { tool, result } = await this.executeToolCall(toolCall);
-      return await this.normalizeAndStreamToolResult(toolCall, tool, result);
+      return await this.normalizeToolResult(toolCall, tool, result);
     } catch (error) {
       const result: ToolResult = {
         ok: false,
         error: errorMessage(error),
       };
-      return await this.normalizeAndStreamToolResult(
-        toolCall,
-        configuredTool,
-        result,
-      );
+      return await this.normalizeToolResult(toolCall, configuredTool, result);
     }
   }
 
@@ -117,13 +113,6 @@ export class HarnessToolRegistry {
         `tool execution is not configured for ${toolCall.request.functionName}`,
       );
     }
-    if (this.context.streaming) {
-      await this.context.stream.toolCall({
-        toolCallId: toolCall.toolCallId,
-        toolName: toolCall.request.functionName,
-        arguments: toolCall.request.arguments,
-      });
-    }
     if (tool.authorization !== "runtime") {
       await this.context.authorizeTool(toolCall.request);
     }
@@ -134,7 +123,7 @@ export class HarnessToolRegistry {
     return { tool, result };
   }
 
-  private async normalizeAndStreamToolResult(
+  private async normalizeToolResult(
     toolCall: PendingToolCall,
     tool: ToolInstance | null,
     result: ToolResult,
@@ -145,12 +134,6 @@ export class HarnessToolRegistry {
       source: tool?.source ?? "built_in",
       result,
     });
-    if (this.context.streaming) {
-      await this.context.stream.toolResult({
-        toolCallId: toolCall.toolCallId,
-        result: normalized,
-      });
-    }
     return normalized;
   }
 }

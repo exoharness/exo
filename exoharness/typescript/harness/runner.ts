@@ -1626,13 +1626,6 @@ function createTurnContext(
     ): Promise<EventData[]> {
       const events: EventData[] = [];
       for (const toolCall of toolCalls) {
-        if (streaming) {
-          await context.stream.toolCall({
-            toolCallId: toolCall.toolCallId,
-            toolName: toolCall.request.functionName,
-            arguments: toolCall.request.arguments,
-          });
-        }
         let result: ToolResult;
         try {
           result = await context.executeTool(toolCall.request);
@@ -1641,12 +1634,6 @@ function createTurnContext(
             ok: false,
             error: runnerErrorMessage(error),
           };
-        }
-        if (streaming) {
-          await context.stream.toolResult({
-            toolCallId: toolCall.toolCallId,
-            result,
-          });
         }
         events.push(toolResultEvent(toolCall.toolCallId, result));
       }

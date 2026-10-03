@@ -49,6 +49,7 @@ import {
 } from "@exo/model-runtime/shared";
 
 import { claudeToolName } from "../../typescript/harness/native-mcp";
+import { modelUsageRecord } from "@exo/model-runtime/usage";
 
 const DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE = "/usr/local/bin/claude-code";
 const CLAUDE_MAX_API_RETRIES = 2;
@@ -388,10 +389,6 @@ async function handleClaudeMessage(
 
   if (message.type === "result") {
     state.result = message;
-    await appendCustomEvent(context.exoharness.current.turn, "claude_result", {
-      metadata: turnMetadata(context),
-      result: toJsonValue(message),
-    });
   }
 }
 
@@ -415,15 +412,13 @@ async function appendClaudeFinalMessage(
       state.finalText ? [assistantTextMessage(state.finalText)] : [],
       undefined,
       usage && result
-        ? {
-            model,
+        ? modelUsageRecord(model, {
             prompt_tokens: usage.input_tokens,
             completion_tokens: usage.output_tokens,
-            prompt_cached_tokens: usage.cache_read_input_tokens ?? 0,
-            prompt_cache_creation_tokens:
-              usage.cache_creation_input_tokens ?? 0,
+            prompt_cached_tokens: usage.cache_read_input_tokens,
+            prompt_cache_creation_tokens: usage.cache_creation_input_tokens,
             cost_usd: result.total_cost_usd,
-          }
+          })
         : undefined,
     ),
   ]);

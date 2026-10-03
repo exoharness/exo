@@ -16,6 +16,8 @@ import {
   registerLibraryTools,
   registerLibraryToolModulePath,
   registerTools,
+  assistantTextMessage,
+  messagesEvent,
   materializeEventsToMessages,
   toolResultMessage,
   toolResultEvent,
@@ -99,7 +101,7 @@ describe("HarnessToolRegistry", () => {
     expect(executionContexts[0].toolCallId).toBe("call_1");
   });
 
-  it("emits stream events around tool execution when streaming", async () => {
+  it("returns tool result events without publishing stream progress", async () => {
     const streamEvents: EventData[] = [];
     const context = fakeTurnContext({
       streaming: true,
@@ -109,7 +111,7 @@ describe("HarnessToolRegistry", () => {
       fakeTool("echo", async (args) => ({ echoed: args.value })),
     );
 
-    await registry.executePending([
+    const events = await registry.executePending([
       {
         toolCallId: "call_1",
         request: {
@@ -119,21 +121,12 @@ describe("HarnessToolRegistry", () => {
       },
     ]);
 
-    expect(streamEvents).toEqual([
-      {
-        type: "tool_call_streamed",
-        toolCallId: "call_1",
-        toolName: "echo",
-        arguments: { value: "hello" },
-      },
-      {
-        type: "tool_result_streamed",
-        toolCallId: "call_1",
-        result: wrappedToolResult("call_1", "echo", "library", 1, {
-          echoed: "hello",
-        }),
-      },
+    expect(events).toEqual([
+      wrappedToolResultEvent("call_1", "echo", "library", 1, {
+        echoed: "hello",
+      }),
     ]);
+    expect(streamEvents).toEqual([]);
   });
 
   it("throws for unregistered tools", async () => {
@@ -250,6 +243,28 @@ describe("HarnessToolRegistry", () => {
 });
 
 describe("materializeEventsToMessages", () => {
+  it("leaves RLM diagnostics out of conversation replay", () => {
+    const data = [
+      {
+        type: "custom",
+        event_type: "rlm_model_response",
+        payload: { messages: [assistantTextMessage("FINAL(secret)")] },
+      },
+      messagesEvent([assistantTextMessage("answer")]),
+    ];
+    expect(
+      materializeEventsToMessages(
+        data.map((data, index) => ({
+          id: String(index),
+          conversationId: "thread",
+          turnId: "turn",
+          createdAt: "2026-09-29T00:00:00Z",
+          data,
+        })),
+      ),
+    ).toEqual([assistantTextMessage("answer")]);
+  });
+
   it("synthesizes results for dangling tool calls before later messages", () => {
     const events: Event[] = [
       {

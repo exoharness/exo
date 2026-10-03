@@ -347,9 +347,12 @@ impl Runtime {
             turn_id: turn.record().id,
         };
         let record = turn.record().clone();
-        let mut completion = self
-            .events
-            .register(Arc::clone(&thread), Arc::clone(&turn))?;
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let mut completion = self.events.register(
+            Arc::clone(&thread),
+            Arc::clone(&turn),
+            streaming.then(|| event_tx.clone()),
+        )?;
         let live_turn = Arc::new(());
         live_turns.retain(|_, turn| turn.strong_count() > 0);
         live_turns.insert(key, Arc::downgrade(&live_turn));
@@ -367,7 +370,6 @@ impl Runtime {
             )
             .await
             .map(Arc::from);
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
         let mut finalizers = self.finalizers.lock().await;
         while let Some(result) = finalizers.try_join_next() {
             if let Err(error) = result {
