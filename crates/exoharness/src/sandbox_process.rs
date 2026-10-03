@@ -40,6 +40,10 @@ struct ProcessManagedSandbox {
 
 #[async_trait]
 impl ManagedSandboxHandle for ProcessManagedSandbox {
+    async fn command_environment(&self) -> Result<std::collections::HashMap<String, String>> {
+        self.handle.command_environment().await
+    }
+
     fn id(&self) -> &str {
         self.handle.id()
     }
@@ -107,6 +111,9 @@ impl ManagedSandboxHandle for ProcessManagedSandbox {
     }
     async fn snapshot(&self) -> Result<SnapshotPayload> {
         self.handle.snapshot().await
+    }
+    async fn snapshot_template(&self) -> Result<SnapshotPayload> {
+        self.handle.snapshot_template().await
     }
     async fn delete_snapshot(&self, payload: SnapshotPayload) -> Result<()> {
         self.handle.delete_snapshot(payload).await

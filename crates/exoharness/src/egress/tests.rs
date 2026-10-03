@@ -801,6 +801,7 @@ async fn connect_stream_uses_supplied_placeholder_and_checks_both_hosts() -> Res
             Some(resolver.clone()),
             Arc::new(upstream.config.clone()),
             Some(&placeholders),
+            None,
         )?);
         let accept = listener.clone();
         let tls = tls.clone();
@@ -2288,6 +2289,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
         .with_egress(resolver.clone(), Arc::new(upstream.config.clone()))
     };
     let backend = make_backend();
+    let image = backend.resolve_image(&image).await?.image;
     let request = SandboxRequest {
         sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
         scope: identity("smolvm-proxy").scope,
@@ -2348,6 +2350,32 @@ gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
                 output.stdout,
                 output.stderr
             );
+        }
+        #[cfg(unix)]
+        {
+            use futures::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+            let mut terminal_command = command.clone();
+            terminal_command.argv[2] = format!(
+                "stty size; read -r input; test \"$input\" = resized; stty size; {}",
+                command.argv[2]
+            );
+            let mut terminal = handle.start_terminal(
+                &terminal_command, crate::SandboxTerminalSize { rows: 24, cols: 80 },
+            ).await?;
+            let mut output = BufReader::new(terminal.output);
+            let mut line = String::new();
+            output.read_line(&mut line).await?;
+            ensure!(line.trim() == "24 80", "initial terminal size: {line:?}");
+            terminal.control.resize(crate::SandboxTerminalSize { rows: 40, cols: 120 }).await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            terminal.input.write_all(b"resized\n").await?;
+            terminal.input.flush().await?;
+            let mut remainder = String::new();
+            output.read_to_string(&mut remainder).await?;
+            ensure!(terminal.wait.await? == 0, "terminal failed: {remainder}");
+            ensure!(remainder.contains("40 120"), "terminal resize failed: {remainder}");
+            let expected = if with_gh { "private review" } else { "authenticated-v2" };
+            ensure!(remainder.contains(expected), "terminal egress failed: {remainder}");
         }
         let mut save = command.clone();
         save.argv[2] = "printf '%s' retained > /egress-retained".into();
@@ -2431,5 +2459,299 @@ async fn proxy_enforces_resource_urls_before_resolving_credentials() -> Result<(
     }
     assert_eq!(resolver.uses.read().await.len(), 1);
     proxy.shutdown().await?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "firecracker"))]
+#[tokio::test]
+#[ignore = "requires root, Linux/KVM, XFS and the Exo Firecracker artifact bundle"]
+async fn firecracker_template_egress_resources_live() -> Result<()> {
+    firecracker_template_egress_resources(None).await
+}
+
+#[cfg(all(target_os = "linux", feature = "firecracker"))]
+#[tokio::test]
+#[ignore = "requires Linux/KVM and EXO_FIRECRACKER_TEST_IMAGE pointing to a Codex ext4 image"]
+async fn firecracker_codex_template_egress_resources_live() -> Result<()> {
+    firecracker_template_egress_resources(Some(std::env::var("EXO_FIRECRACKER_TEST_IMAGE")?)).await
+}
+
+#[cfg(all(target_os = "linux", feature = "firecracker"))]
+async fn firecracker_template_egress_resources(codex_image: Option<String>) -> Result<()> {
+    use crate::resources::{
+        MaterializeResourcesRequest, ResourceDefinition, ResourceSource, ResourceStore,
+    };
+    use crate::{
+        ManagedSandboxBackend, ResourceScope, SandboxCommand, SandboxLifecycleConfig, SandboxMount,
+        SandboxMountAccess, SandboxRequest, SandboxResourceShape, SandboxSpec,
+    };
+    let codex = codex_image.is_some();
+    let root = tempfile::Builder::new()
+        .prefix("tpl-")
+        .tempdir_in("/var/lib/exo")?;
+    let config = crate::FirecrackerConfig {
+        state_root: root.path().join("state"),
+        image_size_gib: if codex { 4 } else { 2 },
+        allowed_local_images: codex_image.iter().map(std::path::PathBuf::from).collect(),
+        workspace_size_gib: 1,
+        template_resource_slots: 2,
+        network_device_policy: crate::FirecrackerNetworkDevicePolicy::AllSandboxes,
+        ..Default::default()
+    };
+    let upstream = Upstream::start().await?;
+    let resolver = TestResolver::new();
+    let backend = crate::FirecrackerSandboxBackend::new(config.clone())
+        .await?
+        .with_egress(Some(resolver.clone()), Arc::new(upstream.config.clone()));
+    let request = SandboxRequest {
+        sandbox_id: "pristine-template".into(),
+        scope: ResourceScope::Global,
+        provider_state: None,
+        spec: SandboxSpec {
+            image: codex_image.unwrap_or_else(|| "docker.io/library/python:3.12-slim".into()),
+            resources: SandboxResourceShape::new(1, if codex { 1024 } else { 512 }),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            tcp_ports: vec![8765],
+            policy: SandboxNetworkPolicy::Disabled.into(),
+            default_workdir: "/home/exo/workspace".into(),
+        },
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(300)),
+        },
+    };
+    let command = |script: &str| SandboxCommand {
+        argv: vec!["python3".into(), "-c".into(), script.into()],
+        env: HashMap::from([("EXO_TEST_CODEX".into(), codex.to_string())]),
+        cwd: None,
+        display_argv: None,
+        timeout: Some(Duration::from_secs(30)),
+    };
+    let result: Result<()> = async {
+        let source = backend.acquire(request.clone()).await?;
+        let start = source.exec(&command(r#"
+import os, pathlib, subprocess, time, urllib.request
+pathlib.Path('prepared').write_text('prepared-server')
+with open('/tmp/server.log', 'w') as output:
+    subprocess.Popen(['python3', '-m', 'http.server', '8765'], stdout=output, stderr=output, start_new_session=True)
+for i in range(100):
+    try:
+        assert urllib.request.urlopen('http://127.0.0.1:8765/prepared').read() == b'prepared-server'
+        break
+    except OSError:
+        time.sleep(.05)
+else:
+    raise AssertionError('prepared server never became ready')
+if os.environ['EXO_TEST_CODEX'] == 'true':
+    with open('/tmp/codex.log', 'w') as output:
+        subprocess.Popen(['codex', 'exec-server', '--listen', 'ws://127.0.0.1:41255'], stdout=output, stderr=output, start_new_session=True)
+    os.environ['CODEX_EXEC_PORT'] = '41255'
+    for i in range(100):
+        if subprocess.run(['node', '/usr/local/bin/check-exec-server.mjs'], capture_output=True).returncode == 0:
+            break
+        time.sleep(.05)
+    else:
+        raise AssertionError('prepared Codex exec-server never became ready')
+"#)).await?;
+        ensure!(start.ok, "preparation failed: {}", start.stderr);
+        let snapshot = source.snapshot_template().await?;
+        backend.terminate(request.clone()).await?;
+        let source_dir = root.path().join("repository");
+        std::fs::create_dir(&source_dir)?;
+        std::fs::write(source_dir.join("source.txt"), "pristine")?;
+        let store = ResourceStore::image_store(&config.state_root, 1)?;
+        let resources = store.prepare(vec![ResourceDefinition {
+            name: "repository".into(), mount_path: "/home/exo/workspace/repository".into(),
+            mode: crate::FileSystemMountMode::ReadWrite,
+            source: ResourceSource::Directory { path: source_dir },
+        }])?;
+        let agent = crate::Uuid7::now();
+        let mut handles = Vec::new();
+        let mut ca_certificates = Vec::new();
+        let mut placeholders = Vec::new();
+        for index in 0..2 {
+            let thread = crate::Uuid7::now();
+            let mounts = backend.materialize_resources(MaterializeResourcesRequest {
+                agent, thread, resources: resources.clone(), archives: Default::default(),
+                credentials: vec![None], resume: false,
+            }).await?;
+            let mut allocation = request.clone();
+            allocation.sandbox_id = format!("template-clone-{index}");
+            allocation.scope = ResourceScope::Thread { agent_id: agent, thread_id: thread };
+            allocation.spec.policy = policy();
+            allocation.spec.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.spec.policy.credentials[0].networking = CredentialNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.spec.mounts = mounts.into_iter().map(|mount| SandboxMount {
+                host_path: mount.host_path.into(), guest_path: mount.mount_path, internal: true,
+                access: SandboxMountAccess::ReadWrite,
+            }).collect();
+            let started = std::time::Instant::now();
+            let handle = backend.acquire_from_snapshot(allocation.clone(), snapshot.clone()).await?;
+            println!("clone {index} restored in {:?}", started.elapsed());
+            let check = handle.exec(&command(r#"
+import os, pathlib, urllib.request
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+assert opener.open('http://127.0.0.1:8765/prepared').read() == b'prepared-server'
+request = urllib.request.Request('https://api.github.com/auth', headers={'Authorization': 'Bearer ' + os.environ['TEST_API_KEY']})
+assert opener.open(request).read() == b'authenticated-v1'
+assert pathlib.Path('repository/source.txt').read_text() == 'pristine'
+assert not pathlib.Path('repository/edit.txt').exists()
+pathlib.Path('repository/edit.txt').write_text('private edit')
+assert 'HTTPS_PROXY' not in os.environ
+print(__import__('hashlib').sha256(pathlib.Path(os.environ['SSL_CERT_FILE']).read_bytes()).hexdigest())
+print(os.environ['TEST_API_KEY'])
+"#)).await?;
+            ensure!(check.ok, "clone check failed: {} {}", check.stdout, check.stderr);
+            let mut lines = check.stdout.lines();
+            ca_certificates.push(lines.next().context("missing CA certificate hash")?.to_owned());
+            placeholders.push(lines.next().context("missing placeholder")?.to_owned());
+            let env = handle.command_environment().await?;
+            ensure!(env.get("TEST_API_KEY") == placeholders.last(), "shared command environment has stale credentials");
+            ensure!(!env.contains_key("HTTPS_PROXY"), "native command environment contains a routing proxy");
+            if codex {
+                let check = handle.exec(&SandboxCommand {
+                    argv: vec!["node".into(), "-e".into(), r#"
+const assert = require('node:assert/strict');
+const socket = new WebSocket('ws://127.0.0.1:41255');
+const pending = new Map();
+let nextId = 0;
+const exited = Promise.withResolvers();
+const timeout = setTimeout(() => { console.error('Codex process timed out'); process.exit(1); }, 15000);
+socket.addEventListener('message', event => {
+  const message = JSON.parse(event.data);
+  if (message.method === 'process/exited') exited.resolve(message.params);
+  const entry = pending.get(message.id);
+  if (entry) {
+    pending.delete(message.id);
+    if (message.error) entry.reject(new Error(message.error.message));
+    else entry.resolve(message.result);
+  }
+});
+function request(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = ++nextId;
+    pending.set(id, {resolve, reject});
+    socket.send(JSON.stringify({id, method, params}));
+  });
+}
+(async () => {
+  await new Promise((resolve, reject) => {
+    socket.addEventListener('open', resolve, {once: true});
+    socket.addEventListener('error', reject, {once: true});
+  });
+  await request('initialize', {clientName: 'native-template-test'});
+  socket.send(JSON.stringify({method: 'initialized', params: {}}));
+  await request('process/start', {
+    processId: 'fresh-credentials', cwd: 'file:///home/exo/workspace', tty: false,
+    argv: ['python3', '-c', "import os, urllib.request; assert 'HTTPS_PROXY' not in os.environ; request = urllib.request.Request('https://api.github.com/auth', headers={'Authorization': 'Bearer ' + os.environ['TEST_API_KEY']}); assert urllib.request.urlopen(request, timeout=10).read() == b'authenticated-v1'"],
+    env: process.env,
+  });
+  assert.equal((await exited.promise).exitCode, 0);
+  clearTimeout(timeout);
+  socket.close();
+})().catch(error => { console.error(error); process.exit(1); });
+"#.into()],
+                    env: HashMap::new(), display_argv: None, cwd: None,
+                    timeout: Some(Duration::from_secs(30)),
+                }).await?;
+                ensure!(check.ok, "prepared Codex did not forward with fresh credentials: {} {}", check.stdout, check.stderr);
+                println!("clone {index}: prestarted Codex used fresh native credentials");
+            }
+            handles.push((allocation, handle));
+        }
+        ensure!(ca_certificates[0] != ca_certificates[1], "clones share a CA certificate");
+        ensure!(placeholders[0] != placeholders[1], "clones share credentials");
+        *resolver.value.write().await = None;
+        for (_, handle) in &handles {
+            let check = handle.exec(&command(r#"
+import os, pathlib, urllib.request, urllib.error
+assert pathlib.Path('repository/edit.txt').read_text() == 'private edit'
+try:
+    urllib.request.urlopen(urllib.request.Request('https://api.github.com/auth', headers={'Authorization': 'Bearer ' + os.environ['TEST_API_KEY']}))
+    raise AssertionError('revoked credential was accepted')
+except urllib.error.HTTPError:
+    pass
+"#)).await?;
+            ensure!(check.ok, "revocation check failed: {}", check.stderr);
+        }
+        backend.delete_snapshot(snapshot).await?;
+        println!("PASS prepared process, private disks, fresh CA/placeholder and revocation across two restores");
+        Ok(())
+    }.await;
+    backend.terminate_all().await?;
+    result
+}
+
+#[tokio::test]
+async fn native_tls_uses_the_external_proxys_identity_and_credential_resolver() -> Result<()> {
+    let upstream = Upstream::start().await?;
+    let authorizer = TestProxyAuthorizer::new(&upstream)?;
+    let placeholder = authorizer.sessions["first"].state.bindings[0]
+        .placeholder
+        .clone();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let address = listener.local_addr()?;
+    let cancel = CancellationToken::new();
+    let server = tokio::spawn(serve_connect_proxy(
+        listener,
+        authorizer.clone(),
+        cancel.clone(),
+    ));
+    for (password, credentials, expected) in [
+        ("first", true, Some("authenticated-v1")),
+        ("wrong", true, None),
+        ("first", false, Some("anonymous")),
+    ] {
+        let config = ExternalProxyConfig {
+            url: format!("http://{address}").parse()?,
+            username: "sandbox".into(),
+            password: password.into(),
+            ca_pem: authorizer.ca_pem.clone(),
+            environment: HashMap::from([("TEST_API_KEY".into(), placeholder.clone())]),
+        };
+        let mut policy = policy();
+        if !credentials {
+            policy.credentials.clear();
+        }
+        let state = State::with_external_proxy(identity("worker"), policy, config)?;
+        assert!(state.resolver.is_none());
+        let transport = Arc::new(
+            LocalEgressTransport::with_config(
+                crate::EgressListenConfig {
+                    bind_address: host_ip()?,
+                    advertised_address: host_ip()?,
+                    http_port: 0,
+                    https_port: 0,
+                    dns_port: 0,
+                },
+                &["api.test".into()],
+            )
+            .await?,
+        );
+        let proxy =
+            EgressProxy::start_with_transport(transport, state, CancellationToken::new()).await?;
+        proxy.bind_source(host_ip()?).await?;
+        assert_eq!(proxy.ca_pem(), authorizer.ca_pem);
+        assert_eq!(
+            proxy.environment().contains_key("TEST_API_KEY"),
+            credentials
+        );
+        let mut request = client(&proxy)?
+            .get("https://api.test/auth")
+            .header("connection", "close");
+        if credentials {
+            request = request.header("authorization", format!("Bearer {placeholder}"));
+        }
+        let response = request.send().await;
+        if let Some(expected) = expected {
+            assert_eq!(response?.text().await?, expected);
+        } else {
+            assert!(response.is_err());
+        }
+        proxy.shutdown().await?;
+    }
+    assert_eq!(upstream.connections.load(Ordering::SeqCst), 1);
+    cancel.cancel();
+    server.await??;
     Ok(())
 }
