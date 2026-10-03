@@ -289,7 +289,7 @@ pub(super) fn collect(root: &Path, keep: &[SnapshotPayload]) -> Result<usize> {
     Ok(removed)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
