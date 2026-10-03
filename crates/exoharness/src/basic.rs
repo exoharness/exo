@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
@@ -14,7 +14,10 @@ use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
+use tokio::sync::{
+    Mutex as AsyncMutex, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard,
+    RwLock as AsyncRwLock, mpsc,
+};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -66,6 +69,10 @@ use egress::LocalEgressResolver;
 #[path = "basic/sessions.rs"]
 mod sessions;
 use sessions::LocalSessions;
+
+#[cfg(test)]
+#[path = "basic/resource_tests.rs"]
+mod resource_tests;
 
 const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
 const UNFINISHED_TURNS_DIR: &str = "recovery/unfinished_turns";
@@ -476,6 +483,7 @@ struct BasicExoHarnessInner {
     resources: crate::resources::ResourceStore,
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
+    resource_locks: Mutex<HashMap<ResourceScope, Weak<AsyncRwLock<()>>>>,
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
     sandbox_registry: HashMap<SandboxProvider, SandboxBackendRegistration>,
     sandbox_policy: Option<crate::EgressPolicy>,
@@ -488,6 +496,43 @@ struct BasicExoHarnessInner {
 }
 
 impl BasicExoHarnessInner {
+    fn resource_lock(&self, scope: ResourceScope) -> Arc<AsyncRwLock<()>> {
+        let mut locks = self
+            .resource_locks
+            .lock()
+            .expect("resource lock map poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        match locks.get(&scope).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(AsyncRwLock::new(()));
+                locks.insert(scope, Arc::downgrade(&lock));
+                lock
+            }
+        }
+    }
+
+    // Lock order is agent resources, thread resources, then write_lock. Waiting
+    // for resource I/O must never hold the global metadata lock.
+    async fn lock_thread_resources(
+        &self,
+        agent_id: AgentId,
+        thread_id: ConversationId,
+    ) -> (OwnedRwLockReadGuard<()>, OwnedRwLockWriteGuard<()>) {
+        let agent = self
+            .resource_lock(ResourceScope::Agent { agent_id })
+            .read_owned()
+            .await;
+        let thread = self
+            .resource_lock(ResourceScope::Thread {
+                agent_id,
+                thread_id,
+            })
+            .write_owned()
+            .await;
+        (agent, thread)
+    }
+
     async fn sandbox_backend_for_provider(
         self: &Arc<Self>,
         provider: SandboxProvider,
@@ -1034,6 +1079,7 @@ impl BasicExoHarness {
                 vaults,
                 storage,
                 write_lock: AsyncMutex::new(()),
+                resource_locks: Mutex::new(HashMap::new()),
                 subscribers: Mutex::new(HashMap::new()),
                 sandbox_policy,
                 sandbox_registry: registry,
@@ -1273,6 +1319,11 @@ impl ExoHarness for BasicExoHarness {
     async fn delete_agent(&self, id: &AgentId) -> Result<bool> {
         self.check(ResourceScope::Global).await?;
         self.check(ResourceScope::Agent { agent_id: *id }).await?;
+        let _resources = self
+            .inner
+            .resource_lock(ResourceScope::Agent { agent_id: *id })
+            .write_owned()
+            .await;
         let agent_dir = self.agents_dir().join(id.to_string());
         if self.inner.storage.list_keys(&agent_dir).await?.is_empty() {
             return Ok(false);
@@ -1835,6 +1886,11 @@ impl AgentHandle for BasicAgentHandle {
                 agent_id: self.record.id,
             })
             .await?;
+        let _resources = self
+            .harness
+            .inner
+            .lock_thread_resources(self.record.id, *id)
+            .await;
         let conversation_dir = self.conversations_dir().join(id.to_string());
         if self
             .harness
@@ -3442,6 +3498,11 @@ impl ConversationHandle for BasicConversationHandle {
                 thread_id: self.record.id,
             })
             .await?;
+        let _resources = self
+            .harness
+            .inner
+            .lock_thread_resources(self.agent_id, self.record.id)
+            .await;
         let _guard = self.harness.inner.write_lock.lock().await;
         anyhow::ensure!(
             !self
@@ -3679,6 +3740,11 @@ impl OwnedThreadHandle<'_> {
             .await?;
         environment.validate()?;
         self.harness.check_environment(&environment).await?;
+        let _resources = self
+            .harness
+            .inner
+            .lock_thread_resources(self.agent_id, self.record.id)
+            .await;
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         if record.environment.as_ref() != Some(&environment) {
@@ -3768,6 +3834,11 @@ impl OwnedThreadHandle<'_> {
         let store = self.harness.inner.resources.clone();
         let agent = self.agent_id;
         let thread = self.record.id;
+        let resources_guard = self
+            .harness
+            .inner
+            .lock_thread_resources(agent, thread)
+            .await;
         let resume = store.has_thread(agent, thread);
         let external = provider == SandboxProvider::Firecracker;
         if resume {
@@ -3835,12 +3906,17 @@ impl OwnedThreadHandle<'_> {
             // The task can outlive a cancelled request; retain ownership until
             // materialization finishes even if runtime shutdown has started.
             let _lease = lease;
-            let _guard = harness.inner.write_lock.lock().await;
-            harness
-                .inner
-                .storage
-                .get_json::<ConversationRecord>(record)
-                .await?;
+            // Retain resource ownership in the detached task too, so deletion
+            // cannot race a materializer whose caller has been cancelled.
+            let _resources = resources_guard;
+            {
+                let _guard = harness.inner.write_lock.lock().await;
+                harness
+                    .inner
+                    .storage
+                    .get_json::<ConversationRecord>(record)
+                    .await?;
+            }
             let runtime = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
                 let _lease = _lease;
