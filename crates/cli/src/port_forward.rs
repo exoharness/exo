@@ -2,7 +2,10 @@ use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use executor::ConversationHandle;
-use tokio::{io::copy_bidirectional, net::TcpListener, task::JoinSet};
+use tokio::{io::copy_bidirectional, net::TcpListener};
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) async fn run(
     conversation: Arc<dyn ConversationHandle>,
@@ -47,33 +50,27 @@ async fn forward(
     port: u16,
     listener: TcpListener,
 ) -> Result<()> {
-    let mut connections = JoinSet::new();
-    loop {
-        tokio::select! {
-            result = listener.accept() => {
-                let (mut client, _) = result?;
+    tokio::select! {
+        result = crate::local_net::serve_connections(
+            || async { Ok(listener.accept().await?.0) },
+            move |mut client| {
                 let conversation = Arc::clone(&conversation);
                 let sandbox_id = sandbox_id.clone();
-                connections.spawn(async move {
+                async move {
                     let mut upstream = conversation
                         .connect_sandbox_tcp(sandbox_id, port)
                         .await?
                         .context("sandbox provider did not return a TCP connection")?;
                     copy_bidirectional(&mut client, &mut upstream).await?;
                     Ok::<(), anyhow::Error>(())
-                });
-            }
-            result = connections.join_next(), if !connections.is_empty() => {
-                match result {
-                    Some(Ok(Err(error))) => eprintln!("port forward connection failed: {error:#}"),
-                    Some(Err(error)) => eprintln!("port forward task failed: {error}"),
-                    _ => {}
                 }
-            }
-            result = tokio::signal::ctrl_c() => {
-                result?;
-                return Ok(());
-            }
+            },
+            "port forward",
+            |error| eprintln!("port forward connection failed: {error:#}"),
+        ) => result,
+        result = tokio::signal::ctrl_c() => {
+            result?;
+            Ok(())
         }
     }
 }

@@ -2,6 +2,7 @@ mod env;
 #[cfg(test)]
 mod env_tests;
 mod environment;
+mod local_net;
 mod managed_agents;
 #[cfg(test)]
 mod mount_tests;
@@ -79,7 +80,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Args)]
 struct RuntimeArgs {
     /// Directory containing local Exo state (defaults to ~/.exo).
     #[arg(long, global = true)]
@@ -96,9 +97,9 @@ struct RuntimeArgs {
 }
 
 impl RuntimeArgs {
-    fn state_root(&self, home: Option<&Path>) -> Result<PathBuf> {
-        match &self.root {
-            Some(root) => Ok(root.clone()),
+    fn state_root(root: Option<&Path>, home: Option<&Path>) -> Result<PathBuf> {
+        match root {
+            Some(root) => Ok(root.to_owned()),
             None => {
                 let root = home
                     .context("HOME is not set; provide --home or --root for local Exo state")?
@@ -416,7 +417,7 @@ fn read_config_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> R
     .with_context(|| format!("parsing {}", path.display()))
 }
 
-fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
+fn build_exo_config(cli: &Cli, state_root: &Path) -> Result<BasicExoHarnessConfig> {
     let secret_backend = match cli
         .runtime()
         .secret_backend
@@ -445,7 +446,7 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         .map(|path| read_config_file(path))
         .transpose()?;
     Ok(BasicExoHarnessConfig {
-        root: cli.state_root()?.join("exoharness"),
+        root: state_root.join("exoharness"),
         secret_backend,
         sandbox_default: default_local_sandbox_provider(),
         sandbox_policy,
@@ -533,7 +534,7 @@ impl Cli {
     runtime_accessor!(runtime_mut, mut);
 
     fn state_root(&self) -> Result<PathBuf> {
-        self.runtime().state_root(self.home.as_deref())
+        RuntimeArgs::state_root(self.runtime().root.as_deref(), self.home.as_deref())
     }
 
     fn execution(&self) -> Option<&ExecutionArgs> {
@@ -1109,11 +1110,32 @@ async fn run_selected(
     {
         bail!("--egress-policy is local-only; put the policy in the remote environment definition");
     }
-    let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
+    let state_root = local.then(|| cli.state_root()).transpose()?;
+    let _server_root = match (state_root.as_deref(), &cli.command) {
+        (Some(root), Commands::Serve { .. }) => Some(session::lock_server_root(root)?),
+        _ => None,
+    };
+    let local_root = if session::needs_local_session(&cli.command) {
+        state_root
+            .as_deref()
+            .map(session::LocalRootLease::acquire)
+            .transpose()?
+            .map(Arc::new)
+    } else {
+        None
+    };
+    let harness = providers::runtime(
+        &cli,
+        http_client,
+        definition.as_ref(),
+        &env,
+        state_root.as_deref(),
+    )
+    .await?;
     let env_vars = env.into_vars();
     let home = cli.home.clone();
-    let runtime_args = cli.runtime().clone();
-    let mut session_thread = None;
+    let remote_root = cli.runtime().root.clone();
+    let mut session = None;
     let result: Result<()> = async {
     match cli.command {
         Commands::Environment { command, .. } => environment::run(harness.exoharness_handle().as_ref(), command).await?,
@@ -1133,15 +1155,17 @@ async fn run_selected(
                 definition.as_ref(),
                 &thread,
                 execution.egress_policy.is_some(),
+                local_root.clone(),
+                &mut session,
             )
             .await?;
             let _previews = previews::PreviewSession::start(
                 harness.as_ref(), agent.as_ref(), Arc::clone(&conversation),
-                || runtime_args.state_root(home.as_deref()),
+                || match &state_root {
+                    Some(root) => Ok(root.clone()),
+                    None => RuntimeArgs::state_root(remote_root.as_deref(), home.as_deref()),
+                },
             ).await?;
-            if local {
-                session_thread = Some(Arc::clone(&conversation));
-            }
             if let Some(provider) = &selected_provider {
                 provider_store.pin_thread(
                     conversation.record().slug.clone(),
@@ -1168,8 +1192,8 @@ async fn run_selected(
                 run_chat_repl(Arc::clone(&harness), agent, conversation, thread.verbosity).await?;
             }
         }
-        Commands::Serve { args, runtime } => {
-            serve::run(harness.clone(), &runtime.state_root(home.as_deref())?, *args).await?;
+        Commands::Serve { args, .. } => {
+            serve::run(harness.clone(), state_root.as_deref().context("server requires local state")?, *args).await?;
         }
         Commands::Agent { command, .. } => match command {
             AgentCommands::Run { .. } => unreachable!(),
@@ -1705,8 +1729,8 @@ async fn run_selected(
                         .get_conversation(agent_handle.as_ref(), &conversation)
                         .await?
                         .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
-                    if local {
-                        session_thread = Some(Arc::clone(&conversation));
+                    if let Some(root) = &local_root {
+                        session = Some(session::LocalSession::start(root.clone(), agent_handle.record().id, Arc::clone(&conversation)).await?);
                     }
                     let output = run_sandbox_shell_command(
                         agent_handle.as_ref(),
@@ -1893,12 +1917,12 @@ async fn run_selected(
             } => {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
-                if local {
-                    session_thread = Some(Arc::clone(&conversation));
+                let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                if let Some(root) = &local_root {
+                    session = Some(session::LocalSession::start(root.clone(), agent.record().id, Arc::clone(&conversation)).await?);
                 }
                 let previous_messages =
                     executor::materialize_conversation_messages(conversation.as_ref()).await?;
-                let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 send_conversation_wakeup(harness.as_ref(), &agent, &conversation, prompt).await?;
                 let messages =
                     executor::materialize_conversation_messages(conversation.as_ref()).await?;
@@ -1927,7 +1951,9 @@ async fn run_selected(
     Ok(())
     }.await;
     let shutdown = harness.shutdown().await;
-    let stopped = session::stop_session_sandboxes(session_thread.as_deref()).await;
+    let stopped =
+        session::stop_session_sandboxes(session.as_ref().map(|session| session.thread.as_ref()))
+            .await;
     result?;
     shutdown?;
     stopped
@@ -2623,7 +2649,7 @@ mod command_tests {
             "list",
         ])?;
         assert_eq!(
-            build_exo_config(&cli)?.root,
+            build_exo_config(&cli, &cli.state_root()?)?.root,
             saved.canonicalize()?.join("exoharness")
         );
         Ok(())

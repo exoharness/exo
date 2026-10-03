@@ -19,6 +19,7 @@ pub(crate) async fn runtime(
     client: Option<RuntimeClient>,
     definition: Option<&exo_managed_agents::AgentDefinition>,
     env: &crate::env::CliEnvironment,
+    state_root: Option<&Path>,
 ) -> Result<std::sync::Arc<executor::Runtime>> {
     use crate::{AgentCommands, Commands, HarnessSelection, managed_agents};
     use executor::managed_agents::LocalAgentSetup;
@@ -56,7 +57,10 @@ pub(crate) async fn runtime(
             .map(managed_agents::harness_selection)
             .transpose()?,
     };
-    let config = crate::build_exo_config(cli)?;
+    let config = crate::build_exo_config(
+        cli,
+        state_root.context("local provider requires a state root")?,
+    )?;
     let env_vars = env.clone().into_vars();
     let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
     if let Some(reference) = thread.and_then(|args| args.agent.as_deref())

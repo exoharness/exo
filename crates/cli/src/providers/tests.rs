@@ -51,6 +51,7 @@ async fn http_runtime_does_not_initialize_local_state_or_resolve_remote_harnesse
         Some(RuntimeClient::new("http://127.0.0.1:1/exo")?),
         Some(&definition),
         &crate::env::CliEnvironment::default(),
+        None,
     )
     .await?;
     assert!(!root.exists());

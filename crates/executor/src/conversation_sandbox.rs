@@ -165,8 +165,6 @@ async fn conversation_sandbox_candidates(
             turn_id: None,
             types: Some(vec![
                 EventKind::SANDBOX_CREATED,
-                EventKind::SANDBOX_STARTED,
-                EventKind::SANDBOX_STOPPED,
                 EventKind::SANDBOX_ATTACHED,
                 EventKind::SANDBOX_DETACHED,
             ]),
@@ -211,24 +209,6 @@ async fn conversation_sandbox_candidates(
             EventData::SandboxAttached { sandbox_id, .. } => {
                 candidates.push(ConversationSandboxCandidate::Attached { id: sandbox_id });
             }
-            EventData::SandboxStarted { sandbox_id, .. } => {
-                for candidate in &mut candidates {
-                    if let ConversationSandboxCandidate::Created(sandbox) = candidate
-                        && sandbox.id == sandbox_id
-                    {
-                        sandbox.running = true;
-                    }
-                }
-            }
-            EventData::SandboxStopped { sandbox_id } => {
-                for candidate in &mut candidates {
-                    if let ConversationSandboxCandidate::Created(sandbox) = candidate
-                        && sandbox.id == sandbox_id
-                    {
-                        sandbox.running = false;
-                    }
-                }
-            }
             EventData::SandboxDetached { sandbox_id, .. } => {
                 inactive.insert(sandbox_id);
             }
@@ -237,7 +217,15 @@ async fn conversation_sandbox_candidates(
     }
     candidates.retain(|candidate| !inactive.contains(candidate.id()));
     let owned = conversation.list_sandboxes().await?;
-    candidates.retain(|candidate| owned.iter().any(|sandbox| sandbox.id == candidate.id()));
+    candidates.retain_mut(|candidate| {
+        let Some(record) = owned.iter().find(|record| record.id == candidate.id()) else {
+            return false;
+        };
+        if let ConversationSandboxCandidate::Created(sandbox) = candidate {
+            sandbox.running = record.running;
+        }
+        true
+    });
     Ok(candidates)
 }
 
@@ -285,8 +273,7 @@ pub(crate) async fn conversation_sandboxes(
         .into_iter()
         .filter_map(|candidate| match candidate {
             ConversationSandboxCandidate::Created(sandbox) if sandbox.running => Some(*sandbox),
-            ConversationSandboxCandidate::Created(_) => None,
-            ConversationSandboxCandidate::Attached { .. } => None,
+            _ => None,
         })
         .collect())
 }

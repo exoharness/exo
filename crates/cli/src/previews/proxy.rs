@@ -10,7 +10,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use executor::BrowserPreview;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
@@ -35,7 +34,14 @@ struct ProxyAddress {
 pub(super) struct Registration {
     pub gateway: PathBuf,
     pub portal: String,
-    pub previews: Vec<BrowserPreview>,
+    pub services: Vec<Service>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Service {
+    pub host: String,
+    pub name: String,
+    pub port: u16,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -149,7 +155,7 @@ async fn existing_proxy(directory: &Path) -> Result<Option<UnixStream>> {
 
 #[derive(Clone)]
 enum Route {
-    Portal(Vec<BrowserPreview>),
+    Portal(Vec<Service>),
     Service { gateway: PathBuf, port: u16 },
 }
 
@@ -176,20 +182,16 @@ impl Lease {
     fn register(&mut self, registration: Registration) -> Result<()> {
         let mut routes = BTreeMap::from([(
             registration.portal,
-            Route::Portal(registration.previews.clone()),
+            Route::Portal(registration.services.clone()),
         )]);
-        for preview in registration.previews {
-            let host = preview
-                .url
-                .strip_prefix("http://")
-                .context("preview URL must use HTTP")?;
+        for service in registration.services {
             ensure!(
                 routes
                     .insert(
-                        host.to_owned(),
+                        service.host,
                         Route::Service {
                             gateway: registration.gateway.clone(),
-                            port: preview.port,
+                            port: service.port,
                         }
                     )
                     .is_none(),
@@ -229,7 +231,7 @@ pub(crate) async fn run(directory: &Path) -> Result<()> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
         Err(error) => return Err(error.into()),
     }
-    let sockets = tempfile::tempdir_in("/tmp")?;
+    let sockets = crate::local_net::socket_directory()?;
     let socket = sockets.path().join("proxy.sock");
     let control = UnixListener::bind(&socket)?;
     let listener = saved_listener(&directory.join("listener.json")).await?;
@@ -354,8 +356,9 @@ async fn handle(mut client: TcpStream, state: Arc<Mutex<State>>) -> Result<()> {
         Some(Route::Portal(previews)) => {
             let links = previews
                 .iter()
-                .map(|preview| {
-                    format!("<tr><td><a href=\"{}\">{}</a></td><td>{}</td><td><a href=\"{}\">{}</a></td></tr>", preview.url, preview.name, preview.port, preview.url, preview.url)
+                .map(|service| {
+                    let url = format!("http://{}", service.host);
+                    format!("<tr><td><a href=\"{url}\">{}</a></td><td>{}</td><td><a href=\"{url}\">{url}</a></td></tr>", service.name, service.port)
                 })
                 .collect::<String>();
             let body = format!(

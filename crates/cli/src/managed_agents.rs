@@ -14,6 +14,23 @@ use sha2::{Digest, Sha256};
 use crate::render::Verbosity;
 use crate::{Commands, HarnessSelection, SandboxProviderArg};
 
+fn validate_new_thread_slug(slug: &str) -> Result<()> {
+    anyhow::ensure!(
+        slug.parse::<exoharness::Uuid7>().is_err(),
+        "thread {slug} not found; use a name to create a new thread"
+    );
+    anyhow::ensure!(
+        !slug.is_empty()
+            && slug.len() <= 128
+            && slug.as_bytes()[0].is_ascii_alphanumeric()
+            && slug
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "new thread names must be 1–128 ASCII letters, digits, hyphens or underscores, starting with a letter or digit"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Args)]
 pub struct ThreadArgs {
     /// Sync a saved agent from a Markdown file and start or resume a saved thread.
@@ -139,6 +156,8 @@ pub async fn open_thread(
     definition: Option<&AgentDefinition>,
     args: &ThreadArgs,
     egress_policy_selected: bool,
+    local_root: Option<Arc<crate::session::LocalRootLease>>,
+    session: &mut Option<crate::session::LocalSession>,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let root = runtime.exoharness_handle();
     let mut environment = match (&args.environment_file, &args.environment) {
@@ -226,11 +245,25 @@ pub async fn open_thread(
         environment.validate()?;
     }
     let slug = args.thread.clone().unwrap_or_else(crate::generate_fun_slug);
-    anyhow::ensure!(!slug.trim().is_empty(), "thread name must not be empty");
+    if saved_thread.is_none() {
+        validate_new_thread_slug(&slug)?;
+    }
     let reference = saved_thread
         .as_ref()
         .map(|thread| thread.record().id.to_string());
-    eprintln!("Opening thread...");
+    if let Some(root) = &local_root
+        && let Some(thread) = &saved_thread
+    {
+        *session = Some(
+            crate::session::LocalSession::start(root.clone(), agent.record().id, thread.clone())
+                .await?,
+        );
+    }
+    if reference.is_some() {
+        eprintln!("Opening thread...");
+    } else {
+        eprintln!("Creating thread {slug}...");
+    }
     let opened = runtime
         .open_managed_thread(
             &agent,
@@ -243,6 +276,14 @@ pub async fn open_thread(
             },
         )
         .await?;
+    if let Some(root) = local_root
+        && session.is_none()
+    {
+        *session = Some(
+            crate::session::LocalSession::start(root, agent.record().id, opened.thread.clone())
+                .await?,
+        );
+    }
     println!("agent: {} ({})", agent.record().slug, agent.record().id);
     println!(
         "thread: {} ({})",

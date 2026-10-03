@@ -758,6 +758,7 @@ pub struct SandboxRecord {
     pub image: String,
     pub tcp_ports: Vec<u16>,
     pub running: bool,
+    pub attached: bool,
 }
 
 pub(crate) fn canonical_egress_host(host: &str) -> Result<String> {

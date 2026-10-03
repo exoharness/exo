@@ -125,7 +125,8 @@ async fn open_configured_thread(
     args: &ThreadArgs,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let runtime = configured_runtime(runtime, definition, args)?;
-    super::open_thread(&runtime, definition, args, false).await
+    let mut session = None;
+    super::open_thread(&runtime, definition, args, false, None, &mut session).await
 }
 
 fn thread_args(agent: &str) -> ThreadArgs {
@@ -142,6 +143,55 @@ fn thread_args(agent: &str) -> ThreadArgs {
         mounts: Vec::new(),
         verbosity: Verbosity::Minimal,
     }
+}
+
+#[tokio::test]
+async fn rejected_local_session_does_not_reconfigure_an_open_thread() -> Result<()> {
+    let temp = TempDir::new()?;
+    let runtime = harness(
+        &temp.path().join("state"),
+        Arc::new(RecordingModel::default()),
+    )
+    .await?;
+    let definition = AgentDefinition::parse(SOURCE.to_string())?;
+    let mut args = thread_args("unused");
+    let source = temp.path().join("agent.md");
+    std::fs::write(&source, SOURCE)?;
+    args.agent_file = Some(source);
+    args.agent = None;
+    let (agent, thread) = open_configured_thread(&runtime, Some(&definition), &args).await?;
+    let root = Arc::new(crate::session::LocalRootLease::acquire(temp.path())?);
+    let _active =
+        crate::session::LocalSession::start(root.clone(), agent.record().id, thread.clone())
+            .await?;
+    let before = executor::get_conversation_model_override(thread.as_ref()).await?;
+    let mut args = thread_args(&agent.record().slug);
+    args.thread = Some(thread.record().slug.clone());
+    args.model = Some("changed-model".into());
+    let configured = configured_runtime(&runtime, None, &args)?;
+    let mut rejected_session = None;
+    let error = super::open_thread(
+        &configured,
+        None,
+        &args,
+        false,
+        Some(root),
+        &mut rejected_session,
+    )
+    .await
+    .err()
+    .context("second session should be rejected")?;
+    assert!(
+        error
+            .to_string()
+            .contains("already has a local CLI session")
+    );
+    assert!(rejected_session.is_none());
+    assert_eq!(
+        executor::get_conversation_model_override(thread.as_ref()).await?,
+        before
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -276,6 +326,21 @@ async fn file_runs_reuse_saved_agents_and_mounts_stay_on_threads() -> Result<()>
     assert_eq!(named.record().name, "missing");
     let (_, resumed) = open_configured_thread(runtime.as_ref(), None, &resume).await?;
     assert_eq!(named.record().id, resumed.record().id);
+    for name in [
+        "bad/name",
+        "two words",
+        "",
+        "-starts-with-hyphen",
+        "01a10310-447a-76e0-9d99-fde61956321b",
+    ] {
+        resume.thread = Some(name.into());
+        assert!(
+            open_configured_thread(runtime.as_ref(), None, &resume)
+                .await
+                .is_err(),
+            "created invalid thread {name:?}"
+        );
+    }
     assert_eq!(managed::list_threads(first.as_ref()).await?.len(), 3);
     Ok(())
 }

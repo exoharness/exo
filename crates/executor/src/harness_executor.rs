@@ -313,14 +313,13 @@ impl Runtime {
             if let Some(url) = &thread_config.browser_preview_url {
                 previews.push_str(&format!("Sandbox services page: {url}\n"));
             }
-            previews.push_str("Exo's local HTTP proxy routes each hostname to a service in this sandbox. All previews share one browser port. The services page lists clickable links for every published port.\n");
             for preview in &thread_config.browser_previews {
                 previews.push_str(&format!(
                     "- {} (guest TCP port {}): {}\n",
                     preview.name, preview.port, preview.url
                 ));
             }
-            previews.push_str("Use these URLs for user-facing links and browser API/CORS configuration, preserving paths, query parameters and fragments. Inside the sandbox, use the original guest ports. Start the services before opening their links; a 502 means the service could not be reached. Previews remain available while the user's CLI session is open.");
+            previews.push_str("Use these URLs for browser links, API URLs, and CORS origins; preserve paths, queries, and fragments. Inside the sandbox use guest ports. Start the services first; a 502 means a service is unreachable. Previews require the CLI session to stay open.");
             agent_config
                 .instructions
                 .push(crate::harness_helpers::system_message(&previews));

@@ -101,6 +101,7 @@ type SandboxBackendFactory = Arc<
 pub struct SandboxBackendRegistration {
     provider: SandboxProvider,
     is_local: bool,
+    retains_disk_when_stopped: bool,
     factory: SandboxBackendFactory,
 }
 
@@ -128,10 +129,13 @@ impl SandboxBackendRegistration {
         backend: Arc<dyn ManagedSandboxBackend>,
     ) -> Self {
         let is_local = backend.is_local();
-        Self::from_factory(provider, is_local, move |_| {
+        let retains_disk_when_stopped = backend.retains_disk_when_stopped();
+        let mut registration = Self::from_factory(provider, is_local, move |_| {
             let backend = Arc::clone(&backend);
             Box::pin(async move { Ok(backend) })
-        })
+        });
+        registration.retains_disk_when_stopped = retains_disk_when_stopped;
+        registration
     }
 
     pub fn apple_container() -> Self {
@@ -193,7 +197,7 @@ impl SandboxBackendRegistration {
         // the same shape daytona/e2b use for their credentials. The result is
         // cached per provider by `sandbox_backend_for_provider`, so this runs
         // once per harness and not once per sandbox.
-        Self::from_factory(SandboxProvider::Smolvm, true, |inner| {
+        let mut registration = Self::from_factory(SandboxProvider::Smolvm, true, |inner| {
             Box::pin(async move {
                 let config = inner.smolvm_config_from_binding().await?;
                 let resolver = Arc::new(LocalEgressResolver {
@@ -203,7 +207,9 @@ impl SandboxBackendRegistration {
                     crate::SmolvmSandboxBackend::from_config(config).with_credentials(resolver),
                 ) as Arc<dyn ManagedSandboxBackend>)
             })
-        })
+        });
+        registration.retains_disk_when_stopped = true;
+        registration
     }
 
     pub fn daytona(spec: DaytonaBackendSpec) -> Self {
@@ -307,6 +313,7 @@ impl SandboxBackendRegistration {
         Self {
             provider,
             is_local,
+            retains_disk_when_stopped: false,
             factory: Arc::new(factory),
         }
     }
@@ -1909,8 +1916,19 @@ fn paginate_conversation_records(
 }
 
 // Deletion helpers shared by delete_agent and delete_conversation: an owner's
-// storage prefix must never be removed while it owns sandbox disks, including
-// stopped VMs that will otherwise outlive every record that could find them.
+// storage prefix must never be removed while it owns running sandboxes or
+// retained disks. Other stopped providers keep their existing deletion
+// behavior: deleting metadata does not require that provider's credentials.
+fn requires_sandbox_termination(harness: &BasicExoHarness, sandbox: &StoredSandbox) -> bool {
+    sandbox.attachment.is_none()
+        && (sandbox.running
+            || harness
+                .inner
+                .sandbox_registry
+                .get(&sandbox.provider)
+                .is_some_and(|registration| registration.retains_disk_when_stopped))
+}
+
 async fn terminate_managed_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()> {
     for sandbox in scope
         .harness
@@ -1919,7 +1937,7 @@ async fn terminate_managed_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Re
         .list_json_matching_suffix::<StoredSandbox>(scope.sandboxes_dir(), ".json")
         .await?
     {
-        if sandbox.attachment.is_none() {
+        if requires_sandbox_termination(scope.harness, &sandbox) {
             scope.terminate_sandbox(sandbox.id).await?;
         }
     }
@@ -1942,7 +1960,10 @@ async fn prepare_sandbox_scopes_for_deletion(
             .storage
             .list_json_matching_suffix::<StoredSandbox>(scope.sandboxes_dir(), ".json")
             .await?;
-        if sandboxes.iter().any(|sandbox| sandbox.attachment.is_none()) {
+        if sandboxes
+            .iter()
+            .any(|sandbox| requires_sandbox_termination(harness, sandbox))
+        {
             return Ok(false);
         }
         sandbox_ids.extend(sandboxes.into_iter().map(|sandbox| sandbox.id));
@@ -2362,16 +2383,40 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .running_sandboxes
             .lock()
             .await
+            .get(&id)
+            .cloned();
+        let backend = self
+            .harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider.clone())
+            .await?;
+        if let Some(handle) = sandbox_handle {
+            backend.stop_existing(&id, &handle).await?;
+        } else {
+            let provider_state = if backend.stop_requires_provider_state() {
+                let state_key = sandbox_provider_state_key(self.owner, &id, &sandbox);
+                load_sandbox_provider_state(
+                    self.harness,
+                    &self.owner_dir,
+                    self.owner,
+                    &id,
+                    sandbox.provider.clone(),
+                    &state_key,
+                )
+                .await?
+            } else {
+                None
+            };
+            backend
+                .stop(sandbox_request(self.owner, &id, &sandbox, provider_state))
+                .await?;
+        }
+        self.harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
             .remove(&id);
-        let sandbox_handle = match sandbox_handle {
-            Some(sandbox_handle) => sandbox_handle,
-            None => {
-                create_sandbox_handle(self.harness, &self.owner_dir, self.owner, &id, &sandbox)
-                    .await?
-                    .0
-            }
-        };
-        sandbox_handle.stop().await?;
 
         sandbox.running = false;
         self.harness
@@ -2853,15 +2898,17 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         {
             return Ok(handle);
         }
-        let (handle, provider_state_event) = create_sandbox_handle_for_access(
-            self.harness,
-            &self.owner_dir,
-            self.owner,
-            id,
-            sandbox,
-            SandboxHandleAccess::Tcp,
-        )
-        .await?;
+        if sandbox.provider == SandboxProvider::Smolvm && sandbox.attachment.is_none() {
+            return self
+                .harness
+                .inner
+                .sandbox_backend_for_provider(sandbox.provider.clone())
+                .await?
+                .acquire_tcp(sandbox_request(self.owner, id, sandbox, None))
+                .await;
+        }
+        let (handle, provider_state_event) =
+            active_sandbox_handle(self.harness, &self.owner_dir, self.owner, id, sandbox).await?;
         if let Some(event) = provider_state_event {
             self.append_events(vec![event]).await?;
         }
@@ -4182,30 +4229,6 @@ async fn create_sandbox_handle(
     sandbox_id: &SandboxId,
     sandbox: &StoredSandbox,
 ) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
-    create_sandbox_handle_for_access(
-        harness,
-        owner_dir,
-        owner,
-        sandbox_id,
-        sandbox,
-        SandboxHandleAccess::Full,
-    )
-    .await
-}
-
-enum SandboxHandleAccess {
-    Full,
-    Tcp,
-}
-
-async fn create_sandbox_handle_for_access(
-    harness: &BasicExoHarness,
-    owner_dir: &Path,
-    owner: ResourceScope,
-    sandbox_id: &SandboxId,
-    sandbox: &StoredSandbox,
-    access: SandboxHandleAccess,
-) -> Result<(Arc<dyn ManagedSandboxHandle>, Option<EventData>)> {
     let state_key = sandbox_provider_state_key(owner, sandbox_id, sandbox);
     let previous_state = load_sandbox_provider_state(
         harness,
@@ -4223,10 +4246,7 @@ async fn create_sandbox_handle_for_access(
     let request = sandbox_request(owner, sandbox_id, sandbox, previous_state.clone());
     let handle = match &sandbox.attachment {
         Some(attachment) => backend.attach(request, attachment.clone()).await?,
-        None => match access {
-            SandboxHandleAccess::Full => backend.acquire(request).await?,
-            SandboxHandleAccess::Tcp => backend.acquire_tcp(request).await?,
-        },
+        None => backend.acquire(request).await?,
     };
     let provider_state_event = sandbox_provider_state_event(
         sandbox_id,
@@ -4575,6 +4595,7 @@ impl From<StoredSandbox> for SandboxRecord {
             image: sandbox.image,
             tcp_ports: sandbox.tcp_ports,
             running: sandbox.running,
+            attached: sandbox.attachment.is_some(),
         }
     }
 }

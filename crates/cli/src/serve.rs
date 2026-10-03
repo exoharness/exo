@@ -56,14 +56,6 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         .with_max_level(tracing::Level::INFO)
         .try_init()
         .map_err(|error| anyhow::anyhow!("initializing service logging: {error}"))?;
-    std::fs::create_dir_all(root)?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(root.join("service.lock"))?;
-    lock.try_lock()
-        .context("another agent service is using this root")?;
     let auth = if let Some(path) = &args.auth_file {
         let config: executor::remote::AuthConfig = crate::read_config_file(path)?;
         eprintln!("OIDC callback: {}", config.callback_url());

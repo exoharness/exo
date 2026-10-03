@@ -21,12 +21,12 @@ fn registration(gateway: PathBuf, name: &str, port: u16) -> Registration {
     Registration {
         gateway,
         portal: portal.clone(),
-        previews: [("app", 5173), ("api", 8000)]
+        services: [("app", 5173), ("api", 8000)]
             .into_iter()
-            .map(|(name, guest)| BrowserPreview {
+            .map(|(name, guest)| Service {
                 name: name.into(),
                 port: guest,
-                url: format!("http://{name}.{portal}"),
+                host: format!("{name}.{portal}"),
             })
             .collect(),
     }

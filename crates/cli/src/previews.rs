@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs::File, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use executor::{AgentHandle, BrowserPreview, ConversationHandle, Runtime};
@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
     net::{UnixListener, UnixStream},
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
     time::timeout,
 };
 
@@ -17,7 +17,6 @@ pub(crate) struct PreviewSession {
     task: JoinHandle<()>,
     proxy: proxy::Client,
     _gateway: tempfile::TempDir,
-    _lock: File,
 }
 
 impl Drop for PreviewSession {
@@ -49,17 +48,7 @@ impl PreviewSession {
             return Ok(None);
         };
         let directory = root()?.join("previews");
-        let session_directory = directory
-            .join(agent.record().id.to_string())
-            .join(thread.record().id.to_string());
-        std::fs::create_dir_all(&session_directory)?;
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(session_directory.join("session.lock"))?;
-        lock.try_lock()
-            .context("this thread already has a local preview session")?;
+        std::fs::create_dir_all(&directory)?;
         let proxy = proxy::Client::connect(&directory).await?;
         let port = proxy.port;
         let hostname = thread_hostname(
@@ -91,12 +80,20 @@ impl PreviewSession {
                 .all(|name| name.len() + hostname.len() < 253),
             "preview hostname exceeds the DNS length limit"
         );
-        let previews: Vec<_> = services
+        let services: Vec<_> = services
             .into_iter()
-            .map(|(name, guest_port)| BrowserPreview {
-                url: format!("http://{name}.{hostname}:{port}"),
+            .map(|(name, guest_port)| proxy::Service {
+                host: format!("{name}.{hostname}:{port}"),
                 name,
                 port: guest_port,
+            })
+            .collect();
+        let previews: Vec<_> = services
+            .iter()
+            .map(|service| BrowserPreview {
+                url: format!("http://{}", service.host),
+                name: service.name.clone(),
+                port: service.port,
             })
             .collect();
         let index_url = format!("http://{hostname}:{port}");
@@ -104,7 +101,7 @@ impl PreviewSession {
             || config.browser_previews != previews;
         config.browser_preview_url = Some(index_url.clone());
         config.browser_previews = previews.clone();
-        let gateway = tempfile::tempdir_in("/tmp")?;
+        let gateway = crate::local_net::socket_directory()?;
         let socket = gateway.path().join("gateway.sock");
         let listener = UnixListener::bind(&socket).context("binding preview session gateway")?;
         let ports = previews.iter().map(|preview| preview.port).collect();
@@ -113,14 +110,13 @@ impl PreviewSession {
             task,
             proxy,
             _gateway: gateway,
-            _lock: lock,
         };
         session
             .proxy
             .register(proxy::Registration {
                 gateway: socket,
                 portal: format!("{hostname}:{port}"),
-                previews: previews.clone(),
+                services,
             })
             .await?;
         println!("sandbox: {index_url}");
@@ -170,31 +166,19 @@ async fn serve_gateway(
     thread: Arc<dyn ConversationHandle>,
     ports: BTreeSet<u16>,
 ) {
-    let mut connections = JoinSet::new();
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (client, _) = match accepted {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        eprintln!("preview listener failed: {error}");
-                        return;
-                    }
-                };
-                let thread = thread.clone();
-                let ports = ports.clone();
-                connections.spawn(async move {
-                    handle_gateway(client, thread.as_ref(), &ports).await
-                });
-            }
-            completed = connections.join_next(), if !connections.is_empty() => {
-                match completed {
-                    Some(Ok(Err(error))) => tracing::debug!(%error, "preview connection failed"),
-                    Some(Err(error)) => eprintln!("preview task failed: {error}"),
-                    _ => {}
-                }
-            }
-        }
+    let result = crate::local_net::serve_connections(
+        || async { Ok(listener.accept().await?.0) },
+        move |client| {
+            let thread = thread.clone();
+            let ports = ports.clone();
+            async move { handle_gateway(client, thread.as_ref(), &ports).await }
+        },
+        "preview",
+        |error| tracing::debug!(%error, "preview connection failed"),
+    )
+    .await;
+    if let Err(error) = result {
+        eprintln!("preview listener failed: {error:#}");
     }
 }
 
