@@ -336,7 +336,10 @@ scheduler_source_newer_than() {
 }
 
 prepare_exo_args() {
-  EXO_ARGS=("$1")
+  # --root defaults to the relative path .exo, so without this the state root
+  # follows the caller's working directory while every pid, lock, and log
+  # path below resolves under $ROOT_DIR.
+  EXO_ARGS=("$1" --root "$ROOT_DIR/.exo")
   if [[ -f "$ENV_FILE" ]]; then
     EXO_ARGS+=(--env-file "$ENV_FILE")
   fi
@@ -445,7 +448,7 @@ ensure_scheduler() {
   log_file="$(scheduler_log_file)"
   echo "Starting scheduler loop..."
   rm -f "$(scheduler_lock_file)"
-  local scheduler_args=(--env-file-if-exists "$ENV_FILE")
+  local scheduler_args=(--root "$ROOT_DIR/.exo" --env-file-if-exists "$ENV_FILE")
   nohup "$SCHEDULER_BIN" "${scheduler_args[@]}" run --watch \
     --interval-seconds "$SCHEDULER_INTERVAL_SECONDS" >>"$log_file" 2>&1 &
   echo "$!" >"$pid_file"
