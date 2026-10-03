@@ -198,3 +198,43 @@ async fn unavailable_services_return_502_and_upgrade_bytes_are_preserved() -> Re
     proxy.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn listener_reuses_its_port_and_reports_a_conflict_without_changing_the_url() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("listener.json");
+    let first = saved_listener(&path).await?;
+    let port = first.local_addr()?.port();
+    let saved = std::fs::read(&path)?;
+    assert!(saved_listener(&path).await.is_err());
+    assert_eq!(std::fs::read(&path)?, saved);
+    drop(first);
+    let resumed = saved_listener(&path).await?;
+    assert_eq!(resumed.local_addr()?.port(), port);
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_routing_keeps_upgrade_headers_and_bytes_after_the_headers() -> Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let mut client = TcpStream::connect(listener.local_addr()?).await?;
+    let (mut server, _) = listener.accept().await?;
+    let request = b"GET /realtime?session=1 HTTP/1.1\r\nHost: 13000.Thread.Exo.Localhost:1234\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\nfirst-frame";
+    client.write_all(request).await?;
+    let (host, bytes) = read_request(&mut server).await?;
+    assert_eq!(host, "13000.thread.exo.localhost:1234");
+    assert_eq!(bytes, request);
+    Ok(())
+}
+
+#[tokio::test]
+async fn duplicate_host_headers_are_rejected() -> Result<()> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let mut client = TcpStream::connect(listener.local_addr()?).await?;
+    let (mut server, _) = listener.accept().await?;
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: first\r\nHost: second\r\n\r\n")
+        .await?;
+    assert!(read_request(&mut server).await.is_err());
+    Ok(())
+}

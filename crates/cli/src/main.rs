@@ -79,7 +79,7 @@ struct Cli {
     command: Commands,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 struct RuntimeArgs {
     /// Directory containing local Exo state (defaults to ~/.exo).
     #[arg(long, global = true)]
@@ -1112,17 +1112,7 @@ async fn run_selected(
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
     let home = cli.home.clone();
-    let preview_root = if matches!(
-        &cli.command,
-        Commands::Agent {
-            command: AgentCommands::Run { .. },
-            ..
-        }
-    ) {
-        Some(cli.state_root()?)
-    } else {
-        None
-    };
+    let runtime_args = cli.runtime().clone();
     let mut session_thread = None;
     let result: Result<()> = async {
     match cli.command {
@@ -1147,7 +1137,7 @@ async fn run_selected(
             .await?;
             let _previews = previews::PreviewSession::start(
                 harness.as_ref(), agent.as_ref(), Arc::clone(&conversation),
-                preview_root.as_deref().context("preview state root is missing")?,
+                || runtime_args.state_root(home.as_deref()),
             ).await?;
             if local {
                 session_thread = Some(Arc::clone(&conversation));

@@ -2194,32 +2194,30 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         if sandbox.attachment.is_some() {
             bail!("attached sandboxes cannot be terminated");
         }
-        {
-            let backend = self
-                .harness
-                .inner
-                .sandbox_backend_for_provider(sandbox.provider.clone())
-                .await?;
-            let state_key = sandbox_provider_state_key(self.owner, &id, &sandbox);
-            let provider_state = load_sandbox_provider_state(
-                self.harness,
-                &self.owner_dir,
-                self.owner,
-                &id,
-                sandbox.provider.clone(),
-                &state_key,
-            )
+        let backend = self
+            .harness
+            .inner
+            .sandbox_backend_for_provider(sandbox.provider.clone())
             .await?;
-            backend
-                .terminate(sandbox_request(self.owner, &id, &sandbox, provider_state))
-                .await?;
-            self.harness
-                .inner
-                .running_sandboxes
-                .lock()
-                .await
-                .remove(&id);
-        }
+        let state_key = sandbox_provider_state_key(self.owner, &id, &sandbox);
+        let provider_state = load_sandbox_provider_state(
+            self.harness,
+            &self.owner_dir,
+            self.owner,
+            &id,
+            sandbox.provider.clone(),
+            &state_key,
+        )
+        .await?;
+        backend
+            .terminate(sandbox_request(self.owner, &id, &sandbox, provider_state))
+            .await?;
+        self.harness
+            .inner
+            .running_sandboxes
+            .lock()
+            .await
+            .remove(&id);
         self.harness
             .inner
             .storage

@@ -9,7 +9,7 @@ config:
     overlay_gib: 16
   default_workdir: /workspace
   file_system_mounts:
-    - host_path: /Users/ankur/projects/exo/exoharness/examples/fastapi
+    - host_path: ../fastapi
       mount_path: /opt/fastapi-demo
       mode: ro
   tcp_ports: [5173, 8000]

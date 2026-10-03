@@ -26,14 +26,21 @@ async fn open_session(fixture: &Fixture, thread: &str) -> Result<Child> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .context("session stdin")?
+        .write_all(b"/help\n")
+        .await?;
     let mut stdout = BufReader::new(child.stdout.take().context("session stdout")?).lines();
     timeout(Duration::from_secs(10), async {
         while let Some(line) = stdout.next_line().await? {
-            if line.starts_with("  app (port") {
+            // URLs print before metadata is saved; wait until the REPL is ready.
+            if line == "repl commands:" {
                 return Ok::<_, anyhow::Error>(());
             }
         }
-        anyhow::bail!("session exited before assigning previews");
+        anyhow::bail!("session exited before opening the REPL");
     })
     .await??;
     child.stdout = Some(stdout.into_inner().into_inner());
@@ -284,7 +291,19 @@ async fn named_previews_are_assigned_displayed_and_reused_on_resume() -> Result<
     assert!(thread.list_sandboxes().await?[0].running);
     thread.terminate_sandbox(sandbox).await?;
     drop(session_lock);
+    let config_versions = |artifacts: Vec<exoharness::ArtifactVersion>| {
+        artifacts
+            .into_iter()
+            .filter(|artifact| artifact.path == "config/executor.json")
+            .count()
+    };
+    let before_resume = config_versions(thread.list_artifacts().await?);
     let resumed = support::success(fixture.output(&args, None, Some("/quit\n")).await?)?;
+    // Reopening configures the thread once; unchanged preview URLs add no write.
+    assert_eq!(
+        config_versions(thread.list_artifacts().await?),
+        before_resume + 1
+    );
     for preview in &previews {
         assert!(resumed.contains(&preview.url));
     }

@@ -126,12 +126,10 @@ pub async fn attached_conversation_sandbox(
         match conversation_sandbox_candidates(conversation)
             .await?
             .into_iter()
-            .filter(|candidate| match candidate {
+            .rfind(|candidate| match candidate {
                 ConversationSandboxCandidate::Created(sandbox) => sandbox.running,
                 ConversationSandboxCandidate::Attached { .. } => true,
-            })
-            .next_back()
-        {
+            }) {
             Some(ConversationSandboxCandidate::Attached { id }) => Some(id),
             Some(ConversationSandboxCandidate::Created(_)) | None => None,
         },

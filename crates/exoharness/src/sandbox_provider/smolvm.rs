@@ -288,7 +288,7 @@ impl SmolvmSandboxBackend {
     }
 
     /// Whether the installed smolvm can label machines.
-    pub async fn labels_supported(&self) -> bool {
+    async fn labels_supported(&self) -> bool {
         self.capabilities().await.is_ok_and(|caps| caps.labels)
     }
 

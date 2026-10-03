@@ -1241,8 +1241,8 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
     assert_eq!(
         ensure_shell_sandbox(conversation.as_ref(), &agent_config, &conversation_config,)
             .await
-            .expect("attached sandbox should be selected"),
-        attached_sandbox_id
+            .expect("an attachment event without a current sandbox record must be ignored"),
+        second_sandbox_id
     );
 
     conversation

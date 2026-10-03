@@ -138,6 +138,9 @@ ports, and browser URLs. Services still need to be started in the sandbox. The
 app must generate browser API and WebSocket URLs using the corresponding service
 preview's origin. Exo includes the page URL, service mapping, and a short explanation
 in the agent's instructions so it can help the user open and troubleshoot previews.
+The page is available as soon as its routes are registered, before repository
+preparation finishes. During that wait, interactive startup displays checkout
+progress. Resuming with unchanged URLs does not rewrite the preview metadata.
 
 To display the saved URLs again without starting a VM:
 
@@ -398,7 +401,10 @@ other backends reject these settings. These are virtual disk sizes, not RAM.
 
 Use `--environment-file path.yaml` without saving a definition. An HTTP provider
 receives the definition's contents and provisions it on its host. Mount paths in
-that spec must be absolute paths on the runtime host. The CLI's `--mount` option
+that spec must refer to directories on the runtime host. Relative `host_path`
+values in environment files resolve against the file's directory and are saved
+as absolute paths. For HTTP providers, use absolute paths on the server.
+The CLI's `--mount` option
 can add local mounts at thread creation; it is rejected for HTTP providers.
 The OSS HTTP bearer grants runtime-owner access, including saving environments,
 mounting host paths, and local-process execution. Give it only to trusted runtime
@@ -407,8 +413,9 @@ operators.
 `exo environment update NAME --file path.yaml` changes the saved definition for
 new threads. Resume with `--agent NAME --thread THREAD --environment NAME` or
 `--environment-file path.yaml` to apply an updated definition to a saved thread.
-A changed definition replaces its sandbox and preserves thread history and
-filesystem resources; files outside persistent mounts are discarded. Omitting
+A changed sandbox configuration replaces its sandbox and preserves thread history
+and filesystem resources; files outside persistent mounts are discarded. Changes
+to preview names or the preview domain preserve the sandbox. Omitting
 both environment flags retains the thread's saved configuration. Reapplying the
 same definition reuses its sandbox. To upgrade the image of an existing sandbox,
 change the image reference in the environment; use a versioned tag or digest.
@@ -446,6 +453,25 @@ TCP support. SmolVM port access inspects the running VM without restarting it or
 taking over its credential proxy. Changing an environment's `tcp_ports` or
 `resources` replaces its sandbox when the updated environment is applied to the
 thread.
+
+### FastAPI development example
+
+This example uses the shared Codex devbox and a public repository with a frontend
+on port 5173, an API on port 8000, and PostgreSQL inside the VM. With an OpenAI
+credential saved as `openai` in the global vault, run from this checkout:
+
+```sh
+exo agent create fastapi-dev --file exoharness/examples/managed-agents/fastapi-developer.md
+exo environment create fastapi-local --file exoharness/examples/environments/fastapi-smolvm.yaml
+exo agent run --agent fastapi-dev --environment fastapi-local --thread demo
+```
+
+Ask the agent to start the services, then open the printed sandbox services page.
+The browser contacts the API preview directly; the setup script configures its
+URL and the backend's allowed frontend origin. Log in with `admin@example.com`
+and `changethis`. Initial setup installs the tools and locked dependencies on the
+VM's persistent disks. Resume with `exo agent run --agent fastapi-dev --thread demo`
+and ask the agent to start the services again.
 
 ## Pi
 

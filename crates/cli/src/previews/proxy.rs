@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs::OpenOptions,
     io::ErrorKind,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex},
@@ -13,13 +14,17 @@ use executor::BrowserPreview;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
-    net::{TcpStream, UnixListener, UnixStream},
+    net::{TcpListener, TcpStream, UnixListener, UnixStream},
     process::Command,
     task::JoinSet,
     time::{Instant, sleep, timeout},
 };
 
-use super::{read_request, reply, saved_listener};
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedListener {
+    port: u16,
+}
 
 #[derive(Serialize, Deserialize)]
 struct ProxyAddress {
@@ -99,6 +104,26 @@ impl Client {
             _ => bail!("unexpected preview registration response"),
         }
     }
+}
+
+async fn saved_listener(path: &Path) -> Result<TcpListener> {
+    let saved = match std::fs::read(path) {
+        Ok(bytes) => Some(serde_json::from_slice::<SavedListener>(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, saved.as_ref().map_or(0, |s| s.port)))
+        .await
+        .context("binding Exo's shared preview port; another process may be using it")?;
+    if saved.is_none() {
+        std::fs::write(
+            path,
+            serde_json::to_vec(&SavedListener {
+                port: listener.local_addr()?.port(),
+            })?,
+        )?;
+    }
+    Ok(listener)
 }
 
 async fn existing_proxy(directory: &Path) -> Result<Option<UnixStream>> {
@@ -264,6 +289,52 @@ async fn register(mut stream: UnixStream, port: u16, mut lease: Lease) -> Result
         stream.read(&mut byte).await? == 0,
         "unexpected preview control message"
     );
+    Ok(())
+}
+
+async fn read_request(client: &mut TcpStream) -> Result<(String, Vec<u8>)> {
+    let mut bytes = Vec::new();
+    loop {
+        ensure!(
+            bytes.len() < 32_768,
+            "preview request headers are too large"
+        );
+        let mut chunk = [0; 4096];
+        let count = client.read(&mut chunk).await?;
+        ensure!(
+            count > 0,
+            "preview connection closed before request headers"
+        );
+        bytes.extend_from_slice(&chunk[..count]);
+        let mut headers = [httparse::EMPTY_HEADER; 100];
+        let mut request = httparse::Request::new(&mut headers);
+        if request.parse(&bytes)?.is_complete() {
+            let mut hosts = request
+                .headers
+                .iter()
+                .filter(|h| h.name.eq_ignore_ascii_case("host"));
+            let host = hosts.next().context("preview request has no Host header")?;
+            ensure!(
+                hosts.next().is_none(),
+                "preview request has multiple Host headers"
+            );
+            let host = std::str::from_utf8(host.value)?.to_ascii_lowercase();
+            return Ok((host, bytes));
+        }
+    }
+}
+
+async fn reply(client: &mut TcpStream, status: &str, content_type: &str, body: &str) -> Result<()> {
+    client
+        .write_all(
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}",
+                body.len(),
+            )
+            .as_bytes(),
+        )
+        .await?;
+    client.shutdown().await?;
     Ok(())
 }
 
