@@ -321,7 +321,7 @@ impl FirecrackerSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        let terminate = self.terminate(request.clone());
+        let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
         self.egress
             .restore(
                 request.clone(),

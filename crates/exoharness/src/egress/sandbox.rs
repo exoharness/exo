@@ -558,6 +558,49 @@ mod tests {
 
     #[cfg(feature = "firecracker")]
     #[tokio::test]
+    async fn restore_cleanup_only_terminates_a_successfully_built_target() -> Result<()> {
+        for fail_build in [true, false] {
+            let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+            let transport = Arc::new(Transport::default());
+            let terminated = AtomicBool::new(false);
+            let result = runtime
+                .restore(
+                    request("one"),
+                    |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                    |_| async {
+                        ensure!(!fail_build, "target already allocated");
+                        runtime.shutdown();
+                        Ok(Handle(Some(true)))
+                    },
+                    async {
+                        assert!(
+                            !fail_build,
+                            "rejected restore must preserve the existing VM"
+                        );
+                        assert!(transport.shutdown_completed.load(Ordering::SeqCst));
+                        terminated.store(true, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await;
+            let error = result.err().unwrap().to_string();
+            assert_eq!(
+                error,
+                if fail_build {
+                    "target already allocated"
+                } else {
+                    "sandbox egress runtime is shut down"
+                }
+            );
+            assert_eq!(terminated.load(Ordering::SeqCst), !fail_build);
+            assert!(transport.shutdown_completed.load(Ordering::SeqCst));
+            assert!(runtime.sandboxes().is_empty());
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "firecracker")]
+    #[tokio::test]
     async fn suspension_preserves_egress_on_failure_and_closes_it_after_success() -> Result<()> {
         let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
         let transport = Arc::new(Transport::default());
