@@ -302,7 +302,7 @@ pub trait ManagedSandboxHandle: Send + Sync {
     /// kinds or writable mounts before capture; never silently omit filesystem state.
     async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload>;
 
-    async fn snapshot_template(&self) -> Result<SnapshotPayload> {
+    async fn snapshot_template(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         bail!("sandbox handle does not support template capture")
     }
 
