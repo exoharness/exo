@@ -401,11 +401,12 @@ impl FirecrackerSandboxBackend {
             .to_owned();
         let spec_hash = sandbox_spec_hash(&resolved.spec);
         let id = machine_id(&resolved.sandbox_id, &spec_hash);
-        let _guard = self
-            .shared
-            .lifecycle_locks
-            .lock_sandbox(&resolved.sandbox_id)
-            .await;
+        let mut lifecycle_guard = Some(
+            self.shared
+                .lifecycle_locks
+                .lock_sandbox(&resolved.sandbox_id)
+                .await,
+        );
         let config = self.shared.config.clone();
         let request_for_validation = resolved.clone();
         let shared = Arc::clone(&self.shared);
@@ -441,6 +442,7 @@ impl FirecrackerSandboxBackend {
                 .acquire_resolved_locked(resolved, spec_hash, id.clone(), false, Some(reservation))
                 .await?;
             if let Some(egress) = egress {
+                drop(lifecycle_guard.take());
                 self.track_egress(&handle, egress.transport()).await?;
                 egress
                     .initialize(&handle, handle.machine.record.network().guest_ip)
@@ -451,6 +453,10 @@ impl FirecrackerSandboxBackend {
         }
         .await;
         if let Err(error) = result {
+            let _guard = match lifecycle_guard {
+                Some(guard) => guard,
+                None => self.shared.lifecycle_locks.lock_machine(&id).await,
+            };
             self.shared
                 .warm_machines
                 .lock()

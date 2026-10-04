@@ -1619,13 +1619,13 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
+            return self.acquire_filesystem_snapshot(request, payload).await;
+        }
         request
             .spec
             .policy
             .validate_basic("Firecracker snapshot restore")?;
-        if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
-            return self.acquire_filesystem_snapshot(request, payload).await;
-        }
         self.acquire_managed(
             request,
             Some(FirecrackerSnapshotManifest::from_payload(payload)?),
