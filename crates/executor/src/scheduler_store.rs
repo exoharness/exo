@@ -5,6 +5,8 @@ use exoharness::Uuid7;
 use serde::Serialize;
 use tokio::fs;
 
+use crate::scheduler_backend::{SchedulerStoreBackend, SlotClaimer};
+
 use crate::scheduler_types::{
     NewScheduledTask, ScheduledFireRecord, ScheduledTaskRecord, ScheduledTaskRunRecord,
     migrate_scheduled_task, now_ms,
@@ -81,6 +83,142 @@ impl SchedulerStore {
             .collect())
     }
 
+    /// Atomically claims one due task, or reports loss to a concurrent claimant.
+    ///
+    /// The claim marker is a file created with `create_new` semantics, keyed by
+    /// `(task_id, next_run_at_ms)`: exactly one of two racing runners can
+    /// create it, so the read-then-lease race in [`Self::claim_due_tasks`]
+    /// becomes an atomic test-and-set. The written task record carries the
+    /// lease for observability (listings show who holds it), but correctness
+    /// rests on the marker file, which is claimed-or-lost in one syscall.
+    ///
+    /// Markers key by `next_run_at_ms` rather than a lease count so a released
+    /// claim (grid advanced to the next slot) can never collide with a stale
+    /// marker for the previous slot, and sweep to delete decided markers.
+    pub async fn claim_task_atomically(
+        &self,
+        now_ms: u64,
+        lease_ms: u64,
+        task: &mut ScheduledTaskRecord,
+    ) -> Result<bool> {
+        if !task.is_due(now_ms) {
+            return Ok(false);
+        }
+        let claimed_path = self.claim_path(&task.id, task.next_run_at_ms);
+        // A marker only blocks while its lease is live; once the lease has
+        // expired the marker names a crashed/stalled runner and the slot is
+        // reclaimable. Expired markers are swept so the create_new below can
+        // be the single atomic decision point.
+        if self.claim_marker_exists(&claimed_path).await? {
+            if let Some(expires_at_ms) = self.claim_marker_expiry(&claimed_path).await? {
+                if expires_at_ms > now_ms {
+                    return Ok(false); // live lease held by another runner
+                }
+                self.release_claim(&task.id, task.next_run_at_ms)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to sweep expired claim marker {}",
+                            claimed_path.display()
+                        )
+                    })?;
+            } else {
+                // Unparseable marker (truncated write, foreign content):
+                // treat as live — sweeping it here would let two runners
+                // sweep-and-win the same slot.
+                return Ok(false);
+            }
+        }
+        fs::create_dir_all(self.claims_dir())
+            .await
+            .with_context(|| format!("failed to create claim directory {:?}", self.claims_dir()))?;
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "task_id": task.id,
+            "slot_ms": task.next_run_at_ms,
+            "claimed_at_ms": now_ms,
+            "expires_at_ms": now_ms.saturating_add(lease_ms),
+            "lease_ms": lease_ms,
+            "runner": std::process::id(),
+        }))?;
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&claimed_path)
+            .await
+        {
+            Ok(mut file) => {
+                use tokio::io::AsyncWriteExt as _;
+                file.write_all(&payload).await.with_context(|| {
+                    format!("failed to write claim marker {}", claimed_path.display())
+                })?;
+                file.sync_all().await.with_context(|| {
+                    format!("failed to flush claim marker {}", claimed_path.display())
+                })?;
+            }
+            // Another runner won the create_new race: we lose the claim.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(false);
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create claim marker {}", claimed_path.display())
+                });
+            }
+        }
+        // Claim won. Stamp the lease onto the record for observability; this
+        // write loses races safely because the marker already settled ownership.
+        task.claim(now_ms, lease_ms);
+        self.put_task(task).await?;
+        Ok(true)
+    }
+
+    pub async fn claim_marker_exists(&self, path: &Path) -> Result<bool> {
+        match fs::metadata(path).await {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error)
+                .with_context(|| format!("failed to stat claim marker {}", path.display())),
+        }
+    }
+
+    /// Lease expiry stamped inside a claim marker; `None` when the payload is
+    /// absent or unparseable. The marker's `expires_at_ms` is the authoritative
+    /// claim lifetime — the record's lease copy is observability only.
+    async fn claim_marker_expiry(&self, path: &Path) -> Result<Option<u64>> {
+        let bytes = match fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read claim marker {}", path.display()));
+            }
+        };
+        match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(value) => Ok(value.get("expires_at_ms").and_then(|v| v.as_u64())),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Deletes the claim marker for a slot once a run is recorded, so a
+    /// multi-slot catch-up burst can claim consecutive slots of the same task.
+    pub async fn release_claim(&self, task_id: &str, slot_ms: u64) -> Result<()> {
+        match fs::remove_file(self.claim_path(task_id, slot_ms)).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!("failed to release claim for task {task_id} slot {slot_ms}")
+            }),
+        }
+    }
+
+    fn claims_dir(&self) -> PathBuf {
+        self.root.join("claims")
+    }
+
+    fn claim_path(&self, task_id: &str, slot_ms: u64) -> PathBuf {
+        self.claims_dir().join(format!("{task_id}-{slot_ms}.json"))
+    }
+
     /// Reads, leases, and writes back without a conditional put, so two
     /// runners racing the same due task can both win. The PID lockfile in the
     /// runner is the real guard today. The fix is a claim keyed by
@@ -96,10 +234,14 @@ impl SchedulerStore {
         due.sort_by_key(|task| task.next_run_at_ms);
         due.truncate(limit);
         let mut claimed = Vec::new();
-        for mut task in due {
-            task.claim(now_ms, lease_ms);
-            self.put_task(&task).await?;
-            claimed.push(task);
+        for task in due {
+            let mut candidate = task;
+            if self
+                .claim_task_atomically(now_ms, lease_ms, &mut candidate)
+                .await?
+            {
+                claimed.push(candidate);
+            }
         }
         Ok(claimed)
     }
@@ -253,6 +395,87 @@ impl SchedulerStore {
     fn delivered_fire_path(&self, task_id: &str, slot_ms: u64) -> PathBuf {
         self.delivered_fires_dir()
             .join(format!("{task_id}-{slot_ms}.json"))
+    }
+}
+
+// The filesystem backend is the reference implementation of the persistence
+// contract; the trait impl is deliberately thin over the inherent methods so
+// existing call sites keep compiling unchanged.
+#[async_trait::async_trait]
+impl SlotClaimer for SchedulerStore {
+    async fn try_claim_slot(
+        &self,
+        now_ms: u64,
+        lease_ms: u64,
+        task: &mut ScheduledTaskRecord,
+    ) -> Result<bool> {
+        self.claim_task_atomically(now_ms, lease_ms, task).await
+    }
+
+    async fn release_claim(&self, task_id: &str, slot_ms: u64) -> Result<()> {
+        self.release_claim(task_id, slot_ms).await
+    }
+}
+
+#[async_trait::async_trait]
+impl SchedulerStoreBackend for SchedulerStore {
+    async fn create_task(&self, request: NewScheduledTask) -> Result<ScheduledTaskRecord> {
+        SchedulerStore::create_task(self, request).await
+    }
+    async fn list_tasks(&self) -> Result<Vec<ScheduledTaskRecord>> {
+        SchedulerStore::list_tasks(self).await
+    }
+    async fn get_task(&self, task_id: &str) -> Result<Option<ScheduledTaskRecord>> {
+        SchedulerStore::get_task(self, task_id).await
+    }
+    async fn put_task(&self, task: &ScheduledTaskRecord) -> Result<()> {
+        SchedulerStore::put_task(self, task).await
+    }
+    async fn disable_task(&self, task_id: &str) -> Result<Option<ScheduledTaskRecord>> {
+        SchedulerStore::disable_task(self, task_id).await
+    }
+    async fn delete_task(&self, task_id: &str) -> Result<Option<ScheduledTaskRecord>> {
+        SchedulerStore::delete_task(self, task_id).await
+    }
+    async fn put_pending_fire(&self, fire: &ScheduledFireRecord) -> Result<()> {
+        SchedulerStore::put_pending_fire(self, fire).await
+    }
+    async fn pending_fires(&self) -> Result<Vec<ScheduledFireRecord>> {
+        SchedulerStore::pending_fires(self).await
+    }
+    async fn mark_fire_delivered(&self, task_id: &str, slot_ms: u64) -> Result<()> {
+        SchedulerStore::mark_fire_delivered(self, task_id, slot_ms).await
+    }
+    async fn fire_was_delivered(&self, task_id: &str, slot_ms: u64) -> Result<bool> {
+        SchedulerStore::fire_was_delivered(self, task_id, slot_ms).await
+    }
+    async fn put_run(&self, run: &ScheduledTaskRunRecord) -> Result<()> {
+        SchedulerStore::put_run(self, run).await
+    }
+    async fn list_tasks_for_conversation(
+        &self,
+        agent_id: &str,
+        conversation_id: &str,
+        include_disabled: bool,
+    ) -> Result<Vec<ScheduledTaskRecord>> {
+        SchedulerStore::list_tasks_for_conversation(
+            self,
+            agent_id,
+            conversation_id,
+            include_disabled,
+        )
+        .await
+    }
+    async fn due_tasks(&self, now_ms: u64) -> Result<Vec<ScheduledTaskRecord>> {
+        SchedulerStore::due_tasks(self, now_ms).await
+    }
+    async fn claim_due_tasks(
+        &self,
+        now_ms: u64,
+        limit: usize,
+        lease_ms: u64,
+    ) -> Result<Vec<ScheduledTaskRecord>> {
+        SchedulerStore::claim_due_tasks(self, now_ms, limit, lease_ms).await
     }
 }
 
@@ -530,6 +753,167 @@ mod tests {
         assert_eq!(claimed.len(), 1);
         assert!(store.claim_due_tasks(3, 10, 100).await.unwrap().is_empty());
         assert_eq!(store.claim_due_tasks(103, 10, 100).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn atomic_claim_is_winner_take_all_between_racing_runners() {
+        let tempdir = TempDir::new().unwrap();
+        let store = SchedulerStore::new(tempdir.path());
+        let mut task = store
+            .create_task(NewScheduledTask {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "check".to_string(),
+                schedule: "@every 1m".to_string(),
+                sandbox_mode: None,
+                setup_command: None,
+                command: vec!["true".to_string()],
+                report_prompt: "Report.".to_string(),
+                max_output_bytes: None,
+                missed: None,
+            })
+            .await
+            .unwrap();
+        task.next_run_at_ms = 1;
+        store.put_task(&task).await.unwrap();
+
+        // Two runners read the same due record; only one claim survives.
+        let mut runner_a = store.get_task(&task.id).await.unwrap().unwrap();
+        let mut runner_b = store.get_task(&task.id).await.unwrap().unwrap();
+        assert!(
+            store
+                .claim_task_atomically(2, 100, &mut runner_a)
+                .await
+                .unwrap(),
+            "first claimant wins an uncontested claim"
+        );
+        assert!(
+            !store
+                .claim_task_atomically(2, 100, &mut runner_b)
+                .await
+                .unwrap(),
+            "second claimant must lose the race, not double-fire"
+        );
+
+        // The stored record carries exactly the winner's lease.
+        let stored = store.get_task(&task.id).await.unwrap().unwrap();
+        assert_eq!(
+            stored.lease.as_ref().map(|lease| lease.leased_at_ms),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn released_claim_allows_the_next_slot_to_be_claimed() {
+        let tempdir = TempDir::new().unwrap();
+        let store = SchedulerStore::new(tempdir.path());
+        let task = store
+            .create_task(NewScheduledTask {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "check".to_string(),
+                schedule: "@every 1m".to_string(),
+                sandbox_mode: None,
+                setup_command: None,
+                command: vec!["true".to_string()],
+                report_prompt: "Report.".to_string(),
+                max_output_bytes: None,
+                missed: None,
+            })
+            .await
+            .unwrap();
+
+        // Simulate a catch-up burst: two consecutive grid slots to claim.
+        let mut slot_one = store.get_task(&task.id).await.unwrap().unwrap();
+        slot_one.next_run_at_ms = 1_000;
+        slot_one.lease = None;
+        store.put_task(&slot_one).await.unwrap();
+        assert!(
+            store
+                .claim_task_atomically(1_100, 100, &mut slot_one)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .claim_task_atomically(1_100, 100, &mut slot_one)
+                .await
+                .unwrap(),
+            "re-claiming the same slot must lose even with a stale local copy"
+        );
+
+        // Run recorded: the (task, slot) claim is released so the next slot,
+        // a different (task, slot) key, can be claimed without a lease wait.
+        store.release_claim(&task.id, 1_000).await.unwrap();
+        assert!(
+            !store
+                .claim_marker_exists(&store.claim_path(&task.id, 1_000))
+                .await
+                .unwrap()
+        );
+
+        let mut slot_two = store.get_task(&task.id).await.unwrap().unwrap();
+        slot_two.next_run_at_ms = 2_000;
+        slot_two.lease = None;
+        store.put_task(&slot_two).await.unwrap();
+        assert!(
+            store
+                .claim_task_atomically(2_100, 100, &mut slot_two)
+                .await
+                .unwrap(),
+            "a released slot claim must not block the next slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn atomic_claim_respects_lease_expiry_by_marker_not_record() {
+        let tempdir = TempDir::new().unwrap();
+        let store = SchedulerStore::new(tempdir.path());
+        let task = store
+            .create_task(NewScheduledTask {
+                agent_id: "agent".to_string(),
+                conversation_id: "conversation".to_string(),
+                name: "check".to_string(),
+                schedule: "@every 1m".to_string(),
+                sandbox_mode: None,
+                setup_command: None,
+                command: vec!["true".to_string()],
+                report_prompt: "Report.".to_string(),
+                max_output_bytes: None,
+                missed: None,
+            })
+            .await
+            .unwrap();
+
+        // A crashed runner left a claim marker but the record write never
+        // happened (crash between marker create and put_task). Even though
+        // the record shows no lease, the marker says the slot is taken.
+        let mut ghost = store.get_task(&task.id).await.unwrap().unwrap();
+        ghost.next_run_at_ms = 1;
+        store.put_task(&ghost).await.unwrap();
+        let claimed_path = store.claim_path(&ghost.id, 1);
+        tokio::fs::create_dir_all(store.claims_dir()).await.unwrap();
+        tokio::fs::write(&claimed_path, b"ghost claim")
+            .await
+            .unwrap();
+
+        let mut contender = store.get_task(&ghost.id).await.unwrap().unwrap();
+        assert!(
+            !store
+                .claim_task_atomically(2, 100, &mut contender)
+                .await
+                .unwrap(),
+            "a marker with no matching record still blocks re-claim; sweep reclaims it"
+        );
+        store.release_claim(&ghost.id, 1).await.unwrap();
+        let mut contender = store.get_task(&ghost.id).await.unwrap().unwrap();
+        assert!(
+            store
+                .claim_task_atomically(2, 100, &mut contender)
+                .await
+                .unwrap(),
+            "after the stale marker is swept, the slot is claimable"
+        );
     }
 
     fn fire(task_id: &str, slot_ms: u64) -> ScheduledFireRecord {
