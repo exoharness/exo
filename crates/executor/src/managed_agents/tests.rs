@@ -2,8 +2,8 @@ use super::*;
 use crate::{Runtime, SandboxProvider, SendRequest};
 use anyhow::Context;
 use exoharness::{
-    BasicExoHarness, BasicExoHarnessConfig, FileSystemMount, FileSystemMountMode, NewThreadRequest,
-    PutSecretRequest, Secret, WriteArtifactRequest,
+    AddEventsRequest, BasicExoHarness, BasicExoHarnessConfig, EventData, FileSystemMount,
+    FileSystemMountMode, NewThreadRequest, PutSecretRequest, Secret, WriteArtifactRequest,
     vault::{CredentialDestination, global_vault},
 };
 use tempfile::TempDir;
@@ -186,6 +186,95 @@ async fn runtime_reads_config_changes_made_by_another_runtime() -> Result<()> {
     );
     server.shutdown().await?;
     cli.shutdown().await
+}
+
+#[tokio::test]
+async fn switching_harnesses_keeps_the_thread_history_and_selects_the_new_default_image()
+-> Result<()> {
+    let temp = TempDir::new()?;
+    let config = crate::test_support::local_test_config(temp.path().join("state"));
+    let store = state(&config).await?;
+    let runtime = runtime(store, &config, Default::default())?;
+    let agent = runtime
+        .create_managed_agent(&AgentDefinition::parse(SOURCE.into())?, "support")
+        .await?;
+    let thread = runtime
+        .open_managed_thread(&agent, None, Default::default())
+        .await?
+        .thread;
+    let thread_id = thread.record().id;
+    thread
+        .add_events(AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: vec![EventData::Messages {
+                messages: vec![crate::harness_helpers::user_message("earlier_harness")],
+                response_id: None,
+                usage: None,
+            }],
+        })
+        .await?;
+
+    let codex = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: codex"))?;
+    runtime.update_managed_agent(&agent, &codex).await?;
+    let reopened = runtime
+        .open_managed_thread(&agent, Some(&thread_id.to_string()), Default::default())
+        .await?;
+    assert_eq!(reopened.thread.record().id, thread_id);
+    let codex_config = runtime.get_agent_config(agent.as_ref()).await?;
+    let mut thread_config = runtime.get_conversation_config(thread.as_ref()).await?;
+    assert_eq!(thread_config.sandbox_image, None);
+    assert_eq!(
+        thread_config.effective_sandbox_image(&codex_config),
+        codex_config.sandbox.image.as_deref()
+    );
+
+    // Threads created before this change persisted the preset image as an override.
+    thread_config.sandbox_image = Some(format!(
+        "ghcr.io/exoharness/codex-devbox@sha256:{}",
+        "0".repeat(64)
+    ));
+    runtime
+        .put_conversation_config(thread.as_ref(), thread_config)
+        .await?;
+    let pi = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: pi"))?;
+    runtime.update_managed_agent(&agent, &pi).await?;
+    runtime
+        .open_managed_thread(&agent, Some(&thread_id.to_string()), Default::default())
+        .await?;
+    let pi_config = runtime.get_agent_config(agent.as_ref()).await?;
+    let thread_config = runtime.get_conversation_config(thread.as_ref()).await?;
+    assert_eq!(thread_config.sandbox_image, None);
+    assert_eq!(
+        thread_config.effective_sandbox_image(&pi_config),
+        pi_config.sandbox.image.as_deref()
+    );
+    let mut custom = thread_config;
+    custom.sandbox_image = Some("custom-devbox:latest".into());
+    runtime
+        .put_conversation_config(thread.as_ref(), custom)
+        .await?;
+    let claude = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: claude-code"))?;
+    runtime.update_managed_agent(&agent, &claude).await?;
+    runtime
+        .open_managed_thread(&agent, Some(&thread_id.to_string()), Default::default())
+        .await?;
+    assert_eq!(
+        runtime
+            .get_conversation_config(thread.as_ref())
+            .await?
+            .sandbox_image
+            .as_deref(),
+        Some("custom-devbox:latest")
+    );
+    let history = crate::materialize_conversation_messages(thread.as_ref()).await?;
+    assert!(matches!(
+        history.as_slice(),
+        [lingua::Message::User {
+            content: lingua::universal::UserContent::String(text)
+        }] if text == "earlier_harness"
+    ));
+    runtime.shutdown().await
 }
 
 fn runtime(
@@ -407,29 +496,6 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
         managed::vaults::load_selection(attached.thread.as_ref()).await?,
         Some(selection)
     );
-    let mut changed = runtime.get_agent_config(agent.as_ref()).await?;
-    changed.harness = crate::AgentHarnessKind::Rlm;
-    runtime
-        .put_agent_config(agent.as_ref(), changed.clone())
-        .await?;
-    let error = runtime
-        .send(
-            agent.clone(),
-            thread.clone(),
-            SendRequest {
-                input: vec![],
-                session_id: None,
-            },
-        )
-        .await
-        .err()
-        .context("changed harness must fail before execution")?;
-    assert!(
-        error.to_string().contains("thread harness changed"),
-        "{error:#}"
-    );
-    changed.harness = crate::AgentHarnessKind::Basic;
-    runtime.put_agent_config(agent.as_ref(), changed).await?;
     agent.write_artifact(WriteArtifactRequest {
         path: managed::AGENT_DEFINITION_PATH.into(),
         contents: SOURCE.replace("config:\n", "mcp_servers:\n  - type: url\n    name: changed\n    url: http://127.0.0.1:1/mcp\nconfig:\n").into_bytes(),

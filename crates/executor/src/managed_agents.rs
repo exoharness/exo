@@ -73,6 +73,10 @@ impl AgentBackend for LocalProvider {
         thread: &dyn ThreadHandle,
         created: bool,
     ) -> Result<managed::ThreadInfo> {
+        let _guard =
+            crate::conversation_wakeup::conversation_send_lock(&thread.record().id.to_string())
+                .lock_owned()
+                .await;
         let agent_config = crate::load_agent_config(agent).await?;
         let current_model = crate::get_conversation_model_override(thread).await?;
         let preferred = current_model
@@ -88,13 +92,23 @@ impl AgentBackend for LocalProvider {
         let mut config = if created {
             ConversationConfig {
                 resources: agent_config.resources.clone(),
-                sandbox_image: agent_config.sandbox.image.clone(),
                 sandbox_provider: Some(agent_config.sandbox.provider.clone()),
                 ..Default::default()
             }
         } else {
             crate::load_conversation_config(thread).await?
         };
+        if !created
+            && config.environment.is_none()
+            && config.sandbox_image.as_deref().is_some_and(|image| {
+                config::is_preset_sandbox_image(image)
+                    && Some(image) != agent_config.sandbox.image.as_deref()
+            })
+        {
+            // Older threads stored the harness's default image as a thread override.
+            // Let them follow the newly selected harness while retaining custom images.
+            config.sandbox_image = None;
+        }
         for resource in &mut config.resources {
             if let Some(updated) = agent_config
                 .resources

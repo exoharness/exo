@@ -47,6 +47,23 @@ impl TypeScriptHarnessPreset {
     }
 }
 
+pub(crate) fn is_preset_sandbox_image(image: &str) -> bool {
+    [
+        TypeScriptHarnessPreset::Codex,
+        TypeScriptHarnessPreset::ClaudeCode,
+        TypeScriptHarnessPreset::Cursor,
+        TypeScriptHarnessPreset::Pi,
+    ]
+    .into_iter()
+    .filter_map(TypeScriptHarnessPreset::sandbox_image)
+    .any(|default| match default.split_once("@sha256:") {
+        Some((repository, _)) => image
+            .split_once("@sha256:")
+            .is_some_and(|(candidate, _)| candidate == repository),
+        None => image == default,
+    })
+}
+
 pub(crate) fn sandbox_model_credential_variable(
     config: &AgentConfig,
 ) -> Result<Option<&'static str>> {

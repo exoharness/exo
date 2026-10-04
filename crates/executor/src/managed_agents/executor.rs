@@ -3,7 +3,7 @@ use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::{
     AgentConfig, AgentHarnessKind, BasicExecutor, BasicToolRuntime, ConversationConfig,
-    ExoToolRuntime, McpToolRuntime, RouterModelClient, SendRequest,
+    ExoToolRuntime, McpToolRuntime, RouterModelClient, SendRequest, TypeScriptHarnessConfig,
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
@@ -32,6 +32,16 @@ struct ThreadExecutor {
     executor: Arc<dyn HarnessExecutor>,
     mcp: PreparedMcp,
     harness: AgentHarnessKind,
+    typescript: Option<TypeScriptHarnessConfig>,
+}
+
+impl ThreadExecutor {
+    async fn shutdown(&self) -> Result<()> {
+        let stopped = self.executor.shutdown().await;
+        let closed = self.mcp.tools.close().await;
+        stopped?;
+        closed
+    }
 }
 
 impl ManagedExecutor {
@@ -58,71 +68,74 @@ impl ManagedExecutor {
         config: &AgentConfig,
         thread_config: &ConversationConfig,
     ) -> Result<Arc<OnceCell<ThreadExecutor>>> {
-        let cell = self
-            .threads
-            .lock()
-            .expect("managed executors poisoned")
-            .entry(thread.record().id)
-            .or_default()
-            .clone();
-        cell.get_or_try_init(|| async {
-            let mcp = connect_mcp(agent, thread, &self.config).await?;
-            mcp.configure_thread(config, thread, thread_config).await?;
-            let tools = Arc::new(McpToolRuntime::new(BasicToolRuntime, mcp.tools.clone()));
-            let model = Arc::new(RouterModelClient::new(self.env.clone()));
-            let executor: Arc<dyn HarnessExecutor> = match config.harness {
-                AgentHarnessKind::Basic => Arc::new(BasicExecutor::with_pricing(
-                    model,
-                    tools,
-                    self.pricing.clone(),
-                )),
-                AgentHarnessKind::Rlm => Arc::new(crate::rlm::RlmExecutor { model, tools }),
-                AgentHarnessKind::TypeScript => {
-                    Arc::new(crate::typescript::TypeScriptExecutor::new(
-                        self.state.clone(),
-                        config::installation()?,
-                        self.env.clone(),
+        loop {
+            let cell = self
+                .threads
+                .lock()
+                .expect("managed executors poisoned")
+                .entry(thread.record().id)
+                .or_default()
+                .clone();
+            cell.get_or_try_init(|| async {
+                let mcp = connect_mcp(agent, thread, &self.config).await?;
+                mcp.configure_thread(config, thread, thread_config).await?;
+                let tools = Arc::new(McpToolRuntime::new(BasicToolRuntime, mcp.tools.clone()));
+                let model = Arc::new(RouterModelClient::new(self.env.clone()));
+                let executor: Arc<dyn HarnessExecutor> = match config.harness {
+                    AgentHarnessKind::Basic => Arc::new(BasicExecutor::with_pricing(
+                        model,
                         tools,
-                    ))
-                }
-                AgentHarnessKind::Exo => {
-                    let root = self
-                        .config
-                        .root
-                        .parent()
-                        .context("Exo storage root has no parent")?;
-                    let tools = ExoToolRuntime::from_root(root)?;
-                    Arc::new(crate::typescript::TypeScriptExecutor::new(
-                        self.state.clone(),
-                        self.workspace.clone(),
-                        self.env.clone(),
-                        Arc::new(McpToolRuntime::new(tools, mcp.tools.clone())),
-                    ))
-                }
-            };
-            Ok::<_, anyhow::Error>(ThreadExecutor {
-                executor,
-                mcp,
-                harness: config.harness,
+                        self.pricing.clone(),
+                    )),
+                    AgentHarnessKind::Rlm => Arc::new(crate::rlm::RlmExecutor { model, tools }),
+                    AgentHarnessKind::TypeScript => {
+                        Arc::new(crate::typescript::TypeScriptExecutor::new(
+                            self.state.clone(),
+                            config::installation()?,
+                            self.env.clone(),
+                            tools,
+                        ))
+                    }
+                    AgentHarnessKind::Exo => {
+                        let root = self
+                            .config
+                            .root
+                            .parent()
+                            .context("Exo storage root has no parent")?;
+                        let tools = ExoToolRuntime::from_root(root)?;
+                        Arc::new(crate::typescript::TypeScriptExecutor::new(
+                            self.state.clone(),
+                            self.workspace.clone(),
+                            self.env.clone(),
+                            Arc::new(McpToolRuntime::new(tools, mcp.tools.clone())),
+                        ))
+                    }
+                };
+                Ok::<_, anyhow::Error>(ThreadExecutor {
+                    executor,
+                    mcp,
+                    harness: config.harness,
+                    typescript: config.typescript.clone(),
+                })
             })
-        })
-        .await?;
-        let prepared = cell.get().context("managed executor was not initialized")?;
-        ensure!(
-            prepared.harness == config.harness,
-            "thread harness changed; start a new thread"
-        );
-        let definition = exo_managed_agents::load_definition(agent).await?;
-        let servers = match definition {
-            Some(definition) => definition.resolve_mcp_servers(&()).await?,
-            None => vec![],
-        };
-        ensure!(
-            prepared.mcp.servers == servers,
-            "MCP configuration changed; start a new thread"
-        );
-        prepared.mcp.validate_thread(config, thread_config)?;
-        Ok(cell)
+            .await?;
+            let prepared = cell.get().context("managed executor was not initialized")?;
+            if prepared.harness != config.harness || prepared.typescript != config.typescript {
+                self.reset_thread(thread.record().id).await?;
+                continue;
+            }
+            let definition = exo_managed_agents::load_definition(agent).await?;
+            let servers = match definition {
+                Some(definition) => definition.resolve_mcp_servers(&()).await?,
+                None => vec![],
+            };
+            ensure!(
+                prepared.mcp.servers == servers,
+                "MCP configuration changed; start a new thread"
+            );
+            prepared.mcp.validate_thread(config, thread_config)?;
+            return Ok(cell);
+        }
     }
 }
 
@@ -134,8 +147,10 @@ impl HarnessExecutor for ManagedExecutor {
             .lock()
             .expect("managed executors poisoned")
             .remove(&thread);
-        if let Some(executor) = executor.and_then(|cell| cell.get().map(|t| t.executor.clone())) {
-            executor.shutdown().await?;
+        if let Some(cell) = executor
+            && let Some(prepared) = cell.get()
+        {
+            prepared.shutdown().await?;
         }
         Ok(())
     }
@@ -297,10 +312,7 @@ impl HarnessExecutor for ManagedExecutor {
             std::mem::take(&mut *self.threads.lock().expect("managed executors poisoned"));
         let results = futures::future::join_all(threads.into_values().map(|cell| async move {
             if let Some(prepared) = cell.get() {
-                let stopped = prepared.executor.shutdown().await;
-                let closed = prepared.mcp.tools.close().await;
-                stopped?;
-                closed?;
+                prepared.shutdown().await?;
             }
             Ok::<_, anyhow::Error>(())
         }))
