@@ -1,6 +1,6 @@
 import type { UniversalUsage } from "@braintrust/lingua-types";
 
-import { toJsonObject, type JsonObject } from "../harness";
+import { toJsonObject, type JsonObject } from "../harness/core";
 import { computeCostUsd, getTable, type PricingTable } from "./cost";
 
 export function modelUsageRecord(

@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "exo-managed-agents-spike",
+  "account_id": "3c6e25ed06f5007276c183b74065f96b",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "containers": [
+    { "class_name": "ExoSandbox", "scheduling_policy": "durable_object" },
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "PROVIDERS", "class_name": "ExoProvider" },
+      { "name": "SANDBOXES", "class_name": "ExoSandbox" },
+    ],
+  },
+  "exports": {
+    "ExoProvider": { "type": "durable-object", "storage": "sqlite" },
+    "ExoSandbox": { "type": "durable-object", "storage": "sqlite" },
+  },
+  "r2_buckets": [
+    { "binding": "ARTIFACTS", "bucket_name": "exo-managed-agents-spike" },
+  ],
+  "vars": { "ACCOUNT_ID": "braintrust-enterprise-cloudflare-spike" },
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
+}

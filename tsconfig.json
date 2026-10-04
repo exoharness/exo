@@ -37,5 +37,11 @@
     "incremental": true
   },
   "include": ["**/*.ts"],
-  "exclude": ["node_modules", "website/docs-src", ".exo", ".local"]
+  "exclude": [
+    "node_modules",
+    "website/docs-src",
+    "exoharness/cloudflare",
+    ".exo",
+    ".local"
+  ]
 }
