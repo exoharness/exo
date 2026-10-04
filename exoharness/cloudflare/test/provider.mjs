@@ -3,6 +3,7 @@ import { readFile, readdir, mkdtemp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { Miniflare } from "miniflare";
+import { fakeCodex } from "./fixtures/fake-codex.mjs";
 
 const token = "test-operator-token";
 let mf;
@@ -10,7 +11,8 @@ let persistence;
 const key = "synthetic-model-key";
 let modelRequests = 0;
 
-const fakeSandbox = `import { DurableObject } from "cloudflare:workers";
+const fakeSandbox = `import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
+${fakeCodex}
 export class FakeSandbox extends DurableObject {
   async exec(identity, request) {
     const count = (await this.ctx.storage.get("count") ?? 0) + 1;
@@ -18,6 +20,10 @@ export class FakeSandbox extends DurableObject {
     return {stdout: "Linux test\\n", stderr: "", exitCode: 0};
   }
   async count() { return await this.ctx.storage.get("count") ?? 0; }
+  async startCodexProcess() { return new FakeCodexProcess(this.ctx.storage); }
+  async runCodexProcess(identity, request, ready) { const process = await this.startCodexProcess(); await ready(new RpcStub(process)); await process.wait(); }
+  async snapshot() { return {id:"fixture-snapshot", size:1}; }
+  async lastMethod() { return await this.ctx.storage.get("last-method"); }
   async stop() {}
 }
 export default { fetch() { return new Response("fixture"); } };`;
@@ -39,6 +45,14 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
     },
   };
   for (const file of await readdir(new URL("../dist/", import.meta.url))) {
+    if (file.endsWith("-version"))
+      modules[file] = {
+        type: "text",
+        contents: await readFile(
+          new URL(`../dist/${file}`, import.meta.url),
+          "utf8",
+        ),
+      };
     if (file.endsWith(".wasm"))
       modules[file] = {
         type: "wasm",
@@ -185,14 +199,18 @@ const policy = (origin) => ({
 });
 const definition = (ask) =>
   `---\nname: Test Agent\nharness: basic\nconfig:\n  model: test-model\n  base_url: https://model.example/v1\n  credential: global/OPENAI_API_KEY\npermission_policy: {type: ${ask ? "always_ask" : "always_allow"}}\n---\nUse shell to print Linux, then finish.`;
-async function create(ask = false) {
+async function create(ask = false, harness = "basic") {
   const agent = await api("agent", "POST", {
     slug: `agent-${crypto.randomUUID()}`,
     name: "Test Agent",
   });
   await api(`agent/${agent.id}/artifact`, "POST", {
     path: "managed-agents/agent.md",
-    contents: [...new TextEncoder().encode(definition(ask))],
+    contents: [
+      ...new TextEncoder().encode(
+        definition(ask).replace("harness: basic", `harness: ${harness}`),
+      ),
+    ],
   });
   const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
   return { agent, thread, path: `agent/${agent.id}/thread/${thread.id}` };
@@ -442,7 +460,7 @@ test("unsupported agent features and invalid origins fail explicitly", async () 
       path: "managed-agents/agent.md",
       contents: [
         ...new TextEncoder().encode(
-          definition(false).replace("harness: basic", "harness: codex"),
+          definition(false).replace("harness: basic", "harness: claude"),
         ),
       ],
     },
@@ -626,4 +644,60 @@ test("vault contents are encrypted at rest and origin rules cannot silently broa
     },
     400,
   );
+});
+
+test("Codex uses JSONL over RPC streams, persists tools and resumes the native thread", async () => {
+  const { thread, path } = await create(false, "codex");
+  const first = await api(
+    `${path}/turn`,
+    "POST",
+    { input: { role: "user", content: "run tests" } },
+    202,
+  );
+  assert.equal(first.harness, "codex");
+  const events = await waitEvents(path, (events) =>
+    events.some((event) => event.data.type === "turn_ended"),
+  );
+  assert(
+    !events.some((event) => event.data.type === "error"),
+    JSON.stringify(events),
+  );
+  assert(
+    events.some(
+      (event) =>
+        event.data.type === "tool_result" && event.data.result.exit_code === 0,
+    ),
+  );
+  assert(events.some((event) => event.data.event_type === "codex_text_delta"));
+  const sandbox = await mf.getDurableObjectNamespace("SANDBOXES", "exo");
+  assert.equal(await sandbox.getByName(thread.id).lastMethod(), "thread/start");
+  const policy = await api(`${path}/sandbox/policy`);
+  assert.deepEqual(policy.origins, ["https://model.example"]);
+  assert(policy.credentials[0].placeholder.startsWith("exo_egress_"));
+  const second = await api(
+    `${path}/turn`,
+    "POST",
+    { input: { role: "user", content: "continue" } },
+    202,
+  );
+  const finished = await waitEvents(path, (events) =>
+    events.some(
+      (event) =>
+        event.turn_id === second.turn.id && event.data.type === "turn_ended",
+    ),
+  );
+  assert(
+    !finished.some((event) => event.data.type === "error"),
+    JSON.stringify(finished),
+  );
+  assert.equal(
+    await sandbox.getByName(thread.id).lastMethod(),
+    "thread/resume",
+  );
+  const started = finished.find(
+    (event) =>
+      event.turn_id === second.turn.id &&
+      event.data.event_type === "codex_turn_started",
+  );
+  assert.equal(started.data.payload.hydrated_from, "warm_codex_thread");
 });

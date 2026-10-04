@@ -1,4 +1,5 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, type RpcStub } from "cloudflare:workers";
+import type { CloudflareProcess } from "./sandbox";
 import { init as initLingua } from "@braintrust/lingua/browser";
 import linguaWasm from "@braintrust/lingua-wasm/browser/lingua_bg.wasm";
 import {
@@ -18,7 +19,11 @@ import {
   type TurnRecord,
   type VaultContext,
   type PendingToolCall,
+  type TurnContext,
 } from "../../typescript/harness/core";
+import { createCodexHarness } from "../../typescript/codex/harness";
+import codexVersion from "../../containers/codex-sandbox/version";
+import codexPackage from "./codex-package.json";
 import {
   ResponsesRuntime,
   responseToLinguaEvents,
@@ -37,9 +42,10 @@ import { CloudflareExoHarness, StateStore } from "./state";
 
 interface Job extends SandboxIdentity {
   turn: TurnRecord;
+  input: Message[];
   definition: Definition;
   round: number;
-  phase: "model" | "tools" | "executing" | "approval";
+  phase: "model" | "tools" | "executing" | "approval" | "codex";
   tools: PendingToolCall[];
   approvalId?: string;
 }
@@ -135,6 +141,9 @@ export class ExoProvider extends DurableObject<Env> {
   readonly harness: CloudflareExoHarness;
   private readonly running = new Set<string>();
   private readonly watchers = new Map<string, Set<() => void>>();
+  private readonly codex = createCodexHarness(codexVersion.trim(), {
+    reuseSessions: false,
+  });
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -148,12 +157,26 @@ export class ExoProvider extends DurableObject<Env> {
 
   async sandboxPolicy(identity: SandboxIdentity): Promise<SandboxPolicy> {
     await this.conversation(identity);
-    return (
-      this.store.get<SandboxPolicy>(`policy/${identity.threadId}`) ?? {
-        origins: [],
-        credentials: [],
-      }
+    const policy = this.store.get<SandboxPolicy>(
+      `policy/${identity.threadId}`,
+    ) ?? {
+      origins: [],
+      credentials: [],
+    };
+    const model = this.store.get<SandboxPolicy>(
+      `codex-policy/${identity.threadId}`,
     );
+    return model
+      ? {
+          origins: [...new Set([...policy.origins, ...model.origins])],
+          credentials: [
+            ...policy.credentials.filter(
+              (binding) => binding.environmentVariable !== "OPENAI_API_KEY",
+            ),
+            ...model.credentials,
+          ],
+        }
+      : policy;
   }
 
   private async conversation(identity: SandboxIdentity): Promise<Conversation> {
@@ -236,6 +259,24 @@ export class ExoProvider extends DurableObject<Env> {
           throw new Error(
             "sandbox execution was interrupted; its outcome is unknown and the command will not be replayed",
           );
+        if (job.definition.harness === "codex") {
+          const recovering = job.phase === "codex";
+          job.phase = "codex";
+          this.store.put(`job/${threadId}`, job);
+          await this.driveCodex(job, harness, recovering);
+          if (
+            this.store.get<TurnRecord>(`active/${threadId}`)?.id !== job.turn.id
+          )
+            return;
+          // Codex is stopped and its history flushed before snapshotting.
+          await this.env.SANDBOXES.getByName(threadId).snapshot(job);
+          this.ctx.storage.transactionSync(() => {
+            turn.finishRecord();
+            this.store.delete(`job/${threadId}`);
+          });
+          this.notify(threadId);
+          return;
+        }
         if (job.phase === "model") {
           if (job.round > (job.definition.config.max_tool_round_trips ?? 20))
             throw new Error("tool round budget exceeded");
@@ -347,7 +388,7 @@ export class ExoProvider extends DurableObject<Env> {
         job &&
         this.store.get<TurnRecord>(`active/${threadId}`)?.id === job.turn.id
       ) {
-        if (job.phase === "executing")
+        if (job.phase === "executing" || job.phase === "codex")
           await this.env.SANDBOXES.getByName(threadId).stop();
         const harness = await this.harness.forTurn(
           job.agentId,
@@ -366,6 +407,138 @@ export class ExoProvider extends DurableObject<Env> {
       }
     } finally {
       this.running.delete(threadId);
+    }
+  }
+
+  private async driveCodex(
+    job: Job,
+    harness: CloudflareExoHarness,
+    recovering: boolean,
+  ): Promise<void> {
+    if (codexVersion.trim() !== codexPackage.version)
+      throw new Error(
+        "Codex package pin differs from the native harness version",
+      );
+    const baseURL =
+      job.definition.config.base_url ?? "https://api.openai.com/v1";
+    const credential = job.definition.config.credential ?? "OPENAI_API_KEY";
+    await this.credential(
+      harness.current.conversation,
+      credential,
+      `${baseURL.replace(/\/$/, "")}/responses`,
+    );
+    const saved = this.store.get<SandboxPolicy>(`codex-policy/${job.threadId}`);
+    const policy: SandboxPolicy = {
+      origins: [new URL(baseURL).origin],
+      credentials: [
+        {
+          environmentVariable: "OPENAI_API_KEY",
+          credential,
+          placeholder:
+            saved?.credentials[0]?.credential === credential
+              ? saved.credentials[0].placeholder
+              : `${PLACEHOLDER_PREFIX}${crypto.randomUUID()}`,
+        },
+      ],
+    };
+    this.store.put(`codex-policy/${job.threadId}`, policy);
+    const append = async (
+      event_type: string,
+      payload: { text?: string; ttft_ms?: number },
+    ) => {
+      await harness.current.turn.addEvents([
+        { type: "custom", event_type, payload },
+      ]);
+      this.notify(job.threadId);
+    };
+    const context: TurnContext = {
+      exoharness: harness,
+      mcpServers: [],
+      tools: [],
+      streaming: true,
+      agentConfig: {
+        harness: "typescript",
+        instructions: [systemTextMessage(job.definition.instructions)],
+        model: job.definition.config.model,
+        baseUrl: baseURL,
+        credential,
+        enableAgentToolCreation: false,
+        sandbox: {
+          provider: "cloudflare",
+          enableNetworking: true,
+          scope: "conversation",
+          mounts: [],
+        },
+      },
+      conversationConfig: {
+        workdir: "/workspace",
+        shellProgram: "/bin/bash",
+        mounts: [],
+        permissionPolicy: { type: "always_allow" },
+      },
+      request: { input: job.input, sessionId: job.turn.sessionId },
+      authorizeTool: async () => {},
+      executeTool: async () => {
+        throw new Error("custom Codex tools are not supported");
+      },
+      executePendingTools: async () => {
+        throw new Error("custom Codex tools are not supported");
+      },
+      startSandboxProcess: async (request) => {
+        await append("codex_process_start_requested", {});
+        // RPC functions are capabilities, so the Sandbox can deliver its handle
+        // before its owning invocation completes.
+        const ready = new Promise<RpcStub<CloudflareProcess>>(
+          (resolve, reject) => {
+            const running = this.env.SANDBOXES.getByName(
+              job.threadId,
+            ).runCodexProcess(job, request, async (process) => {
+              resolve(process.dup());
+            });
+            this.ctx.waitUntil(running.catch(reject));
+          },
+        );
+        const process = await ready;
+        await append("codex_process_started", {});
+        const [stdout, stderr, sandboxProcessId] = await Promise.all([
+          process.stdout,
+          process.stderr,
+          process.sandboxProcessId,
+        ]);
+        return {
+          sandboxId: job.threadId,
+          sandboxProcessId,
+          reused: false,
+          stdout: stdout.pipeThrough(new TextDecoderStream()),
+          stderr: stderr.pipeThrough(new TextDecoderStream()),
+          writeStdin: (data) => process.writeStdin(data),
+          closeStdin: () => process.closeStdin(),
+          close: async () => {
+            try {
+              await process.close();
+            } finally {
+              process[Symbol.dispose]();
+            }
+          },
+          wait: () => process.wait(),
+        };
+      },
+      stream: {
+        firstChunk: (ttft_ms) => append("codex_first_chunk", { ttft_ms }),
+        text: (text) => append("codex_text_delta", { text }),
+        toolCall: async () => {},
+        toolResult: async () => {},
+      },
+    };
+    await initLingua(linguaWasm);
+    const timer = setTimeout(() => {
+      this.ctx.waitUntil(this.env.SANDBOXES.getByName(job.threadId).stop());
+    }, 600_000);
+    try {
+      if (recovering) await this.codex.resumeTurn!(context);
+      else await this.codex.runTurn(context);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -537,11 +710,13 @@ export class ExoProvider extends DurableObject<Env> {
           "model",
           "visibility",
         ]);
-        if (raw.harness && raw.harness !== "basic")
-          throw new Error("only the basic harness is supported");
+        if (raw.harness && !["basic", "codex"].includes(raw.harness))
+          throw new Error("unsupported harness");
         if (raw.visibility && raw.visibility !== "owner")
           throw new Error("this prototype is a single operator deployment");
-        await this.definition(agent);
+        const definition = await this.definition(agent);
+        if (raw.harness && raw.harness !== definition.harness)
+          throw new Error("harness must match the agent definition");
         const thread = await agent.newConversation({
           slug: raw.thread_slug,
           name: raw.thread_name,
@@ -552,7 +727,7 @@ export class ExoProvider extends DurableObject<Env> {
         return Response.json({
           agent: agent.record,
           thread: threadRecord(thread),
-          harness: "basic",
+          harness: definition.harness,
         });
       }
     }
@@ -568,7 +743,7 @@ export class ExoProvider extends DurableObject<Env> {
       if (method === "DELETE") {
         await this.env.SANDBOXES.getByName(identity.threadId).stop();
         const deleted = await agent.deleteConversation(identity.threadId);
-        for (const key of ["model", "policy", "job"])
+        for (const key of ["model", "policy", "codex-policy", "job"])
           this.store.delete(`${key}/${identity.threadId}`);
         return Response.json({
           agent: agent.record,
@@ -677,12 +852,14 @@ export class ExoProvider extends DurableObject<Env> {
           "reset_history",
         ]);
         if (
-          (raw.harness && raw.harness !== "basic") ||
+          (raw.harness && !["basic", "codex"].includes(raw.harness)) ||
           (raw.attention && raw.attention !== "wake") ||
           raw.reset_history
         )
           throw new Error("unsupported turn option");
         const definition = await this.definition(agent);
+        if (raw.harness && raw.harness !== definition.harness)
+          throw new Error("harness must match the agent definition");
         definition.config.model =
           raw.model ??
           this.store.get<string>(`model/${identity.threadId}`) ??
@@ -707,6 +884,7 @@ export class ExoProvider extends DurableObject<Env> {
           const job: Job = {
             ...identity,
             turn: turn.record,
+            input,
             definition,
             round: 0,
             phase: "model",
@@ -722,7 +900,7 @@ export class ExoProvider extends DurableObject<Env> {
             agent: agent.record,
             thread: threadRecord(thread),
             turn: { id: job.turn.id, session_id: job.turn.sessionId },
-            harness: "basic",
+            harness: definition.harness,
           },
           { status: 202 },
         );

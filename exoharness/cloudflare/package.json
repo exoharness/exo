@@ -9,7 +9,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "pnpm run build && node --test test/*.mjs",
-    "test:live": "node scripts/live-test.mjs"
+    "test:live": "node scripts/live-test.mjs",
+    "test:live:codex": "node scripts/live-codex-test.mjs"
   },
   "dependencies": {
     "yaml": "2.8.1"

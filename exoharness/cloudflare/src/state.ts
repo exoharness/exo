@@ -523,7 +523,11 @@ class CloudflareConversation extends ArtifactStore implements Conversation {
               : event.id < query.cursor)) &&
           (!query.sessionId || event.sessionId === query.sessionId) &&
           (!query.turnId || event.turnId === query.turnId) &&
-          (!query.types || query.types.includes(event.data.type)),
+          (!query.types ||
+            query.types.includes(event.data.type) ||
+            (event.data.type === "custom" &&
+              typeof event.data.event_type === "string" &&
+              query.types.includes(event.data.event_type))),
       );
     if (direction === "desc") events.reverse();
     if (query.limit != null) {

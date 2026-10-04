@@ -3,6 +3,7 @@ import { parse } from "yaml";
 export const DEFINITION_PATH = "managed-agents/agent.md";
 export interface Definition {
   name: string;
+  harness: "basic" | "codex";
   instructions: string;
   config: {
     model: string;
@@ -51,8 +52,10 @@ export function parseDefinition(source: string): Definition {
     "adapters",
     "tool_creation",
   ]);
-  if (raw.harness !== "basic")
-    throw new Error("the Cloudflare prototype supports the basic harness only");
+  if (raw.harness !== "basic" && raw.harness !== "codex")
+    throw new Error(
+      "the Cloudflare prototype supports basic and codex harnesses",
+    );
   for (const name of ["resources", "mcp_servers", "tools", "adapters"]) {
     if (
       raw[name] !== undefined &&
@@ -93,6 +96,8 @@ export function parseDefinition(source: string): Definition {
         (config[name] as number) < (name === "max_tool_round_trips" ? 0 : 1))
     )
       throw new Error(`invalid ${name}`);
+    if (raw.harness === "codex" && config[name] !== undefined)
+      throw new Error(`Codex does not support ${name} in this prototype`);
   }
   const policy = (value: unknown): boolean => {
     const rawPolicy = fields(value, ["type"]);
@@ -102,8 +107,19 @@ export function parseDefinition(source: string): Definition {
   };
   const toolPolicies =
     raw.tool_policies === undefined ? {} : fields(raw.tool_policies, ["shell"]);
+  // externalSandbox permits native file writes without an approval callback.
+  // Reject a policy we cannot enforce, as the native Exo Codex harness does.
+  if (
+    raw.harness === "codex" &&
+    ((raw.permission_policy !== undefined && policy(raw.permission_policy)) ||
+      (toolPolicies.shell !== undefined && policy(toolPolicies.shell)))
+  )
+    throw new Error(
+      "Codex always_ask policies are not supported in this prototype",
+    );
   return {
     name: text(raw.name, "name"),
+    harness: raw.harness,
     instructions: text(match[2].trim(), "instructions"),
     config: {
       model,

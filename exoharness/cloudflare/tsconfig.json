@@ -7,7 +7,13 @@
     "types": ["@cloudflare/workers-types", "node"],
     "strict": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "paths": {
+      "@exo/harness": ["../typescript/harness/core.ts"],
+      "@exo/codex/app-server": ["../typescript/codex/app-server.ts"],
+      "@exo/model-runtime/*": ["../typescript/model-runtime/*.ts"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

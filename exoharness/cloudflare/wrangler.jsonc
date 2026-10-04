@@ -6,6 +6,14 @@
   "compatibility_date": "2026-10-04",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "alias": { "@exo/harness": "../typescript/harness/core.ts" },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/codex-sandbox/version"],
+      "fallthrough": true,
+    },
+  ],
   "containers": [
     { "class_name": "ExoSandbox", "scheduling_policy": "durable_object" },
   ],
