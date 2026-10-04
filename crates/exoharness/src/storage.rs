@@ -17,12 +17,16 @@ use crate::Result;
 #[derive(Clone)]
 pub(crate) struct BasicObjectStore {
     store: Arc<dyn ObjectStore>,
+    #[cfg(test)]
+    fail_json_put_after: Arc<std::sync::Mutex<Option<usize>>>,
 }
 
 impl BasicObjectStore {
     pub(crate) fn in_memory() -> Self {
         Self {
             store: Arc::new(InMemory::new()),
+            #[cfg(test)]
+            fail_json_put_after: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -32,7 +36,17 @@ impl BasicObjectStore {
         let store = LocalFileSystem::new_with_prefix(&root)?;
         Ok(Self {
             store: Arc::new(store),
+            #[cfg(test)]
+            fail_json_put_after: Arc::new(std::sync::Mutex::new(None)),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_json_put_after(&self, successful_puts: usize) {
+        *self
+            .fail_json_put_after
+            .lock()
+            .expect("fault counter poisoned") = Some(successful_puts);
     }
 
     pub(crate) async fn put_json<T: Serialize>(
@@ -40,6 +54,20 @@ impl BasicObjectStore {
         key: impl AsRef<Path>,
         value: &T,
     ) -> Result<()> {
+        #[cfg(test)]
+        {
+            let mut remaining = self
+                .fail_json_put_after
+                .lock()
+                .expect("fault counter poisoned");
+            if let Some(count) = *remaining {
+                if count == 0 {
+                    *remaining = None;
+                    anyhow::bail!("injected JSON object write failure");
+                }
+                *remaining = Some(count - 1);
+            }
+        }
         let path = object_path(key.as_ref())?;
         let bytes = serde_json::to_vec_pretty(value)?;
         self.store.put(&path, Bytes::from(bytes).into()).await?;
