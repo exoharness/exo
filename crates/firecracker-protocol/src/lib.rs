@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GuestResourceMount {
     pub device: String,
@@ -59,6 +59,9 @@ pub enum GuestRequest<B> {
     },
     SyncFilesystem {
         path: String,
+    },
+    MountResources {
+        mounts: Vec<GuestResourceMount>,
     },
     ConfigureNetwork {
         address: Ipv4Addr,

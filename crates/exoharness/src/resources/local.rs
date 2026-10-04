@@ -15,11 +15,12 @@ use crate::local_volume::{clone_volume, create_volume, mount_volume, unmount_vol
 use crate::{AgentId, FileSystemMount, ResourceScope, ThreadId};
 
 #[derive(Clone)]
-pub(crate) struct ResourceStore {
+pub struct ResourceStore {
     root: PathBuf,
     excluded: PathBuf,
     master_key: Option<PathBuf>,
     image_size_gib: Option<u64>,
+    volume_size_gib: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -30,14 +31,28 @@ struct Instance {
 }
 
 impl ResourceStore {
-    pub(crate) fn new(root: &Path) -> Result<Self> {
+    pub fn new(root: &Path) -> Result<Self> {
         let root = canonical_path(&std::env::current_dir()?.join(root))?;
         Ok(Self {
             root: root.join("resources"),
             excluded: root,
             master_key: None,
             image_size_gib: None,
+            volume_size_gib: None,
         })
+    }
+
+    pub fn with_volume_size(mut self, size_gib: u64) -> Result<Self> {
+        ensure!(size_gib > 0, "resource volume size must be positive");
+        ensure!(
+            cfg!(target_os = "macos") || self.image_size_gib.is_some(),
+            "bounded resources require APFS volumes or Firecracker resource images"
+        );
+        self.volume_size_gib = Some(size_gib);
+        if self.image_size_gib.is_some() {
+            self.image_size_gib = Some(size_gib);
+        }
+        Ok(self)
     }
 
     pub(crate) fn excluding_master_key(mut self, path: Option<PathBuf>) -> Result<Self> {
@@ -56,10 +71,7 @@ impl ResourceStore {
         Ok(())
     }
 
-    pub(crate) fn prepare(
-        &self,
-        resources: Vec<ResourceDefinition>,
-    ) -> Result<Vec<PreparedResource>> {
+    pub fn prepare(&self, resources: Vec<ResourceDefinition>) -> Result<Vec<PreparedResource>> {
         super::validate_resources(&resources)?;
         if resources.is_empty() {
             return Ok(Vec::new());
@@ -78,14 +90,15 @@ impl ResourceStore {
                 let destination = self.root.join("snapshots").join(&key);
                 if !destination.exists() {
                     tracing::info!(resource = definition.name, "preparing filesystem resource");
-                    self.publish(&key, |workspace| {
+                    self.publish(&key, |_, volume| {
+                        let workspace = self.mount_volume(volume)?;
                         if matches!(definition.source, ResourceSource::GitRepository { .. }) {
-                            local_git(source, workspace, &self.excluded)?;
+                            local_git(source, &workspace, &self.excluded)?;
                         } else {
-                            copy_directory(source, workspace, &self.excluded, false)?;
+                            copy_directory(source, &workspace, &self.excluded, false)?;
                         }
                         ensure!(self.fingerprint(source)? == before, "resource changed during preparation; retry when writes have finished");
-                        Ok(())
+                        self.prepare_ownership(&workspace)
                     })?;
                 }
                 Some(key)
@@ -94,7 +107,7 @@ impl ResourceStore {
         }).collect()
     }
 
-    pub(crate) fn materialize(
+    pub fn materialize(
         &self,
         agent: AgentId,
         thread: ThreadId,
@@ -142,6 +155,7 @@ impl ResourceStore {
                 let (snapshot, revision) = match &prepared.snapshot {
                     Some(snapshot) => {
                         validate_key(snapshot)?;
+                        let _lock = self.lock(snapshot)?;
                         self.clone_volume(&self.root.join("snapshots").join(snapshot), &target)?;
                         (snapshot.clone(), None)
                     }
@@ -183,7 +197,7 @@ impl ResourceStore {
             .collect()
     }
 
-    pub(crate) fn command_env(
+    pub fn command_env(
         &self,
         scope: ResourceScope,
         mounts: &[FileSystemMount],
@@ -253,7 +267,7 @@ impl ResourceStore {
         Ok(env)
     }
 
-    pub(crate) fn remove_thread(&self, agent: AgentId, thread: ThreadId) -> Result<()> {
+    pub fn remove_thread(&self, agent: AgentId, thread: ThreadId) -> Result<()> {
         let directory = self.thread_directory(agent, thread);
         if !directory.exists() {
             return Ok(());
@@ -319,21 +333,45 @@ impl ResourceStore {
         Ok(format!("{:x}", hash.finalize()))
     }
 
-    fn publish(&self, key: &str, populate: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
-        let snapshots = self.root.join("snapshots");
-        let staging = tempfile::tempdir_in(&snapshots)?;
-        self.create_volume(staging.path())?;
-        let workspace = self.mount_volume(staging.path())?;
-        let populated = populate(&workspace).and_then(|()| self.prepare_ownership(&workspace));
-        let detached = self.unmount_volume(staging.path());
-        if let Err(error) = detached {
-            let path = staging.keep();
-            return Err(error).with_context(|| {
-                format!("could not unmount preparation volume at {}", path.display())
-            });
+    fn publish(
+        &self,
+        key: &str,
+        populate: impl FnOnce(ResourceScope, &Path) -> Result<()>,
+    ) -> Result<()> {
+        let destination = self.root.join("snapshots").join(key);
+        let agent_id = crate::Uuid7::now();
+        let thread_id = crate::Uuid7::now();
+        let threads = self.root.join("threads");
+        fs::create_dir_all(&threads)?;
+        // Guest preparation must use the same scoped paths as normal resource mounts.
+        let temporary = tempfile::Builder::new()
+            .prefix(&agent_id.to_string())
+            .rand_bytes(0)
+            .tempdir_in(&threads)?;
+        let staging = temporary.path().join(thread_id.to_string()).join("volume");
+        fs::create_dir_all(&staging)?;
+        if destination.exists() {
+            self.clone_volume(&destination, &staging)?;
+        } else {
+            self.create_volume(&staging)?;
+        }
+        let populated = populate(
+            ResourceScope::Thread {
+                agent_id,
+                thread_id,
+            },
+            &staging,
+        );
+        if let Err(error) = self.unmount_volume(&staging) {
+            drop(temporary.keep());
+            return Err(error)
+                .with_context(|| format!("unmounting prepared resource at {}", staging.display()));
         }
         populated?;
-        fs::rename(staging.path(), snapshots.join(key))?;
+        if destination.exists() {
+            fs::remove_dir_all(&destination)?;
+        }
+        fs::rename(&staging, &destination)?;
         Ok(())
     }
 
@@ -699,4 +737,5 @@ fn checked(command: &mut Command) -> Result<Output> {
 mod tests;
 
 mod images;
+mod preparation;
 pub(crate) use images::host_git_credential;

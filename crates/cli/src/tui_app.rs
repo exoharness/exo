@@ -1465,6 +1465,8 @@ mod tests {
         for name in ["first", "second"] {
             let approval = permissions::ApprovalRequest {
                 approval_id: name.into(),
+                tool_call_id: None,
+                round: None,
                 request: ToolRequest {
                     namespace: None,
                     function_name: format!("exo_mcp__notes__{name}"),
@@ -1529,6 +1531,8 @@ mod tests {
             turn: turn.record().clone(),
             approval: permissions::ApprovalRequest {
                 approval_id: "cancelled".into(),
+                tool_call_id: None,
+                round: None,
                 request: ToolRequest {
                     namespace: None,
                     function_name: "cancelled".into(),

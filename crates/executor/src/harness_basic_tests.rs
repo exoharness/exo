@@ -1,16 +1,25 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::Duration;
 
 use crate::{
     ModelClient, ModelRequest, ModelResponse, ModelResponseStream, PendingToolCall, SendRequest,
+    ToolRuntime,
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    AddEventsRequest, BasicExoHarness, EventData, EventKind, EventQuery, EventQueryDirection,
-    ExoHarness, FileSystemMount, FileSystemMountMode, PutSecretRequest, Result, SandboxAttachment,
-    SandboxProvider, Secret, ToolRequest, Uuid7,
+    AddEventsRequest, AgentHandle, BasicExoHarness, BeginTurnRequest, ConversationHandle,
+    EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
+    FileSystemMountMode, PutSecretRequest, ResourceScope, Result, SandboxAttachment,
+    SandboxProvider, Secret, ToolRequest, ToolResult, TurnHandle, Uuid7,
+    access::{AccessPolicy, Caller},
+    vault::VaultRecord,
 };
+use futures::StreamExt;
 use lingua::universal::{AssistantContent, UserContent};
 use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde_json::{Map, Value};
@@ -19,8 +28,1665 @@ use tempfile::TempDir;
 use crate::test_support::{create_test_credential, local_test_config};
 use crate::{
     BasicToolRuntime, ConversationModelConfig, CreateAgentRequest, CreateConversationRequest,
-    LocalProvider, Runtime, harness_tool::ensure_shell_sandbox,
+    LocalProvider, Runtime,
+    harness_executor::{ExecutorStreamMode, HarnessExecutor, RecoveryRuntimeResolver},
+    harness_executor::{RUNTIME_TURN_COMPLETED, RecoverableTurn},
+    harness_tool::ensure_shell_sandbox,
+    http_service::{RuntimeHttpService, server},
 };
+
+struct RecoveryPolicy(Uuid7);
+
+#[async_trait]
+impl AccessPolicy for RecoveryPolicy {
+    async fn check(&self, _: &str, _: ResourceScope) -> Result<()> {
+        Ok(())
+    }
+    async fn check_operator(&self, _: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn created(&self, _: &str, _: ResourceScope) -> Result<()> {
+        Ok(())
+    }
+    async fn vault(&self, _: &str, record: &VaultRecord, _: bool) -> Result<Option<VaultRecord>> {
+        Ok(Some(record.clone()))
+    }
+    async fn vault_created(&self, _: &str, _: Uuid7, _: &str) -> Result<()> {
+        Ok(())
+    }
+    async fn default_vault(&self, _: &str) -> Result<Uuid7> {
+        Ok(self.0)
+    }
+}
+
+#[derive(Clone, Default)]
+struct CallerRecordingExecutor(Arc<Mutex<Vec<Option<String>>>>);
+
+#[derive(Default)]
+struct CountingToolRuntime(AtomicUsize);
+
+#[async_trait]
+impl ToolRuntime for CountingToolRuntime {
+    fn permission_policy(
+        &self,
+        policies: &exo_managed_agents::permissions::PermissionPolicies,
+        name: &str,
+    ) -> exo_managed_agents::permissions::PermissionPolicy {
+        if name == "write_file" {
+            exo_managed_agents::permissions::PermissionPolicy::AlwaysAsk {}
+        } else {
+            policies.for_tool(name)
+        }
+    }
+
+    async fn execute(
+        &self,
+        _: &dyn AgentHandle,
+        _: &dyn ConversationHandle,
+        _: Option<&dyn TurnHandle>,
+        _: &crate::AgentConfig,
+        _: &crate::ConversationConfig,
+        _: &ToolRequest,
+    ) -> Result<ToolResult> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(serde_json::json!({"ok": true}))
+    }
+}
+
+#[async_trait]
+impl HarnessExecutor for CallerRecordingExecutor {
+    fn name(&self) -> &'static str {
+        "caller-recording"
+    }
+
+    async fn execute_turn(
+        &self,
+        _: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+        _: Arc<dyn TurnHandle>,
+        _: &crate::AgentConfig,
+        _: &crate::ConversationConfig,
+        _: &SendRequest,
+        _: ExecutorStreamMode<'_>,
+        _: Option<&dyn crate::execution_tracing::TurnExecutionTrace>,
+    ) -> Result<()> {
+        self.0
+            .lock()
+            .expect("caller record poisoned")
+            .push(thread.caller().map(|caller| caller.principal.clone()));
+        Ok(())
+    }
+
+    async fn resume_turn(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+        turn: Arc<dyn TurnHandle>,
+        agent_config: &crate::AgentConfig,
+        conversation_config: &crate::ConversationConfig,
+        request: &SendRequest,
+        stream_mode: ExecutorStreamMode<'_>,
+        turn_trace: Option<&dyn crate::execution_tracing::TurnExecutionTrace>,
+    ) -> Result<()> {
+        self.execute_turn(
+            agent,
+            thread,
+            turn,
+            agent_config,
+            conversation_config,
+            request,
+            stream_mode,
+            turn_trace,
+        )
+        .await
+    }
+}
+
+#[tokio::test]
+async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    create_test_credential(state.as_ref()).await;
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("durable-turn", crate::AgentHarnessKind::Basic)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let request = SendRequest {
+        input: vec![user_message("continue after the tool")],
+        session_id: None,
+    };
+    let mut agent_config = runtime.get_agent_config(agent.as_ref()).await?;
+    agent_config.model = "recovery-model".into();
+    let work = RecoverableTurn {
+        agent_config,
+        thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
+        request: request.clone(),
+    };
+    let turn = thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: request.input,
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    let turn_id = turn.record().id;
+    turn.add_events(vec![
+        EventData::Custom {
+            event_type: crate::basic::BASIC_TOOL_ROUND.into(),
+            payload: serde_json::to_value(crate::basic::BasicToolRound { round: 0 })?,
+        },
+        EventData::ToolRequested {
+            tool_call_id: "call-1".into(),
+            response_id: None,
+            request: ToolRequest {
+                namespace: None,
+                function_name: "lookup".into(),
+                arguments: Map::new(),
+            },
+        },
+        EventData::ToolResult {
+            tool_call_id: "call-1".into(),
+            result: serde_json::json!({"answer": "saved result"}),
+        },
+    ])
+    .await?;
+    let completed_thread = runtime
+        .create_conversation(
+            agent.as_ref(),
+            CreateConversationRequest {
+                slug: Some("completed".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let completed_thread_id = completed_thread.record().id;
+    let completed_work = RecoverableTurn {
+        request: SendRequest {
+            input: vec![user_message("already answered")],
+            session_id: None,
+        },
+        ..work.clone()
+    };
+    let completed_turn = completed_thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: completed_work.request.input.clone(),
+            initial_events: vec![completed_work.event()?],
+        })
+        .await?;
+    let completed_turn_id = completed_turn.record().id;
+    completed_turn
+        .add_events(vec![
+            EventData::Messages {
+                messages: vec![assistant_message("saved answer")],
+                response_id: None,
+                usage: None,
+            },
+            EventData::Custom {
+                event_type: RUNTIME_TURN_COMPLETED.into(),
+                payload: Value::Null,
+            },
+        ])
+        .await?;
+    let failed_thread = runtime
+        .create_conversation(
+            agent.as_ref(),
+            CreateConversationRequest {
+                slug: Some("failed".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let failed_thread_id = failed_thread.record().id;
+    let failed_turn = failed_thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("already failed")],
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    let failed_turn_id = failed_turn.record().id;
+    failed_turn
+        .add_events(vec![EventData::Error {
+            message: "execution already failed".into(),
+            metadata: None,
+        }])
+        .await?;
+    let invalid_thread = runtime
+        .create_conversation(
+            agent.as_ref(),
+            CreateConversationRequest {
+                slug: Some("invalid-work".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let invalid_thread_id = invalid_thread.record().id;
+    let invalid_turn = invalid_thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("invalid work")],
+            initial_events: vec![EventData::Custom {
+                event_type: crate::harness_executor::RUNTIME_TURN_WORK.into(),
+                payload: Value::Null,
+            }],
+        })
+        .await?;
+    let invalid_turn_id = invalid_turn.record().id;
+    drop(invalid_turn);
+    drop(invalid_thread);
+    drop(failed_turn);
+    drop(failed_thread);
+    drop(completed_turn);
+    drop(completed_thread);
+    drop(turn);
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
+        provider_cost_usd: None,
+        response_id: None,
+        messages: vec![assistant_message("resumed")],
+        tool_calls: Vec::new(),
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    }]));
+    let runtime = Arc::new(Runtime::new(
+        LocalProvider::basic(
+            state,
+            Arc::clone(&model),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    ));
+    runtime.recover_unfinished_turns().await?;
+    let agent = runtime
+        .exoharness_handle()
+        .get_agent(&agent_id)
+        .await?
+        .expect("agent should survive restart");
+    let thread = agent
+        .get_thread(&thread_id)
+        .await?
+        .expect("thread should survive restart");
+    let completed_thread = agent
+        .get_thread(&completed_thread_id)
+        .await?
+        .expect("completed thread should survive restart");
+    let invalid_thread = agent
+        .get_thread(&invalid_thread_id)
+        .await?
+        .expect("invalid thread should survive restart");
+    let failed_thread = agent
+        .get_thread(&failed_thread_id)
+        .await?
+        .expect("failed thread should survive restart");
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn_id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = completed_thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(completed_turn_id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert_eq!(model.requests().len(), 1);
+    assert_eq!(model.requests()[0].model, "recovery-model");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.data, EventData::TurnStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.data, EventData::ToolRequested { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        model.requests()[0]
+            .messages
+            .iter()
+            .any(|message| { matches!(message, Message::Tool { .. }) })
+    );
+    assert!(serde_json::to_string(&model.requests()[0].messages)?.contains("saved result"));
+    let invalid_events = invalid_thread
+        .get_events(Some(EventQuery {
+            turn_id: Some(invalid_turn_id),
+            ..Default::default()
+        }))
+        .await?
+        .events;
+    assert!(
+        invalid_events
+            .iter()
+            .any(|event| matches!(event.data, EventData::Error { .. }))
+    );
+    assert!(
+        invalid_events
+            .iter()
+            .any(|event| matches!(event.data, EventData::TurnEnded))
+    );
+    let failed_events = failed_thread
+        .get_events(Some(EventQuery {
+            turn_id: Some(failed_turn_id),
+            ..Default::default()
+        }))
+        .await?
+        .events;
+    assert!(
+        failed_events
+            .iter()
+            .any(|event| matches!(event.data, EventData::TurnEnded))
+    );
+    assert_eq!(model.requests().len(), 1);
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    create_test_credential(state.as_ref()).await;
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("unresolved-tool", crate::AgentHarnessKind::Basic)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let request = SendRequest {
+        input: vec![user_message("run the tool")],
+        session_id: None,
+    };
+    let work = RecoverableTurn {
+        agent_config: runtime.get_agent_config(agent.as_ref()).await?,
+        thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
+        request: request.clone(),
+    };
+    let turn = thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: request.input,
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    let turn_id = turn.record().id;
+    turn.add_events(vec![EventData::ToolRequested {
+        tool_call_id: "call-1".into(),
+        response_id: None,
+        request: ToolRequest {
+            namespace: None,
+            function_name: "side_effect".into(),
+            arguments: Map::new(),
+        },
+    }])
+    .await?;
+    let answered_thread = runtime
+        .create_conversation(
+            agent.as_ref(),
+            CreateConversationRequest {
+                slug: Some("answered-approval".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let answered_thread_id = answered_thread.record().id;
+    let answered_turn = answered_thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: vec![user_message("approval was answered before crash")],
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    let answered_turn_id = answered_turn.record().id;
+    let answered_request = ToolRequest {
+        namespace: None,
+        function_name: "side_effect".into(),
+        arguments: Map::new(),
+    };
+    answered_turn
+        .add_events(vec![
+            EventData::Custom {
+                event_type: crate::basic::BASIC_TOOL_ROUND.into(),
+                payload: serde_json::to_value(crate::basic::BasicToolRound { round: 0 })?,
+            },
+            EventData::ToolRequested {
+                tool_call_id: "answered-call".into(),
+                response_id: None,
+                request: answered_request.clone(),
+            },
+            EventData::Custom {
+                event_type: crate::permissions::APPROVAL_REQUESTED.into(),
+                payload: serde_json::to_value(crate::permissions::ApprovalRequest {
+                    approval_id: "answered-approval".into(),
+                    tool_call_id: Some("answered-call".into()),
+                    round: Some(0),
+                    request: answered_request,
+                })?,
+            },
+        ])
+        .await?;
+    crate::permissions::respond(
+        answered_thread.as_ref(),
+        answered_turn.record().clone(),
+        &exo_managed_agents::http::protocol::ApprovalResponseBody {
+            session_id: answered_turn.record().session_id,
+            approval_id: "answered-approval".into(),
+            approved: true,
+            allow_for_tool: false,
+        },
+    )
+    .await?;
+    drop(answered_turn);
+    drop(answered_thread);
+    drop(turn);
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::default());
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::clone(&model),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    runtime.recover_unfinished_turns().await?;
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    let answered_thread = agent.get_thread(&answered_thread_id).await?.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn_id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert!(events.iter().any(|event| matches!(
+        &event.data,
+        EventData::Error { message, .. }
+            if message.contains("cannot safely resume unresolved tool call `call-1` (`side_effect`)")
+    )));
+    assert!(model.requests().is_empty());
+    let answered_events = answered_thread
+        .get_events(Some(EventQuery {
+            turn_id: Some(answered_turn_id),
+            ..Default::default()
+        }))
+        .await?
+        .events;
+    assert!(answered_events.iter().any(|event| matches!(
+        &event.data,
+        EventData::Error { message, .. }
+            if message.contains("cannot safely resume unresolved tool call `answered-call`")
+    )));
+    assert!(
+        answered_events
+            .iter()
+            .any(|event| matches!(event.data, EventData::TurnEnded))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.data, EventData::ToolResult { .. }))
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(CountingToolRuntime::default()),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    create_test_credential(state.as_ref()).await;
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("pending-approval", crate::AgentHarnessKind::Basic)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let request = SendRequest {
+        input: vec![user_message("run approved tool")],
+        session_id: None,
+    };
+    let mut thread_config = runtime.get_conversation_config(thread.as_ref()).await?;
+    thread_config.permissions.permission_policy =
+        exo_managed_agents::permissions::PermissionPolicy::AlwaysAsk {};
+    let mut agent_config = runtime.get_agent_config(agent.as_ref()).await?;
+    agent_config.max_tool_round_trips = Some(1);
+    let work = RecoverableTurn {
+        agent_config,
+        thread_config,
+        request: request.clone(),
+    };
+    let turn = thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: request.input,
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    let turn_id = turn.record().id;
+    let session_id = turn.record().session_id;
+    let tool_request = ToolRequest {
+        namespace: None,
+        function_name: "side_effect".into(),
+        arguments: Map::new(),
+    };
+    turn.add_events(vec![
+        EventData::Custom {
+            event_type: crate::basic::BASIC_TOOL_ROUND.into(),
+            payload: serde_json::to_value(crate::basic::BasicToolRound { round: 0 })?,
+        },
+        EventData::ToolRequested {
+            tool_call_id: "call-1".into(),
+            response_id: None,
+            request: ToolRequest {
+                namespace: None,
+                function_name: "earlier_tool".into(),
+                arguments: Map::new(),
+            },
+        },
+        EventData::Custom {
+            event_type: crate::permissions::APPROVAL_REQUESTED.into(),
+            payload: serde_json::to_value(crate::permissions::ApprovalRequest {
+                approval_id: "approval-0".into(),
+                tool_call_id: Some("call-1".into()),
+                round: Some(0),
+                request: ToolRequest {
+                    namespace: None,
+                    function_name: "earlier_tool".into(),
+                    arguments: Map::new(),
+                },
+            })?,
+        },
+    ])
+    .await?;
+    crate::permissions::respond(
+        thread.as_ref(),
+        turn.record().clone(),
+        &exo_managed_agents::http::protocol::ApprovalResponseBody {
+            session_id,
+            approval_id: "approval-0".into(),
+            approved: true,
+            allow_for_tool: false,
+        },
+    )
+    .await?;
+    turn.add_events(vec![
+        EventData::ToolResult {
+            tool_call_id: "call-1".into(),
+            result: serde_json::json!({"ok": true}),
+        },
+        EventData::Custom {
+            event_type: crate::basic::BASIC_TOOL_ROUND.into(),
+            payload: serde_json::to_value(crate::basic::BasicToolRound { round: 1 })?,
+        },
+        EventData::ToolRequested {
+            tool_call_id: "read-call".into(),
+            response_id: None,
+            request: ToolRequest {
+                namespace: None,
+                function_name: "read_file".into(),
+                arguments: Map::new(),
+            },
+        },
+        EventData::ToolRequested {
+            tool_call_id: "call-1".into(),
+            response_id: None,
+            request: tool_request.clone(),
+        },
+        EventData::ToolResult {
+            tool_call_id: "read-call".into(),
+            result: serde_json::json!({"contents": "saved"}),
+        },
+        EventData::Custom {
+            event_type: crate::permissions::APPROVAL_REQUESTED.into(),
+            payload: serde_json::to_value(crate::permissions::ApprovalRequest {
+                approval_id: "approval-1".into(),
+                tool_call_id: Some("call-1".into()),
+                round: Some(1),
+                request: tool_request,
+            })?,
+        },
+    ])
+    .await?;
+    drop(turn);
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
+        provider_cost_usd: None,
+        response_id: None,
+        messages: vec![assistant_message("tool done")],
+        tool_calls: Vec::new(),
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    }]));
+    let tools = Arc::new(CountingToolRuntime::default());
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::clone(&model),
+            Arc::clone(&tools),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    runtime.recover_unfinished_turns().await?;
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    assert!(runtime.is_turn_active(thread.as_ref(), turn_id).await?);
+    assert_eq!(tools.0.load(Ordering::SeqCst), 0);
+    assert!(model.requests().is_empty());
+    runtime
+        .approval_response(
+            agent_id,
+            thread_id,
+            turn_id,
+            &exo_managed_agents::http::protocol::ApprovalResponseBody {
+                session_id,
+                approval_id: "approval-1".into(),
+                approved: true,
+                allow_for_tool: false,
+            },
+        )
+        .await?;
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn_id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert_eq!(tools.0.load(Ordering::SeqCst), 1);
+    assert!(model.requests().is_empty());
+    assert_eq!(events.iter().filter(|event| matches!(&event.data,
+        EventData::Custom { event_type, .. } if event_type == crate::permissions::APPROVAL_REQUESTED
+    )).count(), 2);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.data, EventData::ToolResult { .. }))
+            .count(),
+        3
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.data, EventData::Error { .. }))
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_tool_result_survives_restart_before_next_tool_approval() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    create_test_credential(state.as_ref()).await;
+    let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
+        provider_cost_usd: None,
+        response_id: None,
+        messages: Vec::new(),
+        tool_calls: vec![
+            PendingToolCall {
+                tool_call_id: "read-call".into(),
+                request: ToolRequest {
+                    namespace: None,
+                    function_name: "read_file".into(),
+                    arguments: Map::new(),
+                },
+            },
+            PendingToolCall {
+                tool_call_id: "write-call".into(),
+                request: ToolRequest {
+                    namespace: None,
+                    function_name: "write_file".into(),
+                    arguments: Map::new(),
+                },
+            },
+        ],
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    }]));
+    let first_tools = Arc::new(CountingToolRuntime::default());
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            model,
+            Arc::clone(&first_tools),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request(
+                "tool-round-restart",
+                crate::AgentHarnessKind::Basic,
+            )
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let (turn, mut stream) = runtime
+        .start_turn(
+            Arc::clone(&agent),
+            Arc::clone(&thread),
+            SendRequest {
+                input: vec![user_message("read then write")],
+                session_id: None,
+            },
+            false,
+            None,
+        )
+        .await?;
+    let (approval_id, events) = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn.id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if let Some(approval_id) = events.iter().find_map(|event| {
+                if let EventData::Custom {
+                    event_type,
+                    payload,
+                } = &event.data
+                    && event_type == crate::permissions::APPROVAL_REQUESTED
+                {
+                    let approval: crate::permissions::ApprovalRequest =
+                        serde_json::from_value(payload.clone()).ok()?;
+                    return Some(approval.approval_id);
+                }
+                None
+            }) {
+                return Ok::<_, anyhow::Error>((approval_id, events));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert_eq!(first_tools.0.load(Ordering::SeqCst), 1);
+    assert!(events.iter().any(|event| matches!(&event.data,
+        EventData::ToolResult { tool_call_id, .. } if tool_call_id == "read-call"
+    )));
+    assert!(!events.iter().any(|event| matches!(&event.data,
+        EventData::ToolResult { tool_call_id, .. } if tool_call_id == "write-call"
+    )));
+    runtime.shutdown().await?;
+    assert!(matches!(stream.next().await, Some(Err(_))));
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
+        provider_cost_usd: None,
+        response_id: None,
+        messages: vec![assistant_message("write complete")],
+        tool_calls: Vec::new(),
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    }]));
+    let second_tools = Arc::new(CountingToolRuntime::default());
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::clone(&model),
+            Arc::clone(&second_tools),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    runtime.recover_unfinished_turns().await?;
+    runtime
+        .approval_response(
+            agent_id,
+            thread_id,
+            turn.id,
+            &exo_managed_agents::http::protocol::ApprovalResponseBody {
+                session_id: turn.session_id,
+                approval_id,
+                approved: true,
+                allow_for_tool: false,
+            },
+        )
+        .await?;
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn.id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert_eq!(second_tools.0.load(Ordering::SeqCst), 1);
+    assert_eq!(model.requests().len(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.data, EventData::ToolResult { .. }))
+            .count(),
+        2
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.data, EventData::Error { .. }))
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_created_during_recovery_can_send_immediately() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness"))).await?);
+    create_test_credential(state.as_ref()).await;
+    let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
+        provider_cost_usd: None,
+        response_id: None,
+        messages: vec![assistant_message("ready")],
+        tool_calls: Vec::new(),
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    }]));
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            state,
+            model,
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request(
+                "new-during-recovery",
+                crate::AgentHarnessKind::Basic,
+            )
+        })
+        .await?;
+    runtime.begin_recovery_scan();
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let (_, mut stream) = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.start_turn(
+            agent,
+            thread,
+            SendRequest {
+                input: vec![user_message("hello")],
+                session_id: None,
+            },
+            false,
+            None,
+        ),
+    )
+    .await??;
+    while let Some(event) = stream.next().await {
+        event?;
+    }
+    runtime.recover_unfinished_turns().await?;
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_clears_marker_for_deleted_thread() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let agent = state
+        .new_agent(exoharness::NewAgentRequest {
+            slug: "deleted-recovery-thread".to_string(),
+            name: "Deleted recovery thread".to_string(),
+            vaults: Vec::new(),
+        })
+        .await?;
+    let agent_id = agent.record().id;
+    let thread = agent.new_thread(Default::default()).await?;
+    let turn = thread.begin_turn(BeginTurnRequest::default()).await?;
+    let unfinished = exoharness::ListThreadsRequest {
+        unfinished_only: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        agent.list_threads(unfinished.clone()).await?.threads.len(),
+        1
+    );
+    agent.delete_thread(&thread.record().id).await?;
+    drop(turn);
+    drop(thread);
+    drop(agent);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    runtime.recover_unfinished_turns().await?;
+    assert!(
+        state
+            .get_agent(&agent_id)
+            .await?
+            .expect("agent exists")
+            .list_threads(unfinished)
+            .await?
+            .threads
+            .is_empty()
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    create_test_credential(state.as_ref()).await;
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("ordered-recovery", crate::AgentHarnessKind::Basic)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let request = SendRequest {
+        input: vec![user_message("older")],
+        session_id: None,
+    };
+    let work = RecoverableTurn {
+        agent_config: runtime.get_agent_config(agent.as_ref()).await?,
+        thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
+        request: request.clone(),
+    };
+    let old_turn = thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: request.input,
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    let old_turn_id = old_turn.record().id;
+    drop(old_turn);
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::new(
+        ["old", "new"]
+            .into_iter()
+            .map(|text| ModelResponse {
+                provider_cost_usd: None,
+                response_id: None,
+                messages: vec![assistant_message(text)],
+                tool_calls: Vec::new(),
+                usage: None,
+                model: None,
+                ttft: None,
+                duration: None,
+            })
+            .collect(),
+    ));
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::clone(&model),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    runtime.begin_recovery_scan();
+    let new_turn = runtime.start_turn(
+        Arc::clone(&agent),
+        Arc::clone(&thread),
+        SendRequest {
+            input: vec![user_message("newer")],
+            session_id: None,
+        },
+        false,
+        None,
+    );
+    tokio::pin!(new_turn);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut new_turn)
+            .await
+            .is_err()
+    );
+    runtime.recover_unfinished_turns().await?;
+    let (new_record, mut stream) = tokio::time::timeout(Duration::from_secs(3), new_turn).await??;
+    while let Some(event) = stream.next().await {
+        event?;
+    }
+    let events = thread.get_events(None).await?.events;
+    let old_end = events
+        .iter()
+        .position(|event| {
+            event.turn_id == Some(old_turn_id) && matches!(event.data, EventData::TurnEnded)
+        })
+        .unwrap();
+    let new_start = events
+        .iter()
+        .position(|event| {
+            event.turn_id == Some(new_record.id)
+                && matches!(event.data, EventData::TurnStarted { .. })
+        })
+        .unwrap();
+    assert!(old_end < new_start);
+    assert_eq!(model.requests().len(), 2);
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    create_test_credential(state.as_ref()).await;
+    let blocked_model = Arc::new(BlockingModelClient::default());
+    let runtime = Runtime::new(
+        LocalProvider::rlm(
+            Arc::clone(&state),
+            Arc::clone(&blocked_model),
+            Arc::new(BasicToolRuntime),
+        ),
+        None,
+    );
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("interrupted-rlm", crate::AgentHarnessKind::Rlm)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let (turn, mut stream) = runtime
+        .start_turn(
+            Arc::clone(&agent),
+            Arc::clone(&thread),
+            SendRequest {
+                input: vec![user_message("do the work")],
+                session_id: None,
+            },
+            false,
+            None,
+        )
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), blocked_model.entered.notified()).await?;
+    runtime.shutdown().await?;
+    assert!(matches!(stream.next().await, Some(Err(_))));
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::default());
+    let runtime = Runtime::new(
+        LocalProvider::rlm(
+            Arc::clone(&state),
+            Arc::clone(&model),
+            Arc::new(BasicToolRuntime),
+        ),
+        None,
+    );
+    runtime.recover_unfinished_turns().await?;
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn.id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert!(model.requests().is_empty());
+    assert!(events.iter().any(|event| matches!(&event.data,
+        EventData::Error { message, .. } if message.contains("cannot safely resume")
+    )));
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let blocked_model = Arc::new(BlockingModelClient::default());
+    let runtime = Arc::new(Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::clone(&blocked_model),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    ));
+    create_test_credential(state.as_ref()).await;
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("shutdown-turn", crate::AgentHarnessKind::Basic)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let mut config = runtime.get_agent_config(agent.as_ref()).await?;
+    config.model = "saved-override".into();
+    let (_, mut turn_stream) = runtime
+        .start_turn(
+            Arc::clone(&agent),
+            Arc::clone(&thread),
+            SendRequest {
+                input: vec![user_message("finish after restart")],
+                session_id: None,
+            },
+            false,
+            Some(config),
+        )
+        .await?;
+    tokio::time::timeout(Duration::from_secs(3), blocked_model.entered.notified()).await?;
+    runtime.shutdown().await?;
+    assert!(matches!(turn_stream.next().await, Some(Err(_))));
+    let events = thread.get_events(None).await?.events;
+    let turn_id = events
+        .iter()
+        .find_map(|event| {
+            matches!(event.data, EventData::TurnStarted { .. }).then_some(event.turn_id)
+        })
+        .flatten()
+        .expect("turn should have started");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.data, EventData::TurnEnded))
+    );
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
+        provider_cost_usd: None,
+        response_id: None,
+        messages: vec![assistant_message("finished")],
+        tool_calls: Vec::new(),
+        usage: None,
+        model: None,
+        ttft: None,
+        duration: None,
+    }]));
+    let runtime = Arc::new(Runtime::new(
+        LocalProvider::basic(
+            state,
+            Arc::clone(&model),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    ));
+    runtime.recover_unfinished_turns().await?;
+    let agent = runtime
+        .exoharness_handle()
+        .get_agent(&agent_id)
+        .await?
+        .expect("agent should survive restart");
+    let thread = agent
+        .get_thread(&thread_id)
+        .await?
+        .expect("thread should survive restart");
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn_id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert_eq!(model.requests().len(), 1);
+    assert_eq!(model.requests()[0].model, "saved-override");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.data, EventData::TurnStarted { .. }))
+            .count(),
+        1
+    );
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    create_test_credential(state.as_ref()).await;
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("blocked-recovery", crate::AgentHarnessKind::Basic)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let request = SendRequest {
+        input: vec![user_message("needs approval")],
+        session_id: None,
+    };
+    let work = RecoverableTurn {
+        agent_config: runtime.get_agent_config(agent.as_ref()).await?,
+        thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
+        request: request.clone(),
+    };
+    thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: request.input,
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let model = Arc::new(BlockingModelClient::default());
+    let runtime = Arc::new(Runtime::new(
+        LocalProvider::basic(
+            state,
+            Arc::clone(&model),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    ));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let url = format!("http://{}/exo/agent", listener.local_addr()?);
+    let service = Arc::new(RuntimeHttpService::new(Arc::clone(&runtime), None)?);
+    let server = server(listener, service)?;
+    let handle = server.handle();
+    tokio::spawn(server);
+    tokio::time::timeout(Duration::from_secs(3), model.entered.notified()).await?;
+    let response = tokio::time::timeout(Duration::from_secs(3), reqwest::get(url)).await??;
+    assert!(response.status().is_success());
+    handle.stop(true).await;
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovered_turn_uses_its_original_caller() -> Result<()> {
+    let tempdir = TempDir::new()?;
+    let root = tempdir.path().join("exoharness");
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let runtime = Runtime::new(
+        LocalProvider::basic(
+            Arc::clone(&state),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    create_test_credential(state.as_ref()).await;
+    let agent = runtime
+        .create_agent(CreateAgentRequest {
+            ..crate::test_support::agent_request("caller-recovery", crate::AgentHarnessKind::Basic)
+        })
+        .await?;
+    let thread = runtime
+        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
+        .await?;
+    let agent_id = agent.record().id;
+    let thread_id = thread.record().id;
+    let policy: Arc<dyn AccessPolicy> = Arc::new(RecoveryPolicy(
+        exoharness::vault::global_vault(state.as_ref())
+            .await?
+            .record()
+            .id,
+    ));
+    let caller_state = state.with_caller(Caller {
+        principal: "alice".into(),
+        policy: Arc::clone(&policy),
+    })?;
+    let caller_agent = caller_state.get_agent(&agent_id).await?.unwrap();
+    let caller_thread = caller_agent.get_thread(&thread_id).await?.unwrap();
+    let request = SendRequest {
+        input: vec![user_message("resume as alice")],
+        session_id: None,
+    };
+    let work = RecoverableTurn {
+        agent_config: runtime.get_agent_config(agent.as_ref()).await?,
+        thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
+        request: request.clone(),
+    };
+    let turn = caller_thread
+        .begin_turn(BeginTurnRequest {
+            session_id: None,
+            input: request.input,
+            initial_events: vec![work.event()?],
+        })
+        .await?;
+    let turn_id = turn.record().id;
+    drop(turn);
+    drop(caller_thread);
+    drop(caller_agent);
+    drop(caller_state);
+    drop(thread);
+    drop(agent);
+    drop(runtime);
+    drop(state);
+
+    let state: Arc<dyn ExoHarness> =
+        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let recorder = CallerRecordingExecutor::default();
+    let runtime = Runtime::new(
+        LocalProvider::new(Arc::clone(&state), Arc::new(recorder.clone())),
+        None,
+    );
+    let scoped_runtimes: Arc<Mutex<Vec<Arc<Runtime>>>> = Arc::default();
+    let resolver: RecoveryRuntimeResolver = {
+        let state = Arc::clone(&state);
+        let policy = Arc::clone(&policy);
+        let recorder = recorder.clone();
+        let scoped_runtimes = Arc::clone(&scoped_runtimes);
+        Arc::new(move |principal| {
+            let scoped_state = state.with_caller(Caller {
+                principal,
+                policy: Arc::clone(&policy),
+            })?;
+            let scoped = Arc::new(Runtime::new(
+                LocalProvider::new(scoped_state, Arc::new(recorder.clone())),
+                None,
+            ));
+            scoped_runtimes
+                .lock()
+                .expect("scoped runtimes poisoned")
+                .push(Arc::clone(&scoped));
+            Ok(scoped)
+        })
+    };
+    runtime
+        .recover_unfinished_turns_with_resolver(Some(resolver))
+        .await?;
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let events = thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn_id),
+                    ..Default::default()
+                }))
+                .await?
+                .events;
+            if events
+                .iter()
+                .any(|event| matches!(event.data, EventData::TurnEnded))
+            {
+                return Ok::<_, anyhow::Error>(events);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.data, EventData::Error { .. }))
+    );
+    assert_eq!(
+        recorder
+            .0
+            .lock()
+            .expect("caller record poisoned")
+            .as_slice(),
+        &[Some("alice".into())]
+    );
+    let scoped = scoped_runtimes
+        .lock()
+        .expect("scoped runtimes poisoned")
+        .drain(..)
+        .collect::<Vec<_>>();
+    for scoped in scoped {
+        scoped.shutdown().await?;
+    }
+    runtime.shutdown().await?;
+    Ok(())
+}
 
 #[tokio::test(flavor = "current_thread")]
 async fn creates_agents_and_conversations_with_persisted_config() {
@@ -1404,6 +3070,26 @@ async fn conversation_model_override_changes_effective_model() {
 struct FakeModelClient {
     responses: Mutex<VecDeque<ModelResponse>>,
     requests: Mutex<Vec<ModelRequest>>,
+}
+
+#[derive(Default)]
+struct BlockingModelClient {
+    entered: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl ModelClient for BlockingModelClient {
+    async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse> {
+        self.entered.notify_one();
+        std::future::pending().await
+    }
+
+    async fn complete_stream(
+        &self,
+        _request: ModelRequest,
+    ) -> Result<Box<dyn ModelResponseStream>> {
+        Err(anyhow!("streaming is not expected"))
+    }
 }
 
 impl FakeModelClient {

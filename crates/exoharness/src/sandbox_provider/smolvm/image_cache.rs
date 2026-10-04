@@ -16,19 +16,97 @@ const PREPARE: &str = r#"
 set -eu
 set -o pipefail
 export TMPDIR=/storage
-archive=/source/image.tar
-if [ "$1" = gzip ]; then
-    gzip -dc "$archive" > /storage/image.tar
-    archive=/storage/image.tar
-fi
-config=$(tar -xOf "$archive" manifest.json | jq -er 'if length == 1 then .[0].Config | select(type == "string" and length > 0) else error("expected one image in the archive") end')
-tar -xOf "$archive" -- "$config" > /output/config.json
 case "$(uname -m)" in aarch64) arch=arm64;; x86_64) arch=amd64;; *) exit 1;; esac
+archive=/source/image.tar
+case "$1" in
+    registry)
+        crane config --platform "linux/$arch" "$2" > /output/config.json
+        ;;
+    gzip)
+        gzip -dc "$archive" > /storage/image.tar
+        archive=/storage/image.tar
+        ;;
+esac
+if [ "$1" != registry ]; then
+    config=$(tar -xOf "$archive" manifest.json | jq -er 'if length == 1 then .[0].Config | select(type == "string" and length > 0) else error("expected one image in the archive") end')
+    tar -xOf "$archive" -- "$config" > /output/config.json
+fi
 jq -e --arg arch "$arch" 'if .architecture == $arch and .os == "linux" then true else error("image must target linux/" + $arch) end' /output/config.json >/dev/null
 mkdir /output/0000_rootfs
-crane export - - < "$archive" | tar -xp -C /output/0000_rootfs
+if [ "$1" = registry ]; then
+    crane export --platform "linux/$arch" "$2" - | tar -xp -C /output/0000_rootfs
+else
+    crane export - - < "$archive" | tar -xp -C /output/0000_rootfs
+fi
 printf '0000_rootfs\n' > /output/layer-order
 "#;
+
+pub(super) fn resolve_image(
+    binary: &Path,
+    boot_binary: Option<&Path>,
+    cache: &Path,
+    image: &str,
+) -> Result<crate::ResolvedSandboxImage> {
+    let prepared = match prepare(binary, boot_binary, cache, image)? {
+        Some(prepared) => prepared,
+        None if Path::new(image).is_dir() => PathBuf::from(image),
+        None => {
+            let reference: oci_client::Reference = image.parse()?;
+            let mut command = Command::new(binary);
+            command.args([
+                "machine",
+                "run",
+                "--net",
+                "--cpus",
+                "2",
+                "--mem",
+                "1024",
+                "--timeout",
+                "2m",
+                "--",
+                "crane",
+                "digest",
+                image,
+            ]);
+            if let Some(boot_binary) = boot_binary {
+                command.env(super::SMOLVM_BOOT_BIN_ENV, boot_binary);
+            }
+            let output = command
+                .output()
+                .context("resolving SmolVM registry image")?;
+            ensure!(
+                output.status.success(),
+                "resolving SmolVM registry image: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            let digest = String::from_utf8(output.stdout)?;
+            let pinned = oci_client::Reference::with_digest(
+                reference.registry().to_owned(),
+                reference.repository().to_owned(),
+                digest.trim().to_owned(),
+            )
+            .to_string();
+            ensure!(
+                pinned_registry_image(&pinned),
+                "invalid registry image digest"
+            );
+            prepare(binary, boot_binary, cache, &pinned)?
+                .context("registry image was not prepared")?
+        }
+    };
+    // smolmachines 1.20 exposes image identity, but not OCI startup configuration.
+    // Read the prepared image's entrypoint, environment and healthcheck for templates.
+    #[derive(Deserialize)]
+    struct ImageConfiguration {
+        config: crate::SandboxImageConfiguration,
+    }
+    let configuration: ImageConfiguration =
+        serde_json::from_reader(File::open(prepared.join("config.json"))?.take(65_536))?;
+    Ok(crate::ResolvedSandboxImage {
+        image: prepared.to_string_lossy().into_owned(),
+        configuration: configuration.config,
+    })
+}
 
 pub(super) fn prepare(
     binary: &Path,
@@ -36,24 +114,43 @@ pub(super) fn prepare(
     cache: &Path,
     image: &str,
 ) -> Result<Option<PathBuf>> {
-    let docker_image = if super::is_local_image_ref(image) {
+    let local_image = super::is_local_image_ref(image);
+    let pinned_registry = !local_image && pinned_registry_image(image);
+    // A digest pin is immutable, so an existing prepared image needs no
+    // registry or Docker lookup. Tags still use their existing resolution path.
+    let registry_cache_id = format!("registry-{:x}", Sha256::digest(image.as_bytes()));
+    let registry_key = format!("v1-{}-{registry_cache_id}", std::env::consts::ARCH);
+    if pinned_registry {
+        let prepared = cache.join(&registry_key);
+        if prepared.exists() {
+            return mount_read_only(&prepared.canonicalize()?).map(Some);
+        }
+    }
+    let docker_image = if local_image {
         None
     } else {
         docker_archive(cache, image)?
     };
-    let (image, digest, compressed, verify_digest) = match docker_image {
-        Some((archive, docker_digest)) => (archive, format!("docker-{docker_digest}"), false, None),
-        None => {
-            let Some((digest, compressed)) = archive_key(image, cache)? else {
-                return Ok(None);
-            };
-            (
-                PathBuf::from(image),
-                digest.clone(),
-                compressed,
-                Some(digest),
-            )
-        }
+    let registry_image = pinned_registry && docker_image.is_none();
+    let (source_archive, digest, compressed, verify_digest) = if registry_image {
+        (None, registry_cache_id, false, None)
+    } else if let Some((archive, docker_digest)) = docker_image {
+        (
+            Some(archive),
+            format!("docker-{docker_digest}"),
+            false,
+            None,
+        )
+    } else {
+        let Some((digest, compressed)) = archive_key(image, cache)? else {
+            return Ok(None);
+        };
+        (
+            Some(PathBuf::from(image)),
+            digest.clone(),
+            compressed,
+            Some(digest),
+        )
     };
     fs::create_dir_all(cache)?;
     fs::set_permissions(cache, fs::Permissions::from_mode(0o700))?;
@@ -75,51 +172,59 @@ pub(super) fn prepare(
         let source = staging.path().join("source");
         fs::create_dir(&source)?;
         let archive = source.join("image.tar");
-        let copied = Command::new("cp")
-            .arg("-c")
-            .arg(image.canonicalize()?)
-            .arg(&archive)
-            .output()
-            .context("snapshotting image archive")?;
-        ensure!(
-            copied.status.success(),
-            "snapshotting image archive: {}",
-            String::from_utf8_lossy(&copied.stderr).trim()
-        );
-        if let Some(verify_digest) = verify_digest {
+        if let Some(image_archive) = source_archive {
+            let copied = Command::new("cp")
+                .arg("-c")
+                .arg(image_archive.canonicalize()?)
+                .arg(&archive)
+                .output()
+                .context("snapshotting image archive")?;
             ensure!(
-                hash_file(&archive)? == verify_digest,
-                "image archive changed while preparing it; retry"
+                copied.status.success(),
+                "snapshotting image archive: {}",
+                String::from_utf8_lossy(&copied.stderr).trim()
             );
+            if let Some(verify_digest) = verify_digest {
+                ensure!(
+                    hash_file(&archive)? == verify_digest,
+                    "image archive changed while preparing it; retry"
+                );
+            }
         }
 
         create_volume(staging.path())?;
         let result = (|| {
             let output = mount_volume(staging.path())?;
             let mut command = Command::new(binary);
+            command.args([
+                "machine",
+                "run",
+                "--cpus",
+                "2",
+                "--mem",
+                "1024",
+                "--timeout",
+                "10m",
+            ]);
+            if registry_image {
+                command.arg("--net");
+            } else {
+                command
+                    .arg("--volume")
+                    .arg(format!("{}:/source:ro", source.display()));
+            }
             command
-                .args([
-                    "machine",
-                    "run",
-                    "--cpus",
-                    "2",
-                    "--mem",
-                    "1024",
-                    "--timeout",
-                    "10m",
-                ])
-                .arg("--volume")
-                .arg(format!("{}:/source:ro", source.display()))
                 .arg("--volume")
                 .arg(format!("{}:/output:rw", output.display()))
-                .args([
-                    "--",
-                    "sh",
-                    "-c",
-                    PREPARE,
-                    "prepare-image",
-                    if compressed { "gzip" } else { "tar" },
-                ]);
+                .args(["--", "sh", "-c", PREPARE, "prepare-image"])
+                .arg(if registry_image {
+                    "registry"
+                } else if compressed {
+                    "gzip"
+                } else {
+                    "tar"
+                })
+                .arg(image);
             if let Some(boot_binary) = boot_binary {
                 command.env(super::SMOLVM_BOOT_BIN_ENV, boot_binary);
             }
@@ -144,6 +249,14 @@ pub(super) fn prepare(
         fs::rename(staging.path(), &destination)?;
     }
     mount_read_only(&destination).map(Some)
+}
+
+fn pinned_registry_image(image: &str) -> bool {
+    image.rsplit_once("@sha256:").is_some_and(|(name, digest)| {
+        !name.is_empty()
+            && digest.len() == 64
+            && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 fn docker_archive(cache: &Path, image: &str) -> Result<Option<(PathBuf, String)>> {

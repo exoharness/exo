@@ -4,11 +4,13 @@ use std::collections::BTreeMap;
 
 impl ResourceStore {
     #[cfg(feature = "firecracker")]
-    pub(crate) fn image_store(root: &Path, size_gib: u64) -> Result<Self> {
+    pub fn image_store(root: &Path, size_gib: u64) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
             let mut store = Self::new(root)?;
+            ensure!(size_gib > 0, "resource volume size must be positive");
             store.image_size_gib = Some(size_gib);
+            store.volume_size_gib = Some(size_gib);
             store.initialize()?;
             let filesystem = checked(
                 Command::new("findmnt")
@@ -51,15 +53,16 @@ impl ResourceStore {
             validate_key(&snapshot)?;
             let _lock = self.lock(&snapshot)?;
             if !self.root.join("snapshots").join(&snapshot).exists() {
-                self.publish(&snapshot, |target| {
+                self.publish(&snapshot, |_, volume| {
+                    let target = self.mount_volume(volume)?;
                     checked(
                         Command::new("tar")
                             .args(["--no-same-owner", "-xpf"])
                             .arg(&source)
                             .arg("-C")
-                            .arg(target),
+                            .arg(&target),
                     )?;
-                    Ok(())
+                    self.prepare_ownership(&target)
                 })?;
             }
         }
@@ -173,6 +176,10 @@ impl ResourceStore {
                     .arg(&image),
             )?;
             return Ok(());
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(size) = self.volume_size_gib {
+            return crate::local_volume::create_sized_volume(directory, size);
         }
         create_volume(directory)
     }

@@ -1,13 +1,18 @@
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, AgentRecord, BeginTurnRequest, ConversationHandle, ExoHarness, NewAgentRequest,
-    NewConversationRequest, Result, TurnHandle,
+    AgentHandle, AgentRecord, BeginTurnRequest, ConversationHandle, EventData, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, NewAgentRequest, NewConversationRequest, Result,
+    TurnHandle, TurnRecord,
 };
-use tokio::sync::{OnceCell, mpsc};
-use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
+use futures::StreamExt;
+use tokio::sync::{Notify, OnceCell, mpsc};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::braintrust::{BraintrustRuntimeConfig, BraintrustTracer};
 use crate::conversation_wakeup::conversation_send_lock;
@@ -30,6 +35,159 @@ use crate::{
     SendResult,
 };
 
+pub(crate) const RUNTIME_TURN_WORK: &str = "exo.runtime.turn_work";
+pub(crate) const RUNTIME_TURN_COMPLETED: &str = "exo.runtime.turn_completed";
+
+pub type RecoveryRuntimeResolver = Arc<dyn Fn(String) -> Result<Arc<Runtime>> + Send + Sync>;
+
+#[derive(Default)]
+struct RecoveryGate {
+    state: Mutex<RecoveryGateState>,
+    changed: Notify,
+}
+
+#[derive(Default)]
+struct RecoveryGateState {
+    running: bool,
+    done: bool,
+    indexed: bool,
+    pending_threads: HashSet<exoharness::ThreadId>,
+    new_threads: HashSet<exoharness::ThreadId>,
+}
+
+impl RecoveryGate {
+    fn begin(&self) {
+        let mut state = self.state.lock().expect("recovery gate poisoned");
+        if !state.done {
+            state.running = true;
+        }
+    }
+
+    fn index(&self, pending_threads: HashSet<exoharness::ThreadId>) {
+        let mut state = self.state.lock().expect("recovery gate poisoned");
+        if state.running {
+            state.pending_threads = pending_threads;
+            state.indexed = true;
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn thread_done(&self, thread: exoharness::ThreadId) {
+        let mut state = self.state.lock().expect("recovery gate poisoned");
+        if state.running {
+            state.pending_threads.remove(&thread);
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn new_thread(&self, thread: exoharness::ThreadId) {
+        let mut state = self.state.lock().expect("recovery gate poisoned");
+        if state.running {
+            state.new_threads.insert(thread);
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn is_new_thread(&self, thread: exoharness::ThreadId) -> bool {
+        self.state
+            .lock()
+            .expect("recovery gate poisoned")
+            .new_threads
+            .contains(&thread)
+    }
+
+    fn finish(&self) {
+        let mut state = self.state.lock().expect("recovery gate poisoned");
+        state.running = false;
+        state.done = true;
+        state.pending_threads.clear();
+        state.new_threads.clear();
+        self.changed.notify_waiters();
+    }
+
+    async fn wait(&self, thread: exoharness::ThreadId) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let ready = {
+                let state = self.state.lock().expect("recovery gate poisoned");
+                !state.running
+                    || state.done
+                    || (state.indexed && !state.pending_threads.contains(&thread))
+                    || state.new_threads.contains(&thread)
+            };
+            if ready {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod recovery_gate_tests {
+    use super::RecoveryGate;
+    use std::collections::HashSet;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn new_threads_skip_the_scan_while_old_threads_wait_for_their_turn() {
+        let gate = RecoveryGate::default();
+        let old = exoharness::Uuid7::now();
+        let new = exoharness::Uuid7::now();
+        gate.begin();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), gate.wait(old))
+                .await
+                .is_err()
+        );
+        gate.new_thread(new);
+        tokio::time::timeout(Duration::from_millis(20), gate.wait(new))
+            .await
+            .expect("new thread should not wait for recovery");
+        gate.index(HashSet::from([old]));
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            gate.wait(exoharness::Uuid7::now()),
+        )
+        .await
+        .expect("a thread without unfinished turns should proceed");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), gate.wait(old))
+                .await
+                .is_err()
+        );
+        gate.thread_done(old);
+        tokio::time::timeout(Duration::from_millis(20), gate.wait(old))
+            .await
+            .expect("scanned thread should proceed");
+        gate.finish();
+        tokio::time::timeout(
+            Duration::from_millis(20),
+            gate.wait(exoharness::Uuid7::now()),
+        )
+        .await
+        .expect("an unscanned thread should proceed after the scan ends");
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RecoverableTurn {
+    pub(crate) agent_config: AgentConfig,
+    pub(crate) thread_config: ConversationConfig,
+    pub(crate) request: SendRequest,
+}
+
+impl RecoverableTurn {
+    pub(crate) fn event(&self) -> Result<EventData> {
+        Ok(EventData::Custom {
+            event_type: RUNTIME_TURN_WORK.to_owned(),
+            payload: serde_json::to_value(self)?,
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ExecutorStreamMode<'a> {
     Disabled,
@@ -47,6 +205,14 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
     }
 
     fn name(&self) -> &'static str;
+
+    fn can_resume_pending_approval(&self, _config: &AgentConfig) -> bool {
+        false
+    }
+
+    fn can_reconcile_unresolved_tool_call(&self, _config: &AgentConfig) -> bool {
+        false
+    }
 
     fn agent_config(
         &self,
@@ -98,6 +264,25 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
         stream_mode: ExecutorStreamMode<'_>,
         turn_trace: Option<&dyn TurnExecutionTrace>,
     ) -> Result<()>;
+
+    // A harness must opt in after it can reconstruct execution progress without
+    // repeating tool or sandbox side effects from the interrupted turn.
+    async fn resume_turn(
+        &self,
+        _agent: &dyn AgentHandle,
+        _conversation: Arc<dyn ConversationHandle>,
+        _turn: Arc<dyn TurnHandle>,
+        _agent_config: &AgentConfig,
+        _conversation_config: &ConversationConfig,
+        _request: &SendRequest,
+        _stream_mode: ExecutorStreamMode<'_>,
+        _turn_trace: Option<&dyn TurnExecutionTrace>,
+    ) -> Result<()> {
+        anyhow::bail!(
+            "{} harness cannot safely resume an unfinished turn",
+            self.name()
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -107,6 +292,10 @@ pub struct Runtime {
     events: Arc<HarnessEvents>,
     finalizers: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
     tracer: Arc<dyn ExecutionTracer>,
+    recovery: Arc<OnceCell<()>>,
+    recovery_gate: Arc<RecoveryGate>,
+    recovery_agent_concurrency: Arc<AtomicUsize>,
+    recovery_thread_concurrency: Arc<AtomicUsize>,
 }
 
 impl Runtime {
@@ -115,6 +304,7 @@ impl Runtime {
         scoped.provider = self.provider.with_caller(caller)?;
         scoped.initialized = Arc::default();
         scoped.finalizers = Arc::default();
+        scoped.recovery = Arc::default();
         Ok(scoped)
     }
 
@@ -128,7 +318,42 @@ impl Runtime {
             events: Arc::default(),
             finalizers: Arc::default(),
             tracer: Arc::new(BraintrustTracer::new(runtime_config)),
+            recovery: Arc::default(),
+            recovery_gate: Arc::default(),
+            recovery_agent_concurrency: Arc::new(AtomicUsize::new(4)),
+            recovery_thread_concurrency: Arc::new(AtomicUsize::new(4)),
         }
+    }
+
+    pub fn set_recovery_concurrency(&self, agents: NonZeroUsize, threads: NonZeroUsize) {
+        self.recovery_agent_concurrency
+            .store(agents.get(), Ordering::Relaxed);
+        self.recovery_thread_concurrency
+            .store(threads.get(), Ordering::Relaxed);
+    }
+
+    pub async fn recover_unfinished_turns(&self) -> Result<()> {
+        self.recover_unfinished_turns_with_resolver(None).await
+    }
+
+    pub async fn recover_unfinished_turns_with_resolver(
+        &self,
+        resolver: Option<RecoveryRuntimeResolver>,
+    ) -> Result<()> {
+        let result = self
+            .recovery
+            .get_or_try_init(|| async {
+                self.provider
+                    .recover_unfinished_turns(self.clone(), resolver)
+                    .await
+            })
+            .await;
+        self.recovery_gate.finish();
+        result.map(|_| ())
+    }
+
+    pub(crate) fn begin_recovery_scan(&self) {
+        self.recovery_gate.begin();
     }
 
     pub async fn approval_response(
@@ -220,6 +445,339 @@ impl Runtime {
         )))
     }
 
+    pub(crate) async fn recover_local_turns(
+        &self,
+        provider: &crate::LocalProvider,
+        resolver: Option<RecoveryRuntimeResolver>,
+    ) -> Result<()> {
+        let agents = provider.state.list_agents().await?;
+        let listings = agents
+            .into_iter()
+            .map(|agent| async move {
+                let result = agent
+                    .list_threads(exoharness::ListThreadsRequest {
+                        unfinished_only: true,
+                        ..Default::default()
+                    })
+                    .await;
+                (agent, result)
+            })
+            .collect::<Vec<_>>();
+        let pages = futures::stream::iter(listings)
+            .buffer_unordered(self.recovery_agent_concurrency.load(Ordering::Relaxed))
+            .collect::<Vec<_>>()
+            .await;
+        let mut threads = Vec::new();
+        for (agent, result) in pages {
+            match result {
+                Ok(page) => threads.extend(page.threads.into_iter().filter_map(|thread| {
+                    (!self.recovery_gate.is_new_thread(thread.record().id))
+                        .then_some((Arc::clone(&agent), thread))
+                })),
+                Err(error) => {
+                    tracing::error!(agent_id = %agent.record().id, %error, "failed to list unfinished threads");
+                }
+            }
+        }
+        self.recovery_gate.index(
+            threads
+                .iter()
+                .map(|(_, thread)| thread.record().id)
+                .collect(),
+        );
+        let recoveries = threads
+            .into_iter()
+            .map(|(agent, thread)| {
+                let resolver = resolver.clone();
+                async move {
+                    let thread_id = thread.record().id;
+                    let result = self
+                        .recover_local_thread(provider, agent, thread, resolver)
+                        .await;
+                    self.recovery_gate.thread_done(thread_id);
+                    if let Err(error) = result {
+                        tracing::error!(%thread_id, %error, "failed to recover thread");
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        futures::stream::iter(recoveries)
+            .buffer_unordered(self.recovery_thread_concurrency.load(Ordering::Relaxed))
+            .collect::<Vec<_>>()
+            .await;
+        Ok(())
+    }
+
+    async fn recover_local_thread(
+        &self,
+        provider: &crate::LocalProvider,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ConversationHandle>,
+        resolver: Option<RecoveryRuntimeResolver>,
+    ) -> Result<()> {
+        let events = thread
+            .get_events(Some(EventQuery {
+                direction: Some(EventQueryDirection::Asc),
+                types: Some(vec![
+                    EventKind::custom(RUNTIME_TURN_WORK),
+                    EventKind::custom(RUNTIME_TURN_COMPLETED),
+                    EventKind::TURN_STARTED,
+                    EventKind::TURN_ENDED,
+                    EventKind::TOOL_REQUESTED,
+                    EventKind::TOOL_RESULT,
+                    EventKind::custom(crate::basic::BASIC_TOOL_ROUND),
+                    EventKind::ERROR,
+                    EventKind::custom(crate::permissions::APPROVAL_REQUESTED),
+                    EventKind::custom(crate::permissions::APPROVAL_RESPONSE),
+                ]),
+                ..Default::default()
+            }))
+            .await?
+            .events;
+        let mut work = Vec::new();
+        let mut ended = std::collections::HashSet::new();
+        let mut completed = std::collections::HashSet::new();
+        let mut failed = std::collections::HashSet::new();
+        let mut callers = std::collections::HashMap::new();
+        let mut tool_requests = std::collections::HashMap::<
+            _,
+            Vec<(Option<u32>, String, exoharness::ToolRequest)>,
+        >::new();
+        let mut tool_rounds = std::collections::HashMap::new();
+        let mut invalid_tool_rounds = std::collections::HashSet::new();
+        let mut approval_requests =
+            std::collections::HashMap::<_, Vec<crate::permissions::ApprovalRequest>>::new();
+        let mut approval_responses =
+            std::collections::HashMap::<_, std::collections::HashSet<String>>::new();
+        for event in events {
+            match event.data {
+                EventData::TurnStarted { user_id } => {
+                    if let Some(turn_id) = event.turn_id {
+                        callers.insert(turn_id, user_id);
+                    }
+                }
+                EventData::Custom {
+                    event_type,
+                    payload,
+                } if event_type == RUNTIME_TURN_WORK => {
+                    if let (Some(id), Some(session_id)) = (event.turn_id, event.session_id) {
+                        work.push((
+                            TurnRecord { id, session_id },
+                            serde_json::from_value::<RecoverableTurn>(payload),
+                        ));
+                    } else {
+                        tracing::error!(thread_id = %thread.record().id, "turn work has no turn or session id");
+                    }
+                }
+                EventData::TurnEnded => {
+                    if let Some(turn_id) = event.turn_id {
+                        ended.insert(turn_id);
+                    }
+                }
+                EventData::Custom { event_type, .. } if event_type == RUNTIME_TURN_COMPLETED => {
+                    if let Some(turn_id) = event.turn_id {
+                        completed.insert(turn_id);
+                    }
+                }
+                EventData::Custom {
+                    event_type,
+                    payload,
+                } if event_type == crate::permissions::APPROVAL_REQUESTED => {
+                    if let Some(turn_id) = event.turn_id {
+                        match serde_json::from_value::<crate::permissions::ApprovalRequest>(payload)
+                        {
+                            Ok(approval) => {
+                                approval_requests.entry(turn_id).or_default().push(approval)
+                            }
+                            Err(error) => {
+                                tracing::error!(%turn_id, %error, "invalid saved approval request")
+                            }
+                        }
+                    }
+                }
+                EventData::Custom {
+                    event_type,
+                    payload,
+                } if event_type == crate::permissions::APPROVAL_RESPONSE => {
+                    if let Some(turn_id) = event.turn_id {
+                        match serde_json::from_value::<crate::permissions::ApprovalResponse>(
+                            payload,
+                        ) {
+                            Ok(response) => {
+                                approval_responses
+                                    .entry(turn_id)
+                                    .or_default()
+                                    .insert(response.approval_id);
+                            }
+                            Err(error) => {
+                                tracing::error!(%turn_id, %error, "invalid saved approval response")
+                            }
+                        }
+                    }
+                }
+                EventData::Error { .. } => {
+                    if let Some(turn_id) = event.turn_id {
+                        failed.insert(turn_id);
+                    }
+                }
+                EventData::Custom {
+                    event_type,
+                    payload,
+                } if event_type == crate::basic::BASIC_TOOL_ROUND => {
+                    if let Some(turn_id) = event.turn_id {
+                        match serde_json::from_value::<crate::basic::BasicToolRound>(payload) {
+                            Ok(marker) => {
+                                tool_rounds.insert(turn_id, marker.round);
+                            }
+                            Err(error) => {
+                                tracing::error!(%turn_id, %error, "invalid saved tool round");
+                                invalid_tool_rounds.insert(turn_id);
+                            }
+                        }
+                    }
+                }
+                EventData::ToolRequested {
+                    tool_call_id,
+                    request,
+                    ..
+                } => {
+                    if let Some(turn_id) = event.turn_id {
+                        tool_requests.entry(turn_id).or_default().push((
+                            tool_rounds.get(&turn_id).copied(),
+                            tool_call_id,
+                            request,
+                        ));
+                    }
+                }
+                EventData::ToolResult { tool_call_id, .. } => {
+                    if let Some(turn_id) = event.turn_id
+                        && let Some(pending) = tool_requests.get_mut(&turn_id)
+                        && let Some(index) =
+                            pending.iter().position(|(_, id, _)| *id == tool_call_id)
+                    {
+                        pending.remove(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Turns on the same thread still need to be resumed in event order.
+        let mut thread_error = None;
+        for (turn, work) in work {
+            if ended.contains(&turn.id) {
+                continue;
+            }
+            let turn_id = turn.id;
+            let result = async {
+                if provider.is_turn_active(thread.as_ref(), turn_id).await? {
+                    return Ok(());
+                }
+                if completed.contains(&turn_id) || failed.contains(&turn_id) {
+                    thread.turn_handle(turn.clone()).await?.finish().await?;
+                    return Ok(());
+                }
+                let work = work?;
+                anyhow::ensure!(
+                    !invalid_tool_rounds.contains(&turn_id),
+                    "turn has an invalid saved tool round"
+                );
+                if let Some((round, tool_call_id, request)) =
+                    tool_requests.get(&turn_id).and_then(|requests| requests.first())
+                {
+                    let pending_approval = provider.executor.can_resume_pending_approval(&work.agent_config)
+                        && approval_requests.get(&turn_id).is_some_and(|approvals| {
+                            approvals.iter().any(|approval| {
+                                approval.tool_call_id.as_deref() == Some(tool_call_id.as_str())
+                                    && approval.round == *round
+                                    && round.is_some()
+                                    && approval.request == *request
+                                    && !approval_responses.get(&turn_id).is_some_and(|responses| responses.contains(&approval.approval_id))
+                            })
+                        });
+                    if !pending_approval
+                        && !provider
+                            .executor
+                            .can_reconcile_unresolved_tool_call(&work.agent_config)
+                    {
+                        anyhow::bail!(
+                            "cannot safely resume unresolved tool call `{tool_call_id}` (`{}`) for turn {turn_id}",
+                            request.function_name
+                        );
+                    }
+                }
+                let caller = callers
+                    .get(&turn_id)
+                    .context("turn has no recorded caller")?;
+                let runtime = match caller {
+                    Some(principal) => resolver
+                        .as_ref()
+                        .context("caller-scoped recovery is unavailable")?(
+                        principal.clone()
+                    )?,
+                    None => Arc::new(self.clone()),
+                };
+                if let Some(principal) = caller {
+                    anyhow::ensure!(
+                        runtime
+                            .exoharness_handle()
+                            .caller()
+                            .map(|c| c.principal.as_str())
+                            == Some(principal.as_str()),
+                        "recovery runtime has the wrong caller"
+                    );
+                }
+                let scoped_agent = runtime
+                    .exoharness_handle()
+                    .get_agent(&agent.record().id)
+                    .await?
+                    .context("recovery caller cannot access agent")?;
+                let scoped_thread = scoped_agent
+                    .get_thread(&thread.record().id)
+                    .await?
+                    .context("recovery caller cannot access thread")?;
+                let mut stream = runtime
+                    .provider
+                    .resume_turn(
+                        runtime.as_ref(),
+                        scoped_agent,
+                        scoped_thread,
+                        turn.clone(),
+                        work.request,
+                        work.agent_config,
+                        work.thread_config,
+                    )
+                    .await?;
+                tokio::spawn(async move {
+                    while let Some(event) = stream.next().await {
+                        if let Err(error) = event {
+                            tracing::error!(%turn_id, %error, "recovered turn failed");
+                        }
+                    }
+                });
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::error!(%turn_id, %error, "failed to recover turn");
+                match thread.turn_handle(turn).await {
+                    Ok(handle) => {
+                        if let Err(finalize_error) =
+                            finalize_turn(handle.as_ref(), Err(error)).await
+                        {
+                            tracing::error!(%turn_id, %finalize_error, "failed to end unrecoverable turn");
+                            thread_error = Some(finalize_error);
+                        }
+                    }
+                    Err(handle_error) => {
+                        tracing::error!(%turn_id, %handle_error, "failed to load unrecoverable turn");
+                        thread_error = Some(handle_error);
+                    }
+                }
+            }
+        }
+        thread_error.map_or(Ok(()), Err)
+    }
+
     pub async fn start_turn(
         &self,
         agent: Arc<dyn AgentHandle>,
@@ -254,7 +812,11 @@ impl Runtime {
         request: SendRequest,
         streaming: bool,
         config_override: Option<AgentConfig>,
+        recovery: Option<(TurnRecord, ConversationConfig)>,
     ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
+        if recovery.is_none() {
+            self.recovery_gate.wait(thread.record().id).await;
+        }
         self.initialized
             .get_or_try_init(|| {
                 provider
@@ -265,7 +827,7 @@ impl Runtime {
         let guard = conversation_send_lock(&thread.record().id.to_string())
             .lock_owned()
             .await;
-        if thread.activate_caller().await? {
+        if recovery.is_none() && thread.activate_caller().await? {
             provider.executor.reset_thread(thread.record().id).await?;
         }
         let (mut agent_config, mut thread_config) = tokio::try_join!(
@@ -280,33 +842,40 @@ impl Runtime {
                 apply_conversation_model_override(&mut config, model);
                 Ok::<_, anyhow::Error>(config)
             },
-            self.get_conversation_config(thread.as_ref()),
+            async {
+                match recovery.as_ref() {
+                    Some((_, config)) => Ok(config.clone()),
+                    None => self.get_conversation_config(thread.as_ref()).await,
+                }
+            },
         )?;
-        if let Some(definition) = exo_managed_agents::load_definition(agent.as_ref()).await? {
-            thread_config.permissions = definition.permissions();
-        }
-        if thread.caller().is_some() {
-            thread_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
-        }
-        if !thread_config.resources.is_empty() {
-            thread_config
-                .materialize_resources(thread.as_ref(), &agent_config)
-                .await?;
-            let mut locations = String::from("Filesystem resources for this thread:\n");
-            for resource in &thread_config.resources {
-                let resource = &resource.definition;
-                let mode = match resource.mode {
-                    exoharness::FileSystemMountMode::ReadOnly => "read-only",
-                    exoharness::FileSystemMountMode::ReadWrite => "read-write",
-                };
-                locations.push_str(&format!(
-                    "- {}: {:?} ({mode})\n",
-                    resource.name, resource.mount_path
-                ));
+        if recovery.is_none() {
+            if let Some(definition) = exo_managed_agents::load_definition(agent.as_ref()).await? {
+                thread_config.permissions = definition.permissions();
             }
-            agent_config
-                .instructions
-                .push(crate::harness_helpers::system_message(&locations));
+            if thread.caller().is_some() {
+                thread_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
+            }
+            if !thread_config.resources.is_empty() {
+                thread_config
+                    .materialize_resources(thread.as_ref(), &agent_config)
+                    .await?;
+                let mut locations = String::from("Filesystem resources for this thread:\n");
+                for resource in &thread_config.resources {
+                    let resource = &resource.definition;
+                    let mode = match resource.mode {
+                        exoharness::FileSystemMountMode::ReadOnly => "read-only",
+                        exoharness::FileSystemMountMode::ReadWrite => "read-write",
+                    };
+                    locations.push_str(&format!(
+                        "- {}: {:?} ({mode})\n",
+                        resource.name, resource.mount_path
+                    ));
+                }
+                agent_config
+                    .instructions
+                    .push(crate::harness_helpers::system_message(&locations));
+            }
         }
         provider
             .executor
@@ -319,12 +888,24 @@ impl Runtime {
             .await?;
         // Reconnect must not see the saved turn before it is registered as live.
         let mut live_turns = provider.live_turns.write().await;
-        let turn = thread
-            .begin_turn(BeginTurnRequest {
-                session_id: request.session_id,
-                input: request.input.clone(),
-            })
-            .await?;
+        let recovering = recovery.is_some();
+        let turn = match recovery {
+            Some((record, _)) => thread.turn_handle(record).await?,
+            None => {
+                let work = RecoverableTurn {
+                    agent_config: agent_config.clone(),
+                    thread_config: thread_config.clone(),
+                    request: request.clone(),
+                };
+                thread
+                    .begin_turn(BeginTurnRequest {
+                        session_id: request.session_id,
+                        input: request.input.clone(),
+                        initial_events: vec![work.event()?],
+                    })
+                    .await?
+            }
+        };
         let key = HarnessTurnKey {
             thread_id: thread.record().id,
             turn_id: turn.record().id,
@@ -359,6 +940,7 @@ impl Runtime {
                 tracing::error!(%error, "harness turn finalization panicked");
             }
         }
+        let completion_thread = Arc::clone(&thread);
         let submission = provider
             .harness
             .submit(HarnessCommand::StartTurn(ExecutorTurn {
@@ -368,6 +950,7 @@ impl Runtime {
                 agent_config,
                 thread_config,
                 request,
+                recovering,
                 stream: streaming.then(|| event_tx.clone()),
                 trace: trace.clone(),
             }))
@@ -394,13 +977,50 @@ impl Runtime {
                     completion.await
                 },
             };
-            let result = match outcome {
-                Ok(HarnessTurnOutcome::Completed(_)) => Ok(()),
-                Ok(HarnessTurnOutcome::Failed(error)) => Err(error),
-                Ok(HarnessTurnOutcome::Cancelled) => Err(anyhow!("harness turn cancelled")),
-                Err(error) => Err(anyhow!("harness stopped without completion: {error}")),
+            let latest_event_id = match outcome {
+                Ok(HarnessTurnOutcome::Completed(_)) => {
+                    let marked = completion_thread
+                        .get_events(Some(EventQuery {
+                            turn_id: Some(key.turn_id),
+                            types: Some(vec![EventKind::custom(RUNTIME_TURN_COMPLETED)]),
+                            ..Default::default()
+                        }))
+                        .await
+                        .map(|result| !result.events.is_empty());
+                    match marked {
+                        Ok(true) => finalize_turn(turn.as_ref(), Ok(())).await,
+                        Ok(false) => {
+                            match turn
+                                .add_events(vec![EventData::Custom {
+                                    event_type: RUNTIME_TURN_COMPLETED.to_owned(),
+                                    payload: serde_json::Value::Null,
+                                }])
+                                .await
+                            {
+                                Ok(_) => finalize_turn(turn.as_ref(), Ok(())).await,
+                                Err(error) => finalize_turn(turn.as_ref(), Err(error)).await,
+                            }
+                        }
+                        Err(error) => finalize_turn(turn.as_ref(), Err(error)).await,
+                    }
+                }
+                Ok(HarnessTurnOutcome::Failed(error)) => {
+                    finalize_turn(turn.as_ref(), Err(error)).await
+                }
+                Ok(HarnessTurnOutcome::Cancelled) => {
+                    finalize_turn(turn.as_ref(), Err(anyhow!("harness turn cancelled"))).await
+                }
+                Ok(HarnessTurnOutcome::Interrupted) => {
+                    Err(anyhow!("harness turn interrupted by shutdown"))
+                }
+                Err(error) => {
+                    finalize_turn(
+                        turn.as_ref(),
+                        Err(anyhow!("harness stopped without completion: {error}")),
+                    )
+                    .await
+                }
             };
-            let latest_event_id = finalize_turn(turn.as_ref(), result).await;
             drop(live_turn);
             if let Some(trace) = trace {
                 match &latest_event_id {
@@ -591,6 +1211,9 @@ impl Runtime {
         let opened =
             exo_managed_agents::open_thread(self.provider.as_ref(), agent, reference, request)
                 .await?;
+        if opened.created {
+            self.recovery_gate.new_thread(opened.thread.record().id);
+        }
         Ok(opened)
     }
 
@@ -740,6 +1363,7 @@ impl Runtime {
                 })?;
             return Err(error);
         }
+        self.recovery_gate.new_thread(conversation.record().id);
         Ok(conversation)
     }
 }

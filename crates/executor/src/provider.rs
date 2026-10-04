@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 use crate::harness::{Harness, HarnessCommand};
 use crate::harness_adapter::{ExecutorHarness, ExecutorTurn};
-use crate::harness_executor::HarnessExecutor;
+use crate::harness_executor::{HarnessExecutor, RecoveryRuntimeResolver};
 use crate::{
     AgentConfig, BasicExecutor, ExecutionStreamHandle, ModelClient, Runtime, SendRequest,
     ToolRuntime,
@@ -24,6 +24,27 @@ pub trait Provider: AgentBackend {
     }
 
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
+
+    async fn recover_unfinished_turns(
+        &self,
+        _runtime: Runtime,
+        _resolver: Option<RecoveryRuntimeResolver>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn resume_turn(
+        &self,
+        _runtime: &Runtime,
+        _agent: Arc<dyn AgentHandle>,
+        _thread: Arc<dyn ThreadHandle>,
+        _turn: TurnRecord,
+        _request: SendRequest,
+        _agent_config: AgentConfig,
+        _thread_config: crate::ConversationConfig,
+    ) -> Result<ExecutionStreamHandle> {
+        anyhow::bail!("this provider does not support turn recovery")
+    }
 
     async fn is_turn_active(
         &self,
@@ -112,6 +133,38 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
+    async fn recover_unfinished_turns(
+        &self,
+        runtime: Runtime,
+        resolver: Option<RecoveryRuntimeResolver>,
+    ) -> Result<()> {
+        runtime.recover_local_turns(self, resolver).await
+    }
+
+    async fn resume_turn(
+        &self,
+        runtime: &Runtime,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ThreadHandle>,
+        turn: TurnRecord,
+        request: SendRequest,
+        agent_config: AgentConfig,
+        thread_config: crate::ConversationConfig,
+    ) -> Result<ExecutionStreamHandle> {
+        runtime
+            .start_local_turn(
+                self,
+                agent,
+                thread,
+                request,
+                false,
+                Some(agent_config),
+                Some((turn, thread_config)),
+            )
+            .await
+            .map(|(_, stream)| stream)
+    }
+
     fn with_caller(&self, caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {
         let state = self.state.with_caller(caller)?;
         let executor = self.executor.with_state(state.clone())?;
@@ -225,6 +278,7 @@ impl Harness<ProviderTurn> for LocalProvider {
                         work.request,
                         work.streaming,
                         work.config_override,
+                        None,
                     )
                     .await?;
                 if work.receipt.send(result).is_err() {

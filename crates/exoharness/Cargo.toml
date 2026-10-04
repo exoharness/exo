@@ -10,6 +10,7 @@ default = []
 smolvm = ["basic-backend", "dep:smolmachines"]
 http-client = ["dep:reqwest"]
 basic-backend = [
+  "dep:oci-client",
   "dep:libc",
   "dep:sha2",
   "dep:tokio-rustls",

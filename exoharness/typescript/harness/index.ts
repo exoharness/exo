@@ -435,7 +435,9 @@ export interface TurnContext {
 export interface TypeScriptHarness {
   tools?: ToolModuleExport;
   nativeToolApprovals?: boolean;
+  reconcileUnresolvedToolCalls?: boolean;
   runTurn(context: TurnContext): Promise<void>;
+  resumeTurn?(context: TurnContext): Promise<void>;
 }
 
 export function defineHarness(harness: TypeScriptHarness): TypeScriptHarness {

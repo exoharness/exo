@@ -22,6 +22,7 @@ pub(crate) struct ExecutorTurn {
     pub agent_config: AgentConfig,
     pub thread_config: ConversationConfig,
     pub request: crate::SendRequest,
+    pub recovering: bool,
     pub stream: Option<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
     pub(crate) trace: Option<Arc<dyn TurnExecutionTrace>>,
 }
@@ -38,7 +39,12 @@ impl ExecutorTurn {
 #[derive(Default)]
 struct ActiveTurns {
     stopping: bool,
-    turns: HashMap<HarnessTurnKey, Option<oneshot::Sender<()>>>,
+    turns: HashMap<HarnessTurnKey, Option<oneshot::Sender<StopReason>>>,
+}
+
+enum StopReason {
+    Cancel,
+    Shutdown,
 }
 
 pub(crate) struct ExecutorHarness {
@@ -86,7 +92,7 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
             active.stopping = true;
             for cancel in active.turns.values_mut() {
                 if let Some(cancel) = cancel.take()
-                    && cancel.send(()).is_err()
+                    && cancel.send(StopReason::Shutdown).is_err()
                 {
                     tracing::debug!("harness turn already stopped during shutdown");
                 }
@@ -120,7 +126,7 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
             HarnessCommand::CancelTurn { key } => {
                 let mut active = self.active.lock().expect("active harness turns poisoned");
                 if let Some(cancel) = active.turns.get_mut(&key).and_then(Option::take)
-                    && cancel.send(()).is_err()
+                    && cancel.send(StopReason::Cancel).is_err()
                 {
                     tracing::debug!(?key, "harness turn already stopped before cancellation");
                 }
@@ -149,28 +155,55 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
                 events.clone(),
                 key,
             ));
-            let execution = executor.execute_turn(
-                work.agent.as_ref(),
-                Arc::clone(&work.thread),
-                turn,
-                &work.agent_config,
-                &work.thread_config,
-                &work.request,
-                work.stream
+            let execution = async {
+                let stream = work
+                    .stream
                     .as_ref()
                     .map(ExecutorStreamMode::Enabled)
-                    .unwrap_or(ExecutorStreamMode::Disabled),
-                work.trace.as_deref(),
-            );
+                    .unwrap_or(ExecutorStreamMode::Disabled);
+                if work.recovering {
+                    executor
+                        .resume_turn(
+                            work.agent.as_ref(),
+                            Arc::clone(&work.thread),
+                            turn,
+                            &work.agent_config,
+                            &work.thread_config,
+                            &work.request,
+                            stream,
+                            work.trace.as_deref(),
+                        )
+                        .await
+                } else {
+                    executor
+                        .execute_turn(
+                            work.agent.as_ref(),
+                            Arc::clone(&work.thread),
+                            turn,
+                            &work.agent_config,
+                            &work.thread_config,
+                            &work.request,
+                            stream,
+                            work.trace.as_deref(),
+                        )
+                        .await
+                }
+            };
             let outcome = tokio::select! {
                 result = std::panic::AssertUnwindSafe(execution).catch_unwind() => match result {
                     Ok(Ok(())) => HarnessTurnOutcome::Completed(None),
                     Ok(Err(error)) => HarnessTurnOutcome::Failed(error),
                     Err(_) => HarnessTurnOutcome::Failed(anyhow!("harness turn task panicked")),
                 },
-                _ = cancelled => HarnessTurnOutcome::Cancelled,
+                reason = cancelled => match reason {
+                    Ok(StopReason::Shutdown) => HarnessTurnOutcome::Interrupted,
+                    Ok(StopReason::Cancel) | Err(_) => HarnessTurnOutcome::Cancelled,
+                },
             };
-            let outcome = if matches!(outcome, HarnessTurnOutcome::Cancelled) {
+            let outcome = if matches!(
+                outcome,
+                HarnessTurnOutcome::Cancelled | HarnessTurnOutcome::Interrupted
+            ) {
                 match std::panic::AssertUnwindSafe(
                     executor.cancel_turn(work.thread.as_ref(), &work.agent_config),
                 )
@@ -178,8 +211,16 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
                 .await
                 {
                     Ok(Ok(())) => outcome,
+                    Ok(Err(error)) if matches!(outcome, HarnessTurnOutcome::Interrupted) => {
+                        tracing::error!(?key, %error, "failed to clean up interrupted harness turn");
+                        outcome
+                    }
                     Ok(Err(error)) => {
                         HarnessTurnOutcome::Failed(error.context("failed to cancel harness turn"))
+                    }
+                    Err(_) if matches!(outcome, HarnessTurnOutcome::Interrupted) => {
+                        tracing::error!(?key, "harness cleanup panicked during shutdown");
+                        outcome
                     }
                     Err(_) => HarnessTurnOutcome::Failed(anyhow!("harness cancellation panicked")),
                 }

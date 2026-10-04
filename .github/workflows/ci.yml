@@ -137,7 +137,7 @@ jobs:
       - name: Run sandbox integration test
         run: |
           cargo test --locked --package exo --features firecracker \
-            --test integration_chat --no-run --message-format=json \
+            --test integration_chat --no-run --message-format=json-render-diagnostics \
             > "$RUNNER_TEMP/integration-build.jsonl"
           test_binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "integration_chat") | .executable // empty' "$RUNNER_TEMP/integration-build.jsonl")"
           test -x "$test_binary"
