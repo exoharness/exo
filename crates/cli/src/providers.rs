@@ -50,39 +50,27 @@ pub(crate) async fn runtime(
         )));
     }
 
-    let selection = match selection {
-        Some(selection) => Some(selection.clone()),
-        None => definition
-            .map(managed_agents::harness_selection)
-            .transpose()?,
-    };
     let config = crate::build_exo_config(cli)?;
     let env_vars = env.clone().into_vars();
     let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
-    if let Some(reference) = thread.and_then(|args| args.agent.as_deref())
-        && let Some(selection) = selection.as_ref()
-    {
-        let agent = exo_managed_agents::find_agent(state.as_ref(), reference).await?;
-        crate::ensure_agent_matches_harness_selection(agent.as_ref(), selection).await?;
-    }
+    let thread_config = thread
+        .map(|args| args.local_config())
+        .transpose()?
+        .unwrap_or_default();
     let setup = LocalAgentSetup {
+        harness: selection.map(crate::format_harness_selection),
         agent: definition
             .map(|definition| {
                 managed_agents::local_agent_config(
                     definition,
-                    selection
-                        .as_ref()
-                        .context("agent definition has no harness")?,
+                    &managed_agents::harness_selection(definition)?,
                     None,
                 )
             })
             .transpose()?,
         model,
         egress_policy: thread.and_then(|_| config.sandbox_policy.clone()),
-        thread: thread
-            .map(|args| args.local_config())
-            .transpose()?
-            .unwrap_or_default(),
+        thread: thread_config,
     };
     let pricing = Arc::new(match execution {
         Some(args) => cost::load(args.pricing_path.clone(), args.pricing_url.clone()).await,

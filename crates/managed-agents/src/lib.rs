@@ -163,7 +163,12 @@ pub trait AgentBackend: Send + Sync {
         _agent: &dyn AgentHandle,
         _thread: &dyn ThreadHandle,
         _created: bool,
+        options: &ThreadOptions,
     ) -> Result<ThreadInfo> {
+        anyhow::ensure!(
+            options.harness.is_none() && options.model.is_none(),
+            "this backend does not support thread execution overrides"
+        );
         Ok(ThreadInfo::default())
     }
 
@@ -302,11 +307,18 @@ pub struct ThreadInfo {
     pub mcp_tools: Option<usize>,
 }
 
+#[derive(Default)]
+pub struct ThreadOptions {
+    pub harness: Option<String>,
+    pub model: Option<String>,
+}
+
 pub async fn open_thread(
     backend: &dyn AgentBackend,
     agent: &Arc<dyn AgentHandle>,
     reference: Option<&str>,
     new_thread: NewThreadRequest,
+    options: &ThreadOptions,
 ) -> Result<OpenedThread> {
     let environment = new_thread.environment.clone();
     let vaults = new_thread.vaults.clone();
@@ -328,7 +340,7 @@ pub async fn open_thread(
         thread
     };
     let configured = backend
-        .configure_thread(agent.as_ref(), thread.as_ref(), created)
+        .configure_thread(agent.as_ref(), thread.as_ref(), created, options)
         .await;
     if let Err(error) = &configured
         && created

@@ -239,18 +239,32 @@ async fn saves_definitions_and_resumes_only_threads_owned_by_the_agent() -> Resu
             slug: Some("tickets".to_string()),
             name: None,
         },
+        &Default::default(),
     )
     .await?;
     assert!(opened.created);
     for reference in ["tickets".to_string(), opened.thread.record().id.to_string()] {
-        let resumed = open_thread(&backend, &agent, Some(&reference), Default::default()).await?;
+        let resumed = open_thread(
+            &backend,
+            &agent,
+            Some(&reference),
+            Default::default(),
+            &Default::default(),
+        )
+        .await?;
         assert!(!resumed.created);
         assert_eq!(resumed.thread.record().id, opened.thread.record().id);
     }
     assert!(
-        open_thread(&backend, &agent, Some("missing"), Default::default())
-            .await
-            .is_err()
+        open_thread(
+            &backend,
+            &agent,
+            Some("missing"),
+            Default::default(),
+            &Default::default()
+        )
+        .await
+        .is_err()
     );
     assert_eq!(list_threads(agent.as_ref()).await?.len(), 1);
     assert!(find_agent(root.as_ref(), "support-analyst").await.is_err());

@@ -1189,6 +1189,25 @@ async fn host_configuration_requires_the_operator() -> Result<()> {
         "---\nname: worker\nharness: basic\nconfig:\n  model: test\n---\nWork".into(),
     )?;
     let agent = runtime.create_managed_agent(&definition, "worker").await?;
+    let error = runtime
+        .open_managed_thread(
+            &agent,
+            None,
+            Default::default(),
+            &exo_managed_agents::ThreadOptions {
+                harness: Some("module.ts".into()),
+                model: None,
+            },
+        )
+        .await
+        .err()
+        .context("non-owner selected a host module for a thread")?;
+    assert!(format!("{error:#}").contains("server owner"), "{error:#}");
+    assert!(
+        exo_managed_agents::list_threads(agent.as_ref())
+            .await?
+            .is_empty()
+    );
     let environment = exoharness::EnvironmentDefinition {
         name: "published".into(),
         config: serde_json::from_value(json!({ "provider": "local-process", "image": "local" }))?,

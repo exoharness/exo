@@ -1,5 +1,8 @@
 use super::*;
-use crate::{Runtime, SandboxProvider, SendRequest};
+use crate::{
+    AgentHarnessKind, ConversationHarnessConfig, Runtime, SandboxProvider, SendRequest,
+    TypeScriptHarnessConfig,
+};
 use anyhow::Context;
 use exoharness::{
     AddEventsRequest, BasicExoHarness, BasicExoHarnessConfig, EventData, FileSystemMount,
@@ -28,6 +31,77 @@ async fn state(config: &BasicExoHarnessConfig) -> Result<Arc<dyn ExoHarness>> {
     let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
 
     Ok(state)
+}
+
+#[test]
+fn thread_harness_image_defaults_respect_explicit_images() -> Result<()> {
+    let definition = AgentDefinition::parse(SOURCE.into())?;
+    let base = agent_config(&definition, SandboxProvider::Smolvm, None, None)?;
+    let pi = ConversationHarnessConfig {
+        kind: AgentHarnessKind::TypeScript,
+        module_path: Some("/provider/pi-harness.ts".into()),
+        preset: Some(TypeScriptHarnessPreset::Pi),
+    };
+    let codex_image = TypeScriptHarnessPreset::Codex.sandbox_image();
+    let pi_image = TypeScriptHarnessPreset::Pi.sandbox_image();
+    for (agent_image, thread_image, expected) in [
+        (None, None, pi_image),
+        (codex_image, None, pi_image),
+        (
+            Some("custom-agent:latest"),
+            None,
+            Some("custom-agent:latest"),
+        ),
+        (
+            codex_image,
+            Some("custom-thread:latest"),
+            Some("custom-thread:latest"),
+        ),
+    ] {
+        let mut config = base.clone();
+        config.sandbox.image = agent_image.map(str::to_owned);
+        super::config::apply_thread_harness(&mut config, Some(&pi))?;
+        let thread = ConversationConfig {
+            sandbox_image: thread_image.map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(thread.effective_sandbox_image(&config), expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn switching_thread_harnesses_retains_tools_and_rejects_incompatible_harnesses() -> Result<()> {
+    let definition = AgentDefinition::parse(SOURCE.into())?;
+    let mut config = agent_config(&definition, SandboxProvider::Smolvm, None, None)?;
+    config.harness = AgentHarnessKind::TypeScript;
+    config.typescript = Some(TypeScriptHarnessConfig {
+        module_path: "agent.ts".into(),
+        tool_module_paths: vec!["tools.ts".into()],
+    });
+    let pi = ConversationHarnessConfig {
+        kind: AgentHarnessKind::TypeScript,
+        module_path: Some("/provider/pi-harness.ts".into()),
+        preset: Some(TypeScriptHarnessPreset::Pi),
+    };
+    super::config::apply_thread_harness(&mut config, Some(&pi))?;
+    let selected = config.typescript.clone().context("selected harness")?;
+    assert_eq!(selected.module_path, "/provider/pi-harness.ts");
+    assert_eq!(selected.tool_module_paths, ["tools.ts"]);
+
+    let basic = ConversationHarnessConfig {
+        kind: AgentHarnessKind::Basic,
+        module_path: None,
+        preset: None,
+    };
+    let error = super::config::apply_thread_harness(&mut config, Some(&basic)).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("tool modules require a TypeScript harness")
+    );
+    assert_eq!(config.typescript.as_ref(), Some(&selected));
+    Ok(())
 }
 
 #[tokio::test]
@@ -71,7 +145,12 @@ async fn applying_an_environment_preserves_thread_mounts() -> Result<()> {
     let definition = AgentDefinition::parse(SOURCE.into())?;
     let agent = runtime.create_managed_agent(&definition, "support").await?;
     let thread = runtime
-        .open_managed_thread(&agent, None, NewThreadRequest::default())
+        .open_managed_thread(
+            &agent,
+            None,
+            NewThreadRequest::default(),
+            &Default::default(),
+        )
         .await?
         .thread;
     let existing_mount = FileSystemMount {
@@ -97,6 +176,7 @@ async fn applying_an_environment_preserves_thread_mounts() -> Result<()> {
                 environment: Some(environment.clone()),
                 ..Default::default()
             },
+            &Default::default(),
         )
         .await?;
     let mounts = runtime
@@ -122,6 +202,7 @@ async fn applying_an_environment_preserves_thread_mounts() -> Result<()> {
                 environment: Some(updated_environment),
                 ..Default::default()
             },
+            &Default::default(),
         )
         .await?;
     let mounts = runtime
@@ -144,7 +225,12 @@ async fn runtime_reads_config_changes_made_by_another_runtime() -> Result<()> {
     let definition = AgentDefinition::parse(SOURCE.into())?;
     let agent = server.create_managed_agent(&definition, "support").await?;
     let thread = server
-        .open_managed_thread(&agent, None, NewThreadRequest::default())
+        .open_managed_thread(
+            &agent,
+            None,
+            NewThreadRequest::default(),
+            &Default::default(),
+        )
         .await?
         .thread;
 
@@ -199,7 +285,7 @@ async fn switching_harnesses_keeps_the_thread_history_and_selects_the_new_defaul
         .create_managed_agent(&AgentDefinition::parse(SOURCE.into())?, "support")
         .await?;
     let thread = runtime
-        .open_managed_thread(&agent, None, Default::default())
+        .open_managed_thread(&agent, None, Default::default(), &Default::default())
         .await?
         .thread;
     let thread_id = thread.record().id;
@@ -218,7 +304,12 @@ async fn switching_harnesses_keeps_the_thread_history_and_selects_the_new_defaul
     let codex = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: codex"))?;
     runtime.update_managed_agent(&agent, &codex).await?;
     let reopened = runtime
-        .open_managed_thread(&agent, Some(&thread_id.to_string()), Default::default())
+        .open_managed_thread(
+            &agent,
+            Some(&thread_id.to_string()),
+            Default::default(),
+            &Default::default(),
+        )
         .await?;
     assert_eq!(reopened.thread.record().id, thread_id);
     let codex_config = runtime.get_agent_config(agent.as_ref()).await?;
@@ -240,7 +331,12 @@ async fn switching_harnesses_keeps_the_thread_history_and_selects_the_new_defaul
     let pi = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: pi"))?;
     runtime.update_managed_agent(&agent, &pi).await?;
     runtime
-        .open_managed_thread(&agent, Some(&thread_id.to_string()), Default::default())
+        .open_managed_thread(
+            &agent,
+            Some(&thread_id.to_string()),
+            Default::default(),
+            &Default::default(),
+        )
         .await?;
     let pi_config = runtime.get_agent_config(agent.as_ref()).await?;
     let thread_config = runtime.get_conversation_config(thread.as_ref()).await?;
@@ -257,7 +353,12 @@ async fn switching_harnesses_keeps_the_thread_history_and_selects_the_new_defaul
     let claude = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: claude-code"))?;
     runtime.update_managed_agent(&agent, &claude).await?;
     runtime
-        .open_managed_thread(&agent, Some(&thread_id.to_string()), Default::default())
+        .open_managed_thread(
+            &agent,
+            Some(&thread_id.to_string()),
+            Default::default(),
+            &Default::default(),
+        )
         .await?;
     assert_eq!(
         runtime
@@ -349,6 +450,7 @@ async fn mcp_authentication_errors_identify_the_selected_vaults_and_secret() -> 
                     },
                     ..Default::default()
                 },
+                &Default::default(),
             )
             .await
             .err()
@@ -419,7 +521,7 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
     };
     let bad = self::runtime(store.clone(), &config, unsafe_mount.clone())?;
     let error = bad
-        .open_managed_thread(&agent, None, Default::default())
+        .open_managed_thread(&agent, None, Default::default(), &Default::default())
         .await
         .err()
         .context("expected protected mount rejection")?;
@@ -438,6 +540,7 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
                 vaults: vec![alice.record().id],
                 ..Default::default()
             },
+            &Default::default(),
         )
         .await?
         .thread;
@@ -455,7 +558,12 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
     let versions = vault_versions(thread.list_artifacts().await?);
     let reopened = self::runtime(store.clone(), &config, isolated)?;
     reopened
-        .open_managed_thread(&agent, Some(&reference), Default::default())
+        .open_managed_thread(
+            &agent,
+            Some(&reference),
+            Default::default(),
+            &Default::default(),
+        )
         .await?;
     assert_eq!(
         managed::vaults::load_selection(thread.as_ref()).await?,
@@ -472,7 +580,12 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
         let unsafe_runtime = self::runtime(store.clone(), &config, thread_config)?;
         assert!(
             unsafe_runtime
-                .open_managed_thread(&agent, Some(&reference), Default::default())
+                .open_managed_thread(
+                    &agent,
+                    Some(&reference),
+                    Default::default(),
+                    &Default::default()
+                )
                 .await
                 .is_err()
         );
@@ -489,6 +602,7 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
                 vaults: vec![bob.record().id],
                 ..Default::default()
             },
+            &Default::default(),
         )
         .await?;
     assert!(attached.thread.record().vaults.contains(&bob.record().id));
@@ -547,7 +661,12 @@ async fn agent_resources_are_inherited_pinned_and_cleaned_up() -> Result<()> {
         .await?;
     let result = async {
         let first = runtime
-            .open_managed_thread(&agent, None, NewThreadRequest::default())
+            .open_managed_thread(
+                &agent,
+                None,
+                NewThreadRequest::default(),
+                &Default::default(),
+            )
             .await?;
         let agent_config = crate::load_agent_config(agent.as_ref()).await?;
         let mut first_config = crate::load_conversation_config(first.thread.as_ref()).await?;
@@ -573,13 +692,19 @@ async fn agent_resources_are_inherited_pinned_and_cleaned_up() -> Result<()> {
                 &agent,
                 Some(&first.thread.record().slug),
                 NewThreadRequest::default(),
+                &Default::default(),
             )
             .await?;
         let resumed_config = crate::load_conversation_config(resumed.thread.as_ref()).await?;
         assert_eq!(resumed_config.resources, first_config.resources);
         assert_eq!(std::fs::read_to_string(first_path.join("file"))?, "private");
         let second = runtime
-            .open_managed_thread(&agent, None, NewThreadRequest::default())
+            .open_managed_thread(
+                &agent,
+                None,
+                NewThreadRequest::default(),
+                &Default::default(),
+            )
             .await?;
         let mut second_config = crate::load_conversation_config(second.thread.as_ref()).await?;
         second_config
@@ -637,6 +762,7 @@ async fn git_resources_require_a_selected_vault_and_matching_origin() -> Result<
                     vaults,
                     ..Default::default()
                 },
+                &Default::default(),
             )
             .await?;
         let error = runtime

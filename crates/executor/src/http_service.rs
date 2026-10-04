@@ -23,8 +23,8 @@ use serde::Deserialize;
 use tokio::sync::{broadcast, oneshot};
 
 use crate::{
-    AgentConfig, AgentHarnessKind, ConversationModelConfig, ExecutionStreamEvent, Runtime,
-    SendRequest, harness::HarnessTurnKey,
+    AgentConfig, AgentHarnessKind, ExecutionStreamEvent, Runtime, SendRequest,
+    harness::HarnessTurnKey,
 };
 
 // Thread creation can include a large environment definition. Bytes buffers the request.
@@ -783,32 +783,15 @@ fn harness_name(config: &AgentConfig) -> &str {
             .as_ref()
             .and_then(|config| std::path::Path::new(&config.module_path).file_stem())
             .and_then(|name| name.to_str())
+            .map(|name| match name {
+                "codex-harness" => "codex",
+                "claude-code-harness" => "claude-code",
+                "cursor-sdk-harness" => "cursor",
+                "pi-harness" => "pi",
+                name => name,
+            })
             .unwrap_or("typescript"),
     }
-}
-
-async fn check_harness(
-    agent: &dyn AgentHandle,
-    config: &AgentConfig,
-    requested: Option<&str>,
-) -> Result<(), Error> {
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    let definition = exo_managed_agents::load_definition(agent)
-        .await
-        .map_err(ErrorBadRequest)?;
-    let actual = definition
-        .as_ref()
-        .map(|d| d.frontmatter.harness.as_str())
-        .unwrap_or_else(|| harness_name(config));
-    if requested != actual && !(requested == "native" && config.harness == AgentHarnessKind::Basic)
-    {
-        return Err(ErrorNotImplemented(
-            "choose the harness in the saved agent definition",
-        ));
-    }
-    Ok(())
 }
 
 async fn create_thread(
@@ -829,12 +812,6 @@ async fn create_thread(
         ));
     }
     let agent = service.agent(path.agent_id).await?;
-    let config = service
-        .runtime
-        .get_agent_config(agent.as_ref())
-        .await
-        .map_err(ErrorBadRequest)?;
-    check_harness(agent.as_ref(), &config, body.harness.as_deref()).await?;
     let thread = service
         .runtime
         .open_managed_thread(
@@ -846,21 +823,19 @@ async fn create_thread(
                 slug: body.thread_slug,
                 name: body.thread_name,
             },
+            &exo_managed_agents::ThreadOptions {
+                harness: body.harness,
+                model: body.model,
+            },
         )
         .await
         .map_err(ErrorBadRequest)?
         .thread;
-    if let Some(model) = body.model {
-        crate::put_conversation_model_override(
-            thread.as_ref(),
-            Some(ConversationModelConfig {
-                model,
-                max_output_tokens: None,
-            }),
-        )
+    let config = service
+        .runtime
+        .get_thread_agent_config(agent.as_ref(), thread.as_ref())
         .await
         .map_err(ErrorBadRequest)?;
-    }
     Ok(web::Json(CreateThreadResult {
         agent: agent.record().clone(),
         thread: thread.record().clone(),
@@ -883,6 +858,7 @@ async fn update_thread_environment(
                 environment: Some(body.into_inner()),
                 ..Default::default()
             },
+            &Default::default(),
         )
         .await
         .map_err(ErrorBadRequest)?;
@@ -973,16 +949,16 @@ async fn submit_turn(
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
     let mut config = service
         .runtime
-        .get_agent_config(agent.as_ref())
+        .get_thread_agent_config(agent.as_ref(), thread.as_ref())
         .await
         .map_err(ErrorBadRequest)?;
-    check_harness(agent.as_ref(), &config, body.harness.as_deref()).await?;
-    if let Some(model) = crate::get_conversation_model_override(thread.as_ref())
-        .await
-        .map_err(ErrorBadRequest)?
-    {
-        config.model = model.model;
-        config.max_output_tokens = model.max_output_tokens;
+    if let Some(harness) = body.harness.as_deref() {
+        let harness =
+            crate::managed_agents::resolve_thread_harness(thread.as_ref(), &config, harness)
+                .await
+                .map_err(ErrorBadRequest)?;
+        crate::managed_agents::apply_thread_harness(&mut config, Some(&harness))
+            .map_err(ErrorBadRequest)?;
     }
     if let Some(model) = body.model {
         config.model = model;

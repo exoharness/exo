@@ -100,6 +100,7 @@ fn configured_runtime(
     args: &ThreadArgs,
 ) -> Result<Runtime> {
     let setup = executor::managed_agents::LocalAgentSetup {
+        harness: None,
         agent: definition
             .map(|definition| local_agent_config(definition, &harness_selection(definition)?, None))
             .transpose()?,

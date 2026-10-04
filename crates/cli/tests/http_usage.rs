@@ -156,7 +156,7 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
         })
         .await?;
     let thread = runtime
-        .open_managed_thread(&agent, None, Default::default())
+        .open_managed_thread(&agent, None, Default::default(), &Default::default())
         .await?
         .thread;
     let listener = TcpListener::bind("127.0.0.1:0")?;

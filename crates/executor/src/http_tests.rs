@@ -630,11 +630,12 @@ async fn managed_agents_created_locally_resume_over_http() -> Result<()> {
                     slug: Some(slug.into()),
                     ..Default::default()
                 },
+                &Default::default(),
             )
             .await?;
         assert!(opened.created);
         let resumed = runtime
-            .open_managed_thread(&agent, Some(slug), Default::default())
+            .open_managed_thread(&agent, Some(slug), Default::default(), &Default::default())
             .await?;
         assert!(!resumed.created);
         assert_eq!(resumed.thread.record().id, opened.thread.record().id);
@@ -771,7 +772,7 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
             .await?
             .context("agent")?;
         let thread = runtime
-            .open_managed_thread(&agent, None, Default::default())
+            .open_managed_thread(&agent, None, Default::default(), &Default::default())
             .await?
             .thread;
         let local_agent = f
@@ -934,7 +935,7 @@ async fn saved_policy_changes_apply_to_existing_local_and_http_threads() -> Resu
             .await?
             .context("local agent")?;
         let thread = runtime
-            .open_managed_thread(&agent, None, Default::default())
+            .open_managed_thread(&agent, None, Default::default(), &Default::default())
             .await?
             .thread;
         for ask in [false, true, false] {

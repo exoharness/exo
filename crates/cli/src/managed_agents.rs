@@ -235,6 +235,7 @@ pub async fn open_thread(
                 slug: Some(slug.clone()),
                 name: Some(slug),
             },
+            &Default::default(),
         )
         .await?;
     println!("agent: {} ({})", agent.record().slug, agent.record().id);
@@ -254,7 +255,9 @@ pub async fn open_thread(
     {
         println!("mcp: {count} tools");
     }
-    let config = runtime.get_agent_config(agent.as_ref()).await?;
+    let config = runtime
+        .get_thread_agent_config(agent.as_ref(), opened.thread.as_ref())
+        .await?;
     if let Some(name) = config.credential.as_deref() {
         let reference = exoharness::vault::find_secret(opened.thread.as_ref(), name)
             .await?

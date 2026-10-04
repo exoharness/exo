@@ -1,7 +1,9 @@
 mod config;
 mod executor;
-pub(crate) use config::sandbox_model_credential_variable;
 pub use config::{TypeScriptHarnessPreset, agent_config, model_credential_destination};
+pub(crate) use config::{
+    apply_thread_harness, resolve_thread_harness, sandbox_model_credential_variable,
+};
 
 use std::{path::Path, sync::Arc};
 
@@ -16,6 +18,7 @@ use crate::{AgentConfig, ConversationConfig, ConversationModelConfig, LocalProvi
 #[derive(Clone, Default)]
 pub struct LocalAgentSetup {
     pub agent: Option<AgentConfig>,
+    pub harness: Option<String>,
     pub model: Option<String>,
     pub thread: ConversationConfig,
     pub egress_policy: Option<exoharness::EgressPolicy>,
@@ -72,21 +75,21 @@ impl AgentBackend for LocalProvider {
         agent: &dyn AgentHandle,
         thread: &dyn ThreadHandle,
         created: bool,
+        options: &managed::ThreadOptions,
     ) -> Result<managed::ThreadInfo> {
         let _guard =
             crate::conversation_wakeup::conversation_send_lock(&thread.record().id.to_string())
                 .lock_owned()
                 .await;
-        let agent_config = crate::load_agent_config(agent).await?;
+        let mut agent_config = crate::load_agent_config(agent).await?;
         let current_model = crate::get_conversation_model_override(thread).await?;
         let preferred = current_model
             .as_ref()
             .map(|config| config.model.as_str())
             .unwrap_or(&agent_config.model);
-        let model = self
-            .managed
-            .model
-            .as_deref()
+        let requested_model = options.model.as_ref().or(self.managed.model.as_ref());
+        let model = requested_model
+            .map(String::as_str)
             .unwrap_or(preferred)
             .to_owned();
         let mut config = if created {
@@ -98,6 +101,12 @@ impl AgentBackend for LocalProvider {
         } else {
             crate::load_conversation_config(thread).await?
         };
+        if let Some(harness) = options.harness.as_ref().or(self.managed.harness.as_ref()) {
+            config.harness =
+                Some(config::resolve_thread_harness(thread, &agent_config, harness).await?);
+        }
+        agent_config.model = model.clone();
+        config::apply_thread_harness(&mut agent_config, config.harness.as_ref())?;
         if !created
             && config.environment.is_none()
             && config.sandbox_image.as_deref().is_some_and(|image| {
@@ -198,7 +207,7 @@ impl AgentBackend for LocalProvider {
             .configure_managed_thread(agent, thread, &agent_config, &config)
             .await?;
         crate::harness_config::store_conversation_config(thread, &config).await?;
-        if self.managed.model.is_some() || model != preferred {
+        if requested_model.is_some() {
             crate::put_conversation_model_override(
                 thread,
                 Some(ConversationModelConfig {
@@ -399,7 +408,7 @@ mod permission_tests {
             .create_managed_agent(&definition, "permissions")
             .await?;
         let opened = runtime
-            .open_managed_thread(&agent, None, Default::default())
+            .open_managed_thread(&agent, None, Default::default(), &Default::default())
             .await?;
         let thread = opened.thread;
         assert_eq!(
@@ -425,6 +434,7 @@ mod permission_tests {
                     &agent,
                     Some(&thread.record().id.to_string()),
                     Default::default(),
+                    &Default::default(),
                 )
                 .await?;
             assert!(!resumed.created);

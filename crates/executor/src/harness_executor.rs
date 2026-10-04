@@ -830,6 +830,7 @@ impl Runtime {
         if recovery.is_none() && thread.activate_caller().await? {
             provider.executor.reset_thread(thread.record().id).await?;
         }
+        let apply_thread_harness = config_override.is_none() && recovery.is_none();
         let (mut agent_config, mut thread_config) = tokio::try_join!(
             async {
                 if let Some(config) = config_override {
@@ -849,6 +850,12 @@ impl Runtime {
                 }
             },
         )?;
+        if apply_thread_harness {
+            crate::managed_agents::apply_thread_harness(
+                &mut agent_config,
+                thread_config.harness.as_ref(),
+            )?;
+        }
         if recovery.is_none() {
             if let Some(definition) = exo_managed_agents::load_definition(agent.as_ref()).await? {
                 thread_config.permissions = definition.permissions();
@@ -1061,6 +1068,21 @@ impl Runtime {
         load_agent_config(agent).await
     }
 
+    pub async fn get_thread_agent_config(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: &dyn ConversationHandle,
+    ) -> Result<AgentConfig> {
+        let (mut config, thread_config, model) = tokio::try_join!(
+            self.get_agent_config(agent),
+            self.get_conversation_config(thread),
+            get_conversation_model_override(thread),
+        )?;
+        apply_conversation_model_override(&mut config, model);
+        crate::managed_agents::apply_thread_harness(&mut config, thread_config.harness.as_ref())?;
+        Ok(config)
+    }
+
     pub async fn put_agent_config(
         &self,
         agent: &dyn AgentHandle,
@@ -1207,10 +1229,16 @@ impl Runtime {
         agent: &Arc<dyn AgentHandle>,
         reference: Option<&str>,
         request: NewConversationRequest,
+        options: &exo_managed_agents::ThreadOptions,
     ) -> Result<exo_managed_agents::OpenedThread> {
-        let opened =
-            exo_managed_agents::open_thread(self.provider.as_ref(), agent, reference, request)
-                .await?;
+        let opened = exo_managed_agents::open_thread(
+            self.provider.as_ref(),
+            agent,
+            reference,
+            request,
+            options,
+        )
+        .await?;
         if opened.created {
             self.recovery_gate.new_thread(opened.thread.record().id);
         }
@@ -1336,6 +1364,7 @@ impl Runtime {
             }
         };
         let conversation_config = ConversationConfig {
+            harness: None,
             resources: agent_config.resources.clone(),
             resource_mounts,
             sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),

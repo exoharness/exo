@@ -1,10 +1,14 @@
-use crate::{AgentConfig, AgentHarnessKind, AgentSandboxConfig, TypeScriptHarnessConfig};
+use crate::{
+    AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationHarnessConfig,
+    TypeScriptHarnessConfig,
+};
 use anyhow::{Context, Result, bail};
 use exo_managed_agents::AgentDefinition;
 use exoharness::{CredentialDestination, SandboxProvider};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum TypeScriptHarnessPreset {
     Codex,
     ClaudeCode,
@@ -121,14 +125,15 @@ pub(crate) fn installation() -> Result<PathBuf> {
     crate::typescript::typescript_workspace_root()
 }
 
-pub fn agent_config(
-    definition: &AgentDefinition,
-    sandbox: SandboxProvider,
-    harness: Option<&str>,
-    model: Option<&str>,
-) -> Result<AgentConfig> {
-    let explicit_harness = harness.is_some();
-    let harness = harness.unwrap_or(&definition.frontmatter.harness);
+fn resolve_harness(
+    harness: &str,
+    base: &Path,
+    configured_module: Option<&Path>,
+) -> Result<(
+    AgentHarnessKind,
+    Option<TypeScriptHarnessConfig>,
+    Option<TypeScriptHarnessPreset>,
+)> {
     let preset = match harness {
         "codex" => Some(TypeScriptHarnessPreset::Codex),
         "claude-code" => Some(TypeScriptHarnessPreset::ClaudeCode),
@@ -136,21 +141,12 @@ pub fn agent_config(
         "pi" => Some(TypeScriptHarnessPreset::Pi),
         _ => None,
     };
-    let (kind, mut module) = match harness {
+    let (kind, module) = match harness {
         "basic" => (AgentHarnessKind::Basic, None),
         "rlm" => (AgentHarnessKind::Rlm, None),
         "typescript" | "exo" => {
-            let path = definition
-                .frontmatter
-                .config
-                .module
-                .as_ref()
+            let path = configured_module
                 .with_context(|| format!("{harness} agents require config.module"))?;
-            let path = definition
-                .path()
-                .and_then(Path::parent)
-                .unwrap_or(Path::new("."))
-                .join(path);
             let path = path
                 .canonicalize()
                 .with_context(|| format!("resolving harness module {}", path.display()))?;
@@ -179,14 +175,6 @@ pub fn agent_config(
                 {
                     bail!("unknown harness: {harness}");
                 }
-                let base = if explicit_harness {
-                    Path::new(".")
-                } else {
-                    definition
-                        .path()
-                        .and_then(Path::parent)
-                        .unwrap_or(Path::new("."))
-                };
                 base.join(path)
             };
             let module = module.canonicalize().with_context(|| {
@@ -204,6 +192,106 @@ pub fn agent_config(
             )
         }
     };
+    Ok((kind, module, preset))
+}
+
+pub(crate) async fn resolve_thread_harness(
+    thread: &dyn exoharness::ThreadHandle,
+    config: &AgentConfig,
+    harness: &str,
+) -> Result<ConversationHarnessConfig> {
+    if !matches!(
+        harness,
+        "basic" | "native" | "rlm" | "codex" | "claude-code" | "cursor" | "cursor-sdk" | "pi"
+    ) && let Some(caller) = thread.caller()
+    {
+        caller.policy.check_operator(&caller.principal).await?;
+    }
+    let (kind, module, preset) = resolve_harness(
+        if harness == "native" {
+            "basic"
+        } else {
+            harness
+        },
+        Path::new("."),
+        config
+            .typescript
+            .as_ref()
+            .map(|config| Path::new(&config.module_path)),
+    )?;
+    Ok(ConversationHarnessConfig {
+        kind,
+        module_path: module.map(|config| config.module_path),
+        preset,
+    })
+}
+
+pub(crate) fn apply_thread_harness(
+    config: &mut AgentConfig,
+    harness: Option<&ConversationHarnessConfig>,
+) -> Result<()> {
+    let Some(harness) = harness else {
+        return Ok(());
+    };
+    let mut module = harness
+        .module_path
+        .as_ref()
+        .map(|module_path| TypeScriptHarnessConfig {
+            module_path: module_path.clone(),
+            tool_module_paths: vec![],
+        });
+    if let Some(previous) = &config.typescript
+        && !previous.tool_module_paths.is_empty()
+    {
+        module
+            .as_mut()
+            .context("tool modules require a TypeScript harness")?
+            .tool_module_paths = previous.tool_module_paths.clone();
+    }
+    if config.reasoning_effort.is_some() && harness.preset != Some(TypeScriptHarnessPreset::Codex) {
+        bail!("model.reasoning_effort is only supported by the codex harness");
+    }
+    config.harness = harness.kind;
+    config.typescript = module;
+    if config
+        .sandbox
+        .image
+        .as_deref()
+        .is_none_or(is_preset_sandbox_image)
+    {
+        config.sandbox.image = harness
+            .preset
+            .and_then(TypeScriptHarnessPreset::sandbox_image)
+            .map(str::to_owned);
+    }
+    Ok(())
+}
+
+pub fn agent_config(
+    definition: &AgentDefinition,
+    sandbox: SandboxProvider,
+    harness: Option<&str>,
+    model: Option<&str>,
+) -> Result<AgentConfig> {
+    let base = definition
+        .path()
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("."));
+    let (kind, mut module, preset) = resolve_harness(
+        harness.unwrap_or(&definition.frontmatter.harness),
+        if harness.is_some() {
+            Path::new(".")
+        } else {
+            base
+        },
+        definition
+            .frontmatter
+            .config
+            .module
+            .as_deref()
+            .map(|path| base.join(path))
+            .as_deref(),
+    )?;
     if !definition.frontmatter.tools.is_empty() {
         let module = module
             .as_mut()
