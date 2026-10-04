@@ -279,11 +279,41 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
         .await?;
     backend.terminate(seed.clone()).await?;
     drop(source);
+    let ca = rcgen::generate_simple_self_signed(vec!["proxy.test".into()])?;
+    let placeholder = "exo_egress_0123456789abcdef0123456789abcdef";
+    let proxied = backend.with_external_proxy(crate::egress::ExternalProxyConfig {
+        url: url::Url::parse("http://127.0.0.1:9401")?,
+        username: "filesystem-test".into(),
+        password: "filesystem-proxy-authorization".into(),
+        ca_pem: ca.cert.pem(),
+        environment: HashMap::from([("TEST_TOKEN".into(), placeholder.into())]),
+    })?;
     for id in ["seed-first", "seed-second"] {
-        let target = native_request(&config, id, &image)?;
-        let restored = backend
-            .acquire_from_snapshot(target.clone(), seed_capture.clone())
-            .await?;
+        let mut target = native_request(&config, id, &image)?;
+        target.spec.policy = crate::EgressPolicy {
+            networking: SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["github.com".into()],
+            },
+            allowed_tcp_ports: Some(vec![443]),
+            credentials: vec![crate::EgressCredentialBinding {
+                name: "test-token".into(),
+                environment_variable: "TEST_TOKEN".into(),
+                networking: crate::CredentialNetworkPolicy::Limited {
+                    allowed_hosts: vec!["github.com".into()],
+                },
+                injection_location: crate::CredentialInjectionLocation { header: true },
+            }],
+        };
+        let restored = tokio::time::timeout(
+            Duration::from_secs(30),
+            proxied.acquire_from_snapshot(target.clone(), seed_capture.clone()),
+        )
+        .await
+        .context("protected filesystem template restore timed out")??;
+        assert_eq!(
+            restored.command_environment().await?["TEST_TOKEN"],
+            placeholder
+        );
         assert_eq!(
             shell(&restored, "cat /tmp/prebuild-marker").await?,
             "prebuilt"
@@ -293,7 +323,24 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
             "printf private > /repo/edit; printf workspace > /workspace/state",
         )
         .await?;
-        backend.terminate(target).await?;
+        let retained = proxied
+            .suspend(target.clone(), crate::SnapshotKind::Filesystem)
+            .await?;
+        drop(restored);
+        let resumed = tokio::time::timeout(
+            Duration::from_secs(30),
+            proxied.acquire_from_snapshot(target.clone(), retained.clone()),
+        )
+        .await
+        .context("protected filesystem resume timed out")??;
+        assert_eq!(
+            resumed.command_environment().await?["TEST_TOKEN"],
+            placeholder
+        );
+        assert_eq!(shell(&resumed, "cat /repo/edit").await?, "private");
+        proxied.terminate(target).await?;
+        drop(resumed);
+        backend.delete_snapshot(retained).await?;
     }
     backend.delete_snapshot(seed_capture).await?;
     drop(backend);

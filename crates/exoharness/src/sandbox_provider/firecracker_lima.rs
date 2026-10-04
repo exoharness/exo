@@ -430,14 +430,14 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.resources.get_or_insert_with(Default::default);
-        request
-            .spec
-            .policy
-            .validate_basic("Firecracker snapshot restore")?;
         if request.lifecycle.idle_ttl.is_none() {
             bail!("Firecracker Lima snapshot restores require a managed sandbox lifecycle");
         }
         if payload.format != SnapshotFormat::FirecrackerFilesystemRef {
+            request
+                .spec
+                .policy
+                .validate_basic("Firecracker snapshot restore")?;
             let handle = self.acquire_request(request.into(), Some(payload)).await?;
             return Ok(crate::with_process_management(Arc::new(handle)));
         }
