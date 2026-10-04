@@ -157,6 +157,14 @@ Worker communication is newline-delimited JSON:
 This keeps protocol code in Exo while preserving one host-owned supervision,
 event, wakeup, and outbox implementation in Rust.
 
+A worker's inbound `message` event may include a `metadata` object. When a
+worker needs protocol-specific guidance to reach the model, it puts plain
+strings in `metadata.promptNotes`; the host appends them to the wakeup prompt
+verbatim, in array order, and otherwise treats protocol-specific metadata keys
+as opaque. This is how Slack's DM-target and active-thread guidance reaches the
+model without the host knowing what Slack is — protocol-specific prompt text
+belongs to the worker, and the host only frames the wakeup.
+
 ## Message Flow
 
 Inbound messages follow one shared path:
