@@ -109,7 +109,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
 
     // 2. Snapshot the Docker sandbox (-> DockerImageTar in exoharness storage).
     let snapshot_id = conv
-        .snapshot_sandbox(sandbox_id.clone())
+        .snapshot_sandbox(sandbox_id.clone(), exoharness::SnapshotKind::Filesystem)
         .await
         .expect("snapshot docker sandbox");
 
@@ -172,7 +172,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
     assert_eq!(rc, 0);
 
     let snapshot_id = conv
-        .snapshot_sandbox(mounted_id.clone())
+        .snapshot_sandbox(mounted_id.clone(), exoharness::SnapshotKind::Filesystem)
         .await
         .expect("snapshot mounted docker sandbox");
     let error = conv

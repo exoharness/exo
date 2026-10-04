@@ -361,11 +361,18 @@ impl AgentHandle for LocalSandboxAgent {
 
 #[async_trait]
 impl SnapshotHandle for LocalSandboxAgent {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: exoharness::SnapshotKind,
+    ) -> Result<SnapshotId> {
         let Some(local_id) = self.local_sandbox_id(&id).await? else {
-            return self.remote.snapshot_sandbox(id).await;
+            return self.remote.snapshot_sandbox(id, kind).await;
         };
-        self.local_agent().await?.snapshot_sandbox(local_id).await
+        self.local_agent()
+            .await?
+            .snapshot_sandbox(local_id, kind)
+            .await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
@@ -937,14 +944,18 @@ impl ConversationHandle for LocalSandboxConversation {
 
 #[async_trait]
 impl SnapshotHandle for LocalSandboxConversation {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: exoharness::SnapshotKind,
+    ) -> Result<SnapshotId> {
         let Some(local_id) = self.local_sandbox_id(&id).await? else {
-            return self.remote.snapshot_sandbox(id).await;
+            return self.remote.snapshot_sandbox(id, kind).await;
         };
         let snapshot_id = self
             .local_conversation()
             .await?
-            .snapshot_sandbox(local_id)
+            .snapshot_sandbox(local_id, kind)
             .await?;
         self.append_remote_sandbox_events(vec![EventData::SandboxSnapshotted {
             sandbox_id: id,
@@ -1237,10 +1248,14 @@ struct LocalSandboxTurnHandle {
 
 #[async_trait]
 impl SnapshotHandle for LocalSandboxTurnHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: exoharness::SnapshotKind,
+    ) -> Result<SnapshotId> {
         let Some(local_id) = local_sandbox_id_for(&self.state, self.conversation_id, &id).await?
         else {
-            return self.remote.snapshot_sandbox(id).await;
+            return self.remote.snapshot_sandbox(id, kind).await;
         };
         let snapshot_id = local_conversation_for(
             &self.state,
@@ -1248,7 +1263,7 @@ impl SnapshotHandle for LocalSandboxTurnHandle {
             &self.conversation_id.to_string(),
         )
         .await?
-        .snapshot_sandbox(local_id)
+        .snapshot_sandbox(local_id, kind)
         .await?;
         self.remote
             .add_events(vec![EventData::SandboxSnapshotted {

@@ -738,6 +738,7 @@ fn deleted_snapshot_waits_for_restore_lease_and_refuses_new_restores() {
             .is_empty()
     );
     assert!(snapshot.exists());
+    lease.unlock().unwrap();
     drop(lease);
     assert_eq!(
         reap_orphaned_fork_snapshot_templates_blocking(&config).unwrap(),
@@ -833,6 +834,7 @@ fn test_shared(
         lifecycle_locks: MachineLifecycleLocks::default(),
         capacity_gate: Mutex::new(()),
         starting_machines: Arc::new(StdMutex::new(HashSet::new())),
+        base_image_digests: StdMutex::new(HashMap::new()),
     }))
 }
 

@@ -439,8 +439,7 @@ async fn settled_vm_count() -> usize {
 #[tokio::test]
 #[ignore]
 async fn snapshot_round_trip_preserves_guest_state() {
-    let Ok(image) = env::var("EXO_SMOLVM_REGISTRY_IMAGE") else {
-        eprintln!("skipping snapshot test: EXO_SMOLVM_REGISTRY_IMAGE is not set");
+    let Some(image) = test_image() else {
         return;
     };
     let workspace = workspace_dir("snap");
@@ -459,12 +458,19 @@ async fn snapshot_round_trip_preserves_guest_state() {
         .expect("acquire source sandbox");
 
     let write = source
-        .exec(&command(&["sh", "-c", "echo packed-state > /root/marker"]))
+        .exec(&command(&[
+            "sh",
+            "-c",
+            "echo packed-state > /root/marker; echo repo-state > /workspace/marker",
+        ]))
         .await
         .expect("exec write");
     assert!(write.ok, "write failed: {}", write.stderr);
 
-    let payload = source.snapshot().await.expect("snapshot");
+    let payload = source
+        .snapshot(exoharness::SnapshotKind::Filesystem)
+        .await
+        .expect("snapshot");
     println!(
         "snapshot format={} manifest={} bytes",
         payload.format,
@@ -475,13 +481,13 @@ async fn snapshot_round_trip_preserves_guest_state() {
     let restored = backend
         .acquire_from_snapshot(
             request(
-                image,
-                &workspace,
+                image.clone(),
+                &workspace_dir("snap-restored"),
                 SandboxNetworkPolicy::Unrestricted,
                 "snap-restored",
                 ttl,
             ),
-            payload,
+            payload.clone(),
         )
         .await
         .expect("acquire_from_snapshot");
@@ -494,8 +500,48 @@ async fn snapshot_round_trip_preserves_guest_state() {
     assert!(read.ok, "read failed: {}", read.stderr);
     assert_eq!(read.stdout.trim(), "packed-state");
 
+    assert_eq!(
+        restored
+            .exec(&command(&["cat", "/workspace/marker"]))
+            .await
+            .unwrap()
+            .stdout
+            .trim(),
+        "repo-state"
+    );
+    assert!(
+        restored
+            .exec(&command(&["sh", "-c", "echo edited > /workspace/marker"]))
+            .await
+            .unwrap()
+            .ok
+    );
+    let second = backend
+        .acquire_from_snapshot(
+            request(
+                image,
+                &workspace_dir("snap-second"),
+                SandboxNetworkPolicy::Unrestricted,
+                "snap-second",
+                ttl,
+            ),
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        second
+            .exec(&command(&["cat", "/workspace/marker"]))
+            .await
+            .unwrap()
+            .stdout
+            .trim(),
+        "repo-state"
+    );
     cleanup(&source).await;
     cleanup(&restored).await;
+    cleanup(&second).await;
+    backend.delete_snapshot(payload).await.unwrap();
 }
 
 /// A machine whose owner is gone must be reclaimed by a later run — what labels

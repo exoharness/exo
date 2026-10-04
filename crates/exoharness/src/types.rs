@@ -66,9 +66,18 @@ pub trait ExoHarness: VaultContext {
     async fn delete_vault(&self, id: &VaultId) -> Result<()>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotKind {
+    /// All writable filesystems; restore cold-boots without captured RAM or processes.
+    Filesystem,
+    /// Filesystems, memory, and execution state; external connections are not preserved.
+    Full,
+}
+
 #[async_trait]
 pub trait SnapshotHandle: Send + Sync {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId>;
+    async fn snapshot_sandbox(&self, id: SandboxId, kind: SnapshotKind) -> Result<SnapshotId>;
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
 }
 

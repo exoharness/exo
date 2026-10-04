@@ -207,7 +207,7 @@ impl ManagedSandboxHandle for AwsAgentCoreSandboxHandle {
         bail!("AWS AgentCore sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         bail!("AgentCore sandbox snapshots are not implemented yet");
     }
 }

@@ -103,7 +103,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
 
     // ───── Phase 2: capture a snapshot of the sandbox at v1 ─────
     let snapshot_id = conversation
-        .snapshot_sandbox(sandbox_id.clone())
+        .snapshot_sandbox(sandbox_id.clone(), exoharness::SnapshotKind::Filesystem)
         .await
         .expect("snapshot_sandbox should succeed");
 

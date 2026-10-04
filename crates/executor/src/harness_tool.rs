@@ -328,6 +328,13 @@ struct SandboxScopeArguments {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SnapshotSandboxArguments {
+    scope: Option<SandboxControlScope>,
+    kind: exoharness::SnapshotKind,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RewindSandboxArguments {
     scope: Option<SandboxControlScope>,
     snapshot_id: String,
@@ -577,13 +584,16 @@ async fn execute_snapshot_sandbox_tool(
     config: &ConversationConfig,
     request: &ToolRequest,
 ) -> Result<ToolResult> {
-    let args =
-        serde_json::from_value::<SandboxScopeArguments>(Value::Object(request.arguments.clone()))?;
+    let args = serde_json::from_value::<SnapshotSandboxArguments>(Value::Object(
+        request.arguments.clone(),
+    ))?;
     let scope = SandboxControlScope::resolve(args.scope, agent_config, config);
     match scope {
         SandboxControlScope::Agent => {
             let handle = ensure_agent_sandbox(agent, agent_config).await?;
-            let snapshot_id = agent.snapshot_sandbox(handle.sandbox_id.clone()).await?;
+            let snapshot_id = agent
+                .snapshot_sandbox(handle.sandbox_id.clone(), args.kind)
+                .await?;
             turn.add_events(vec![EventData::SandboxSnapshotted {
                 sandbox_id: handle.sandbox_id.clone(),
                 snapshot_id,
@@ -608,7 +618,7 @@ async fn execute_snapshot_sandbox_tool(
         SandboxControlScope::Conversation => {
             let sandbox_id =
                 ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
-            let snapshot_id = turn.snapshot_sandbox(sandbox_id.clone()).await?;
+            let snapshot_id = turn.snapshot_sandbox(sandbox_id.clone(), args.kind).await?;
             record_sandbox_snapshot(
                 agent,
                 scope,
