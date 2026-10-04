@@ -5,53 +5,6 @@ description: Define an agent's harness, instructions, tools, and resources, then
 
 # Agent definition
 
-Exo allows you to build agents on top of the exoharness that you can self-host or run in provider managed infrastructure. It supports popular harnesses
-like Codex, Claude Code, Pi, and custom harnesses, while letting you define the agent's behavior, environment, code access, MCP configuration, and more.
-
-## Quickstart
-
-Define an agent in a Markdown file. This is the support agent used in the [tutorial](./tutorial):
-
-```markdown
----
-name: support-analyst
-harness: codex
-model:
-  name: gpt-6-sol
-  credential: openai
----
-
-For each support ticket, determine whether it describes a technical issue.
-If it does, try to reproduce it, explain what you found, and suggest a workaround.
-```
-
-With `OPENAI_API_KEY` set, save the credential, create the agent, and run it:
-
-```bash
-exo vault secret create global --preset openai
-exo agent create support-analyst --file support-analyst.md
-exo agent run --agent support-analyst \
-  --prompt "Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."
-```
-
-To serve your agent over HTTP, run:
-
-```bash
-exo serve --bind 127.0.0.1:8080
-```
-
-In another terminal, send a turn to the agent by its slug:
-
-```bash
-curl -N http://127.0.0.1:8080/exo/support-analyst/turn \
-  -H 'Content-Type: application/json' \
-  -d '{"input":"Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."}'
-```
-
-There’s a lot more you can configure, including auth, sandboxes, policies, and more. We’ll get into all of that in the sections that follow.
-
-## Core components
-
 An **agent** is a configurable bundle of a harness, model, instructions, and tools. A **thread** is an instance of that agent, containing its conversation history and execution state.
 
 A **session** represents a client interacting with an agent within a thread and can span multiple **turns**. A turn begins with submitted input and includes the agent’s work in response. A thread can continue across multiple sessions.
@@ -102,6 +55,48 @@ exo provider switch braintrust
 ```
 
 Commands like `exo agent create` will automatically run against the provider.
+
+## Quickstart
+
+Define an agent in a Markdown file. This is the support agent used in the [tutorial](./tutorial):
+
+```markdown
+---
+name: support-analyst
+harness: codex
+model:
+  name: gpt-6-sol
+  credential: openai
+---
+
+For each support ticket, determine whether it describes a technical issue.
+If it does, try to reproduce it, explain what you found, and suggest a workaround.
+```
+
+With `OPENAI_API_KEY` set, save the credential, create the agent, and run it:
+
+```bash
+exo vault secret create global --preset openai
+exo agent create support-analyst --file support-analyst.md
+exo agent run --agent support-analyst \
+  --prompt "Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."
+```
+
+To serve your agent over HTTP, run:
+
+```bash
+exo serve --bind 127.0.0.1:8080
+```
+
+In another terminal, send a turn to the agent by its slug:
+
+```bash
+curl -N http://127.0.0.1:8080/exo/support-analyst/turn \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."}'
+```
+
+There’s a lot more you can configure, including auth, sandboxes, policies, and more. We’ll get into all of that in the sections that follow.
 
 ## Future roadmap
 

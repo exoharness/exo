@@ -1,24 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-
-import matter from "gray-matter";
 import { defineConfig } from "vitepress";
-
-const exov2Dir = fileURLToPath(new URL("../exov2/", import.meta.url));
-const exov2Pages = readdirSync(exov2Dir)
-  .filter((name) => name.endsWith(".md") && name !== "index.md")
-  .sort((a, b) => a.localeCompare(b))
-  .map((name) => {
-    const { data } = matter(readFileSync(join(exov2Dir, name), "utf8"));
-    if (typeof data.title !== "string" || !data.title.trim()) {
-      throw new Error(`ExoV2 page ${name} needs a frontmatter title`);
-    }
-    return {
-      text: data.title,
-      link: `/exov2/${name.slice(0, -3)}`,
-    };
-  });
 
 // Docs are served under exoharness.ai/docs by the Cloudflare Worker in
 // website/. `vitepress build` emits static files straight into website/dist/docs
@@ -107,7 +87,18 @@ export default defineConfig({
         text: "ExoV2",
         link: "/exov2/",
         collapsed: false,
-        items: exov2Pages,
+        items: [
+          { text: "Overview", link: "/exov2/" },
+          { text: "Agent definition", link: "/exov2/agent-definition" },
+          {
+            text: "Tutorials",
+            collapsed: false,
+            items: [
+              { text: "Support agent tutorial", link: "/exov2/tutorial" },
+            ],
+          },
+          { text: "Architecture", link: "/exov2/architecture" },
+        ],
       },
       { text: "Development", link: "/development/" },
     ],
