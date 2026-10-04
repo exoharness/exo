@@ -29,6 +29,7 @@ mod http_provider;
 pub mod http_service;
 #[cfg(test)]
 mod http_tests;
+mod inbox;
 mod local_sandbox;
 pub mod managed_agents;
 mod mcp;
