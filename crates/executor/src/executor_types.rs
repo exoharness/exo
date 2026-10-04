@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::Stream;
 
-use crate::braintrust::BraintrustTracingConfig;
+use crate::BraintrustTracingConfig;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AgentConfig {

@@ -6,46 +6,67 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
-smolvm = ["exoharness/smolvm"]
-aws-agentcore = ["exoharness/aws-agentcore"]
-firecracker = ["exoharness/firecracker"]
+default = ["native"]
+native = [
+  "dep:actix-web",
+  "dep:boa_engine",
+  "dep:braintrust-llm-router",
+  "dep:braintrust-sdk-rust",
+  "dep:exo-mcp",
+  "exo-managed-agents/client",
+  "exoharness/apple-keychain",
+  "exoharness/basic-backend",
+  "dep:reqwest",
+  "dep:openidconnect",
+  "dep:oxide-auth",
+  "dep:sha2",
+  "dep:tokio-util",
+  "dep:libc",
+  "tokio/io-std",
+  "tokio/io-util",
+  "tokio/net",
+  "tokio/process",
+  "tokio/rt-multi-thread",
+  "tokio/time",
+]
+smolvm = ["native", "exoharness/smolvm"]
+aws-agentcore = ["native", "exoharness/aws-agentcore"]
+firecracker = ["native", "exoharness/firecracker"]
 
 [dependencies]
 anyhow.workspace = true
-actix-web.workspace = true
+actix-web = { workspace = true, optional = true }
 async-trait.workspace = true
 base64 = "0.22.1"
-boa_engine = "0.20.0"
-braintrust-llm-router.workspace = true
-braintrust-sdk-rust.workspace = true
+boa_engine = { version = "0.20.0", optional = true }
+braintrust-llm-router = { workspace = true, optional = true }
+braintrust-sdk-rust = { workspace = true, optional = true }
 bytes.workspace = true
 chrono.workspace = true
 cost = { path = "../cost" }
-exo-mcp = { path = "../mcp" }
-exo-managed-agents = { path = "../managed-agents" }
-exoharness = { path = "../exoharness", features = [
-  "apple-keychain",
-  "basic-backend",
-] }
+exo-mcp = { path = "../mcp", optional = true }
+exo-managed-agents = { path = "../managed-agents", default-features = false }
+exoharness = { path = "../exoharness" }
 futures.workspace = true
 lingua.workspace = true
-reqwest.workspace = true
-openidconnect = "4.0.1"
-oxide-auth = "0.6.1"
-sha2.workspace = true
+reqwest = { workspace = true, optional = true }
+openidconnect = { version = "4.0.1", optional = true }
+oxide-auth = { version = "0.6.1", optional = true }
+sha2 = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { version = "1.52.1", default-features = false, features = ["sync", "macros"] }
 tokio-stream.workspace = true
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true, features = ["rt"], optional = true }
 tracing.workspace = true
 url.workspace = true
+web-time = "1.1"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+tokio.workspace = true
 rsa = { version = "0.9", features = ["getrandom"] }
 rmcp = { workspace = true, features = ["auth"] }
 futures.workspace = true

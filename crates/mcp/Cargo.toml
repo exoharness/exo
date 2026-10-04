@@ -5,26 +5,30 @@ version.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["client"]
+client = ["dep:futures", "dep:reqwest", "dep:rmcp", "dep:sha2", "dep:sse-stream", "dep:tokio"]
+
 [dependencies]
 async-trait.workspace = true
 anyhow.workspace = true
-futures.workspace = true
+futures = { workspace = true, optional = true }
 # rmcp's HTTP client trait requires reqwest 0.13.
-reqwest = { version = "0.13.2", default-features = false, features = [
+reqwest = { version = "0.13.2", optional = true, default-features = false, features = [
   "rustls",
   "json",
   "stream",
 ] }
-rmcp = { workspace = true, features = [
+rmcp = { workspace = true, optional = true, features = [
   "client",
   "auth",
   "transport-streamable-http-client-reqwest",
 ] }
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
-sse-stream = "0.2"
-tokio.workspace = true
+sha2 = { version = "0.10", optional = true }
+sse-stream = { version = "0.2", optional = true }
+tokio = { workspace = true, optional = true }
 url.workspace = true
 
 [dev-dependencies]

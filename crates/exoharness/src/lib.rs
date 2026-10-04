@@ -20,6 +20,10 @@ pub mod harness;
 mod http;
 #[cfg(feature = "http-client")]
 mod http_client;
+#[cfg(feature = "rpc-client")]
+mod rpc_client;
+#[cfg(feature = "rpc-client")]
+pub use rpc_client::{ExoHttpProcessTransport, ExoHttpTransport, HttpExoHarness};
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http_tests;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

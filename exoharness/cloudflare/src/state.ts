@@ -242,7 +242,9 @@ export class CloudflareExoHarness implements ExoHarness {
     const conversation = new CloudflareConversation(this, agentId, threadId);
     if (this.store.get(`active/${threadId}`))
       throw new Error("thread already has an unfinished turn");
-    const session = sessionId ?? conversation.startSessionRecord();
+    const session = sessionId ?? this.store.id();
+    if (sessionId === undefined)
+      this.store.put(`session/${threadId}/${session}`, true);
     if (!this.store.get(`session/${threadId}/${session}`))
       throw new Error("session not found or ended");
     const record: TurnRecord = { id: this.store.id(), sessionId: session };
@@ -251,7 +253,11 @@ export class CloudflareExoHarness implements ExoHarness {
     conversation.appendEvents({
       sessionId: session,
       turnId: record.id,
-      data: [{ type: "turn_started" }, ...input],
+      data: [
+        ...(sessionId === undefined ? [{ type: "session_started" }] : []),
+        { type: "turn_started" },
+        ...input,
+      ],
     });
     return new CloudflareTurn(this, agentId, threadId, record);
   }
@@ -401,6 +407,9 @@ class CloudflareAgent extends ArtifactStore implements Agent {
   async listConversations(): Promise<Conversation[]> {
     return this.harness.store
       .list<ConversationRecord>(`thread/${this.id}/`)
+      .sort((a, b) =>
+        (b.latestEventId ?? b.id).localeCompare(a.latestEventId ?? a.id),
+      )
       .map(
         (record) =>
           new CloudflareConversation(this.harness, this.id, record.id),
@@ -470,6 +479,14 @@ class CloudflareConversation extends ArtifactStore implements Conversation {
       ),
       "thread not found",
     );
+  }
+  override async writeArtifact(args: {
+    path: string;
+    contents: Uint8Array | string;
+  }): Promise<ArtifactVersion> {
+    const artifact = await super.writeArtifact(args);
+    await this.addEvents({ data: [artifactWritten(artifact)] });
+    return artifact;
   }
   async listVaults(): Promise<Vault[]> {
     const agent = required(
@@ -644,6 +661,14 @@ export class CloudflareTurn extends ArtifactStore implements Turn {
       this.conversationId,
     );
   }
+  override async writeArtifact(args: {
+    path: string;
+    contents: Uint8Array | string;
+  }): Promise<ArtifactVersion> {
+    const artifact = await super.writeArtifact(args);
+    await this.addEvents([artifactWritten(artifact)]);
+    return artifact;
+  }
   addEvents(data: EventData[]): Promise<AddEventsResult> {
     return Promise.resolve(this.appendEvents(data));
   }
@@ -670,6 +695,15 @@ export class CloudflareTurn extends ArtifactStore implements Turn {
     this.harness.store.delete(`active/${this.conversationId}`);
     return result.latestEventId;
   }
+}
+
+function artifactWritten(artifact: ArtifactVersion): EventData {
+  return {
+    type: "artifact_written",
+    artifact_id: artifact.artifactId,
+    path: artifact.path,
+    version: artifact.version,
+  };
 }
 
 async function scopedVaults(

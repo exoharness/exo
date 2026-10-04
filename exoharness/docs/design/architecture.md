@@ -53,7 +53,13 @@ and artifacts so the event log preserves turn ownership.
 - `crates/executor/src/harness_types.rs`: higher-level executor-facing harness
   facade.
 - `crates/executor/src/harness_executor.rs`: generic turn execution lifecycle.
-- `crates/executor/src/typescript.rs`: Rust host for TypeScript harness
+- `crates/executor/src/runtime_host.rs`: task scheduling supplied by the deployment
+  host, used by the shared provider and execution lifecycle.
+- `crates/executor/src/native/`: native constructors, services and process adapters,
+  compiled through the executor's default `native` feature.
+- `crates/exoharness/src/rpc_client.rs`: portable state protocol client; HTTP
+  transport and process streaming adapters live in `crates/exoharness/src/http/`.
+- `crates/executor/src/native/typescript.rs`: Rust host for TypeScript harness
   processes.
 - `exoharness/typescript/harness/index.ts`: public TypeScript API exposed to harness
   authors.
@@ -699,7 +705,7 @@ When adding a new core operation, update all three surfaces:
 When adding a TypeScript-only runtime capability, update both sides of the
 TypeScript harness protocol:
 
-1. `crates/executor/src/typescript.rs` host message/request/response handling.
+1. `crates/executor/src/native/typescript.rs` host message/request/response handling.
 2. `exoharness/typescript/harness/runner.ts` raw types and `TurnContext` implementation.
 3. `exoharness/typescript/harness/index.ts` public type definitions.
 

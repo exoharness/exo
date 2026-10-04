@@ -41,6 +41,8 @@ pnpm --dir exoharness/cloudflare test
 
 `test` builds the real Worker bundle and runs Miniflare with real SQLite Durable Object and R2 storage. Its model and sandbox execution bindings are fixtures. Live tests below exercise the actual Cloudflare Linux sandbox.
 
+The suite also runs shared TypeScript `ExoHarness` contracts directly against `CloudflareExoHarness`, through a test-only Durable Object entry point. These cover CRUD, recent-first conversations, event cursors, turn history, artifact events and versions, forks, vault policies, and persistence across a runtime restart. They do not go through the managed `/exo` API. These contracts cover the TypeScript interface; the existing Rust trait suite has additional APIs and is not wired to this backend yet.
+
 `wrangler.jsonc` targets the separate `exo-managed-agents-spike` Worker and R2 bucket in Braintrust Enterprise. Change the account, Worker, bucket and `ACCOUNT_ID` for another deployment. After `wrangler login`, create the R2 bucket and deploy:
 
 ```sh
@@ -80,7 +82,7 @@ Attach a static model key in an Exo vault with an HTTPS destination policy for `
 
 The Worker streams the pinned Codex Linux package into the standard sandbox and verifies its SHA-512 integrity before extraction. It does not build a custom image or grant the agent access to the npm registry. `src/codex-package.json` must match `containers/codex-sandbox/version` (currently 0.153.4). Node and Codex's bundled ripgrep are available; additional project dependencies need authorized network origins and installation.
 
-A fresh app-server starts for each turn. Its native exec invocation stays open while RPC capabilities transport its pipes and control methods. After completion, the app-server closes, its files flush, and the Worker saves a filesystem snapshot. `/home/exo/.codex` preserves native thread history across sandbox destruction. The next turn uses `thread/resume`; Exo's existing recovery logic checks unresolved native tools before replaying an interrupted turn.
+A fresh app-server starts for each turn. The `CloudflareSandbox` adapter exposes the shared `SandboxProcess` interface and owns the RPC capabilities, stream decoding and invocation lifetime. Its native exec invocation stays open until the process exits. After completion, the app-server closes, its files flush, and the Worker saves a filesystem snapshot. `/home/exo/.codex` preserves native thread history across sandbox destruction. The next turn uses `thread/resume`; Exo's existing recovery logic checks unresolved native tools before replaying an interrupted turn.
 
 Codex currently supports `always_allow` permissions. `always_ask`, custom tools/MCP, and basic-harness token/round limits are rejected. Turns have a ten-minute execution limit. Cancellation destroys the running sandbox; only the last successful snapshot is restored afterward.
 
@@ -102,6 +104,10 @@ A TCP connection on port 443 can connect to the interceptor before TLS routing i
 ## Limits and remaining work
 
 This establishes that the platform supplies the essential gadgets; it is not a drop-in deployment of `exo serve`.
+
+`ExoProvider` currently reimplements managed HTTP routes and orchestration in TypeScript. It reuses the existing Codex harness and model runtime, but does not yet call Rust's `LocalProvider`, managed agent setup or HTTP service. The selected integration keeps orchestration in Workers and makes the shared Rust runtime portable.
+
+The existing Rust `LocalProvider`, managed agent setup and basic turn loop now compile for `wasm32-unknown-unknown` with the executor's default features disabled. Native services, constructors and process adapters live under `crates/executor/src/native/`; the shared runtime takes task scheduling, tracing and module resolution through host interfaces. The state protocol client also accepts an explicit process adapter and compiles for Wasm without a native HTTP client. Connecting that compiled runtime to the Worker storage and JavaScript harness adapters is still pending; the deployed Worker uses the TypeScript provider above.
 
 - The `basic` and `codex` harnesses, OpenAI-compatible Responses models and static key credentials are supported. OAuth refresh, GitHub CLI credentials, Claude/Pi subprocess harnesses, MCP, custom tool modules, resources, environment definitions, adapters, frontend tools and delivery callbacks require additional integration. Unsupported definition/request options fail explicitly.
 - The account Durable Object centralizes metadata and runs multiple thread jobs. Production needs tenant authorization and a deliberate partitioning scheme, quotas, audit logging and encrypted-key rotation.

@@ -72,7 +72,10 @@ import { codexMcpToolName } from "../harness/native-mcp";
 
 export function createCodexHarness(
   version: string,
-  options: { reuseSessions?: boolean } = {},
+  options: {
+    reuseSessions?: boolean;
+    sandboxEnv?: Record<string, string>;
+  } = {},
 ) {
   const CODEX_VERSION = version;
   const CODEX_SHELL_TOOL = "codex.shell";
@@ -1480,6 +1483,7 @@ export function createCodexHarness(
       ),
       CODEX_HOME: "/tmp/exo-codex-home",
       HOME: "/tmp/exo-home",
+      ...options.sandboxEnv,
     };
   }
 

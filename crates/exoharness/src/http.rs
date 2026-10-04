@@ -1,8 +1,6 @@
 mod client;
 mod process;
 mod server;
-
-pub use client::{ExoHttpTransport, HttpExoHarness};
 pub use server::{
     ExoHarnessHttpServeOptions, serve_exoharness_http, serve_exoharness_http_listener,
     serve_exoharness_http_listener_with_options, serve_exoharness_http_with_options,

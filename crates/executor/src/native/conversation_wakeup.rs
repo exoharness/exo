@@ -1,13 +1,11 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context;
 use exoharness::Result;
 use lingua::Message;
 use lingua::universal::UserContent;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{AgentHandle, ConversationHandle, Runtime, SendRequest, SendResult};
 
@@ -106,19 +104,6 @@ async fn remove_stale_lock(path: &PathBuf) -> Result<()> {
         }
     }
     Ok(())
-}
-
-pub(crate) fn conversation_send_lock(conversation_id: &str) -> Arc<AsyncMutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>> = OnceLock::new();
-    let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut locks = locks
-        .lock()
-        .expect("conversation wakeup lock registry poisoned");
-    Arc::clone(
-        locks
-            .entry(conversation_id.to_string())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-    )
 }
 
 #[cfg(test)]

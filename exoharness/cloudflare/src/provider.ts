@@ -1,5 +1,5 @@
-import { DurableObject, type RpcStub } from "cloudflare:workers";
-import type { CloudflareProcess } from "./sandbox";
+import { DurableObject } from "cloudflare:workers";
+import { CloudflareSandbox } from "./sandbox";
 import { init as initLingua } from "@braintrust/lingua/browser";
 import linguaWasm from "@braintrust/lingua-wasm/browser/lingua_bg.wasm";
 import {
@@ -23,7 +23,6 @@ import {
 } from "../../typescript/harness/core";
 import { createCodexHarness } from "../../typescript/codex/harness";
 import codexVersion from "../../containers/codex-sandbox/version";
-import codexPackage from "./codex-package.json";
 import {
   ResponsesRuntime,
   responseToLinguaEvents,
@@ -143,6 +142,7 @@ export class ExoProvider extends DurableObject<Env> {
   private readonly watchers = new Map<string, Set<() => void>>();
   private readonly codex = createCodexHarness(codexVersion.trim(), {
     reuseSessions: false,
+    sandboxEnv: { HOME: "/home/exo", CODEX_HOME: "/home/exo/.codex" },
   });
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -415,10 +415,6 @@ export class ExoProvider extends DurableObject<Env> {
     harness: CloudflareExoHarness,
     recovering: boolean,
   ): Promise<void> {
-    if (codexVersion.trim() !== codexPackage.version)
-      throw new Error(
-        "Codex package pin differs from the native harness version",
-      );
     const baseURL =
       job.definition.config.base_url ?? "https://api.openai.com/v1";
     const credential = job.definition.config.credential ?? "OPENAI_API_KEY";
@@ -451,6 +447,11 @@ export class ExoProvider extends DurableObject<Env> {
       ]);
       this.notify(job.threadId);
     };
+    const sandbox = new CloudflareSandbox(
+      this.env.SANDBOXES.getByName(job.threadId),
+      job,
+      (promise) => this.ctx.waitUntil(promise),
+    );
     const context: TurnContext = {
       exoharness: harness,
       mcpServers: [],
@@ -486,42 +487,10 @@ export class ExoProvider extends DurableObject<Env> {
       },
       startSandboxProcess: async (request) => {
         await append("codex_process_start_requested", {});
-        // RPC functions are capabilities, so the Sandbox can deliver its handle
-        // before its owning invocation completes.
-        const ready = new Promise<RpcStub<CloudflareProcess>>(
-          (resolve, reject) => {
-            const running = this.env.SANDBOXES.getByName(
-              job.threadId,
-            ).runCodexProcess(job, request, async (process) => {
-              resolve(process.dup());
-            });
-            this.ctx.waitUntil(running.catch(reject));
-          },
-        );
-        const process = await ready;
+        await sandbox.prepareCodex(codexVersion.trim());
+        const process = await sandbox.startProcess(request);
         await append("codex_process_started", {});
-        const [stdout, stderr, sandboxProcessId] = await Promise.all([
-          process.stdout,
-          process.stderr,
-          process.sandboxProcessId,
-        ]);
-        return {
-          sandboxId: job.threadId,
-          sandboxProcessId,
-          reused: false,
-          stdout: stdout.pipeThrough(new TextDecoderStream()),
-          stderr: stderr.pipeThrough(new TextDecoderStream()),
-          writeStdin: (data) => process.writeStdin(data),
-          closeStdin: () => process.closeStdin(),
-          close: async () => {
-            try {
-              await process.close();
-            } finally {
-              process[Symbol.dispose]();
-            }
-          },
-          wait: () => process.wait(),
-        };
+        return process;
       },
       stream: {
         firstChunk: (ttft_ms) => append("codex_first_chunk", { ttft_ms }),
@@ -685,13 +654,17 @@ export class ExoProvider extends DurableObject<Env> {
         const threads = (await agent.listConversations()).filter(
           (thread) =>
             !url.searchParams.has("cursor") ||
-            thread.record.id > url.searchParams.get("cursor")!,
+            (thread.record.latestEventId ?? thread.record.id) <
+              url.searchParams.get("cursor")!,
         );
         return Response.json({
           agent: agent.record,
           threads: threads.slice(0, limit).map(threadRecord),
           next_cursor:
-            threads.length > limit ? threads[limit - 1].record.id : null,
+            threads.length > limit
+              ? (threads[limit - 1].record.latestEventId ??
+                threads[limit - 1].record.id)
+              : null,
         });
       }
       if (method === "POST") {

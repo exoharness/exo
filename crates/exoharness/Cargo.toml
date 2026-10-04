@@ -9,7 +9,9 @@ rust-version.workspace = true
 default = []
 smolvm = ["basic-backend", "dep:smolmachines"]
 http-client = ["dep:reqwest"]
+rpc-client = []
 basic-backend = [
+  "rpc-client",
   "dep:oci-client",
   "dep:libc",
   "dep:sha2",

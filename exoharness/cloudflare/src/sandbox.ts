@@ -1,5 +1,8 @@
 import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import type { SandboxProcessStartRequest } from "../../typescript/harness/core";
+import type {
+  SandboxProcess,
+  SandboxProcessStartRequest,
+} from "../../typescript/harness/core";
 import codexPackage from "./codex-package.json";
 import type { Env, ExecRequest, ExecResult, SandboxIdentity } from "./env";
 
@@ -40,7 +43,7 @@ export class CloudflareProcess extends RpcTarget {
   constructor(private readonly process: ExecProcess) {
     super();
     if (!process.stdin || !process.stdout || !process.stderr)
-      throw new Error("Codex process pipes are unavailable");
+      throw new Error("sandbox process pipes are unavailable");
     this.writer = process.stdin.getWriter();
     this.stdoutPipe = process.stdout;
     this.stderrPipe = process.stderr;
@@ -74,6 +77,67 @@ export class CloudflareProcess extends RpcTarget {
   }
   async wait(): Promise<number> {
     return this.process.exitCode;
+  }
+}
+
+// Caller-side adapter: Cloudflare RPC capabilities, invocation lifetimes, and
+// byte streams are hidden behind the ordinary SandboxProcess interface.
+export class CloudflareSandbox {
+  constructor(
+    private readonly stub: DurableObjectStub<ExoSandbox>,
+    private readonly identity: SandboxIdentity,
+    private readonly waitUntil: (promise: Promise<unknown>) => void,
+  ) {}
+
+  async prepareCodex(version: string): Promise<void> {
+    await this.stub.prepareCodex(this.identity, version);
+  }
+
+  async startProcess(
+    request: SandboxProcessStartRequest,
+  ): Promise<SandboxProcess> {
+    const ready = new Promise<RpcStub<CloudflareProcess>>((resolve, reject) => {
+      const running = this.stub.runProcess(
+        this.identity,
+        request,
+        async (process) => {
+          resolve(process.dup());
+        },
+      );
+      this.waitUntil(running.catch(reject));
+    });
+    const process = await ready;
+    try {
+      const [stdout, stderr, sandboxProcessId] = await Promise.all([
+        process.stdout,
+        process.stderr,
+        process.sandboxProcessId,
+      ]);
+      return {
+        sandboxId: this.identity.threadId,
+        sandboxProcessId,
+        reused: false,
+        stdout: stdout.pipeThrough(new TextDecoderStream()),
+        stderr: stderr.pipeThrough(new TextDecoderStream()),
+        writeStdin: (data) => process.writeStdin(data),
+        closeStdin: () => process.closeStdin(),
+        close: async () => {
+          try {
+            await process.close();
+          } finally {
+            process[Symbol.dispose]();
+          }
+        },
+        wait: () => process.wait(),
+      };
+    } catch (error) {
+      try {
+        await process.close();
+      } finally {
+        process[Symbol.dispose]();
+      }
+      throw error;
+    }
   }
 }
 
@@ -178,7 +242,25 @@ export class ExoSandbox extends DurableObject<Env> {
     }
   }
 
-  private async prepareCodex(container: Container): Promise<void> {
+  async prepareCodex(
+    identity: SandboxIdentity,
+    version: string,
+  ): Promise<void> {
+    if (version !== codexPackage.version)
+      throw new Error(
+        "Codex package pin differs from the native harness version",
+      );
+    this.starting ??= this.start(identity).finally(() => {
+      this.starting = undefined;
+    });
+    const container = await this.starting;
+    this.installing ??= this.installCodex(container).finally(() => {
+      this.installing = undefined;
+    });
+    await this.installing;
+  }
+
+  private async installCodex(container: Container): Promise<void> {
     const check = await container.exec([
       "sh",
       "-c",
@@ -213,7 +295,7 @@ export class ExoSandbox extends DurableObject<Env> {
       );
   }
 
-  async startCodexProcess(
+  private async startProcess(
     identity: SandboxIdentity,
     request: SandboxProcessStartRequest,
   ): Promise<CloudflareProcess> {
@@ -221,10 +303,6 @@ export class ExoSandbox extends DurableObject<Env> {
       this.starting = undefined;
     });
     const container = await this.starting;
-    this.installing ??= this.prepareCodex(container).finally(() => {
-      this.installing = undefined;
-    });
-    await this.installing;
     const policy = await this.env.PROVIDERS.getByName(
       this.env.ACCOUNT_ID,
     ).sandboxPolicy(identity);
@@ -239,8 +317,6 @@ export class ExoSandbox extends DurableObject<Env> {
       env: {
         ...request.env,
         ...environment,
-        HOME: "/home/exo",
-        CODEX_HOME: "/home/exo/.codex",
         NODE_EXTRA_CA_CERTS: ca,
         SSL_CERT_FILE: ca,
         CURL_CA_BUNDLE: ca,
@@ -253,14 +329,14 @@ export class ExoSandbox extends DurableObject<Env> {
     return new CloudflareProcess(process);
   }
 
-  async runCodexProcess(
+  async runProcess(
     identity: SandboxIdentity,
     request: SandboxProcessStartRequest,
     ready: (process: RpcStub<CloudflareProcess>) => Promise<void>,
   ): Promise<void> {
     // Native exec handles belong to the invocation that created them. Keep it
     // alive while the caller consumes the pipes and controls the RPC target.
-    const process = await this.startCodexProcess(identity, request);
+    const process = await this.startProcess(identity, request);
     await ready(new RpcStub(process));
     await process.wait();
   }

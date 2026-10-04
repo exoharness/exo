@@ -346,7 +346,7 @@ async fn sandbox_policy(
         .as_ref()
         .and_then(|config| std::path::Path::new(&config.module_path).file_name())
         .and_then(|name| name.to_str());
-    let variable = crate::managed_agents::sandbox_model_credential_variable(agent_config)?;
+    let variable = crate::managed_agents::config::sandbox_model_credential_variable(agent_config)?;
     if let Some(variable) = variable {
         add_model_binding(
             conversation,

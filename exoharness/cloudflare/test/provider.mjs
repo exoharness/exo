@@ -3,6 +3,8 @@ import { readFile, readdir, mkdtemp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { Miniflare } from "miniflare";
+import { stripTypeScriptTypes } from "node:module";
+import { harnessContracts } from "../../typescript/harness/contracts.ts";
 import { fakeCodex } from "./fixtures/fake-codex.mjs";
 
 const token = "test-operator-token";
@@ -20,8 +22,9 @@ export class FakeSandbox extends DurableObject {
     return {stdout: "Linux test\\n", stderr: "", exitCode: 0};
   }
   async count() { return await this.ctx.storage.get("count") ?? 0; }
-  async startCodexProcess() { return new FakeCodexProcess(this.ctx.storage); }
-  async runCodexProcess(identity, request, ready) { const process = await this.startCodexProcess(); await ready(new RpcStub(process)); await process.wait(); }
+  async startProcess() { return new FakeCodexProcess(this.ctx.storage); }
+  async runProcess(identity, request, ready) { const process = await this.startProcess(); await ready(new RpcStub(process)); await process.wait(); }
+  async prepareCodex() {}
   async snapshot() { return {id:"fixture-snapshot", size:1}; }
   async lastMethod() { return await this.ctx.storage.get("last-method"); }
   async stop() {}
@@ -33,8 +36,39 @@ async function options() {
     "index.js": {
       type: "esm",
       contents: `import { ExoProvider as Provider } from "./implementation.js";
-export class ExoProvider extends Provider { async recoverForTest() { await this.alarm(); } }
+import { harnessContracts, seedHarnessCheckpoint, verifyHarnessCheckpoint } from "./contracts.js";
+export class ExoProvider extends Provider {
+  async recoverForTest() { await this.alarm(); }
+  fixture() {
+    return {
+      harness: this.harness,
+      beginTurn: async (agent, conversation, input, sessionId) => {
+        const turn = await this.harness.beginTurn(agent.record.id, conversation.record.id, input.length ? [{type:"messages", messages:input}] : [], sessionId);
+        return this.harness.forTurn(agent.record.id, conversation.record.id, turn.record);
+      },
+      finishTurn: turn => turn.finish(),
+    };
+  }
+  async runContract(name) {
+    try { await harnessContracts[name](this.fixture()); return JSON.stringify({ok:true}); }
+    catch(error) { return JSON.stringify({ok:false, error:error.message, stack:error.stack}); }
+  }
+  async seedCheckpoint() { return JSON.stringify(await seedHarnessCheckpoint(this.fixture())); }
+  async verifyCheckpoint(saved) {
+    try { await verifyHarnessCheckpoint(this.fixture(), JSON.parse(saved)); return JSON.stringify({ok:true}); }
+    catch(error) { return JSON.stringify({ok:false, error:error.message, stack:error.stack}); }
+  }
+}
 export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
+    },
+    "contracts.js": {
+      type: "esm",
+      contents: stripTypeScriptTypes(
+        await readFile(
+          new URL("../../typescript/harness/contracts.ts", import.meta.url),
+          "utf8",
+        ),
+      ),
     },
     "implementation.js": {
       type: "esm",
@@ -349,7 +383,7 @@ test("artifact versions, event cursors and encrypted vaults survive a runtime re
   );
   assert.deepEqual(
     (await api(`${path}/event?after=${eventsBefore[0].id}`)).events,
-    [],
+    eventsBefore.slice(1),
   );
   assert.equal((await api(`agent/${agent.id}`)).id, agent.id);
   const vault = (await api("vault"))[0];
@@ -700,4 +734,49 @@ test("Codex uses JSONL over RPC streams, persists tools and resumes the native t
       event.data.event_type === "codex_turn_started",
   );
   assert.equal(started.data.payload.hydrated_from, "warm_codex_thread");
+});
+
+for (const name of Object.keys(harnessContracts)) {
+  test(`ExoHarness direct contract: ${name}`, async () => {
+    const { PROVIDERS } = await mf.getBindings("exo");
+    const result = JSON.parse(
+      await PROVIDERS.getByName(`contract-${name}`).runContract(name),
+    );
+    assert.equal(result.ok, true, result.stack ?? result.error);
+  });
+}
+
+test("ExoHarness direct contract: SQLite, R2, vaults and cursors survive runtime restart", async () => {
+  let { PROVIDERS } = await mf.getBindings("exo");
+  const checkpoint = await PROVIDERS.getByName(
+    "contract-persistence",
+  ).seedCheckpoint();
+  await mf.dispose();
+  mf = new Miniflare(await options());
+  await mf.ready;
+  ({ PROVIDERS } = await mf.getBindings("exo"));
+  await PROVIDERS.getByName("contract-persistence").verifyCheckpoint(
+    checkpoint,
+  );
+});
+
+test("managed thread pagination follows latest activity", async () => {
+  const { agent, thread, path } = await create();
+  const second = (await api(`agent/${agent.id}/thread`, "POST", {})).thread;
+  const third = (await api(`agent/${agent.id}/thread`, "POST", {})).thread;
+  await api(`${path}/artifact`, "POST", { path: "touch.txt", contents: [1] });
+  const page = await api(`agent/${agent.id}/thread?limit=2`);
+  assert.deepEqual(
+    page.threads.map((item) => item.id),
+    [thread.id, third.id],
+  );
+  assert.equal(page.next_cursor, page.threads[1].latest_event_id);
+  const next = await api(
+    `agent/${agent.id}/thread?limit=2&cursor=${page.next_cursor}`,
+  );
+  assert.deepEqual(
+    next.threads.map((item) => item.id),
+    [second.id],
+  );
+  assert.equal(next.next_cursor, null);
 });

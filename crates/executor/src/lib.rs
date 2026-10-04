@@ -1,88 +1,38 @@
-mod adapter;
-mod agent_sandbox;
+#[cfg(feature = "native")]
+mod native;
+#[cfg(feature = "native")]
+pub use native::*;
+
 mod basic;
-#[cfg(test)]
-mod basic_tests;
-mod braintrust;
-#[cfg(test)]
-mod braintrust_tests;
-mod conversation_events;
-mod conversation_sandbox;
-mod conversation_wakeup;
-mod execution_tracing;
+mod conversation_lock;
+pub mod execution_tracing;
 mod executor_types;
 pub use exoharness::harness;
 mod harness_adapter;
-#[cfg(test)]
-mod harness_basic_tests;
 mod harness_config;
 mod harness_events;
 mod harness_executor;
 mod harness_helpers;
-mod harness_js_repl;
-mod harness_runtime;
-#[cfg(test)]
-mod harness_test;
-mod harness_tool;
 mod harness_types;
-mod http_provider;
-pub mod http_service;
-#[cfg(test)]
-mod http_tests;
-mod local_sandbox;
 pub mod managed_agents;
-mod mcp;
+mod mcp_types;
 mod message_history;
+mod model_config;
 mod model_events;
 mod model_execution;
 pub mod permissions;
 mod provider;
-pub mod remote;
-mod rlm;
-#[cfg(test)]
-mod rlm_tests;
-mod scheduler_runtime;
-mod scheduler_store;
-mod scheduler_types;
+pub mod runtime_host;
 mod shared;
-#[cfg(test)]
-mod test_support;
-mod typescript;
 
-pub use adapter::AdapterStore;
-pub use adapter::{
-    AdapterAttachment, AdapterAttachmentKind, AdapterConfig, AdapterEventRecord, AdapterEventType,
-    AdapterRecord, AdapterSource, NewAdapter, WorkerSecretEnvVar,
-};
-pub use adapter::{AdapterRunOptions, run_adapters_watch};
-pub use braintrust::{BraintrustProject, BraintrustRuntimeConfig, BraintrustTracingConfig};
-pub use conversation_events::{
-    HOST_EVENT_ADAPTER_RUNNER_DRAINING, HOST_EVENT_ADAPTER_RUNNER_STARTED, HOST_EVENT_REBOOT,
-    HOST_EVENT_REBUILD_AND_RESTART, RebuildUpdateRecord, complete_rebuild_and_restart_update,
-    finalize_rebuild_update_file, record_host_event,
-};
-pub use conversation_wakeup::send_conversation_wakeup;
 pub use executor_types::{
     AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig, ConversationModelConfig,
     ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
     ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
     ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
 };
-pub use exoharness::{
-    AgentHandle, AttachSandboxRequest, BasicExoHarness, BasicExoHarnessConfig, Binding,
-    BindingRecord, ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE,
-    DEFAULT_SANDBOX_MEMORY_MIB, DEFAULT_SANDBOX_VCPU_COUNT, DaytonaBackendSpec, DurableFileSystem,
-    E2bBackendSpec, EventData, EventId, EventKind, EventQuery, EventQueryDirection, ExoHarness,
-    ExoHarnessHttpServeOptions, FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec,
-    ForkConversationRequest, HTTP_EXOHARNESS_TRACING_TARGET, HttpExoHarness, NewAgentRequest,
-    PutSecretRequest, RunInSandboxRequest, SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment,
-    SandboxBackendRegistration, SandboxId, SandboxProcess, SandboxProvider, SandboxProviderConfig,
-    SandboxRecord, SandboxResourceShape, Secret, SecretBackendChoice, SecretMetadata, SessionId,
-    SnapshotId, SpritesBackendSpec, StartSandboxRequest, ToolRequest, TurnId, UsageRecord, Uuid7,
-    VercelBackendSpec, default_aws_agentcore_image, default_daytona_image, default_docker_image,
-    default_e2b_template, default_firecracker_image, default_vercel_image,
-    serve_exoharness_http_listener, serve_exoharness_http_listener_with_options,
-};
+pub use exo_managed_agents::{BraintrustProject, BraintrustTracingConfig};
+
 #[cfg(feature = "firecracker")]
 pub use exoharness::{
     DEFAULT_FIRECRACKER_BINARY, DEFAULT_FIRECRACKER_INITRAMFS, DEFAULT_FIRECRACKER_JAILER,
@@ -92,28 +42,25 @@ pub use exoharness::{
     run_firecracker_bridge,
 };
 pub use harness_config::{find_agent_config, load_agent_config, load_conversation_config};
-pub use harness_executor::Runtime;
+pub use harness_executor::{ExecutorStreamMode, HarnessExecutor, Runtime};
 pub use harness_helpers::{
     get_conversation_model_override, materialize_conversation_messages,
     put_conversation_model_override,
 };
-pub use harness_runtime::RouterModelClient;
-pub use harness_tool::{BasicToolRuntime, ExoToolRuntime};
 pub use harness_types::{CreateAgentRequest, CreateConversationRequest};
-pub use http_provider::HttpProvider;
-pub use local_sandbox::LocalSandboxExoHarness;
-pub use mcp::{McpToolRuntime, NativeMcpServer, NativeMcpTool};
+pub use mcp_types::{NativeMcpServer, NativeMcpTool};
 pub use provider::{LocalProvider, Provider, ProviderTurn};
-pub use scheduler_runtime::{
-    SchedulerRunOptions, redeliver_pending_wakes, run_due_tasks, run_task,
-};
-pub use scheduler_store::SchedulerStore;
-pub use scheduler_types::{
-    DEFAULT_MAX_OUTPUT_BYTES, MAX_MISSED_FIRE_CATCHUP, MissedFireOutcome, MissedFirePlan,
-    MissedPolicy, NewScheduledTask, ScheduledFireRecord, ScheduledTaskRecord,
-    ScheduledTaskRunRecord, now_ms,
-};
 
 pub(crate) use basic::BasicExecutor;
 
 pub use exoharness::EgressPolicy;
+
+pub use exoharness::{
+    AgentHandle, AttachSandboxRequest, Binding, BindingRecord, ConversationHandle,
+    CreateSandboxRequest, DurableFileSystem, EventData, EventId, EventKind, EventQuery,
+    EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode, ForkConversationRequest,
+    NewAgentRequest, PutSecretRequest, RunInSandboxRequest, SandboxAttachment, SandboxId,
+    SandboxProcess, SandboxProvider, SandboxProviderConfig, SandboxRecord, SandboxResourceShape,
+    Secret, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest, ToolRequest, TurnId,
+    UsageRecord, Uuid7,
+};

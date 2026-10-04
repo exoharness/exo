@@ -1,10 +1,13 @@
+use crate::{ExoHttpProcessTransport, RunInSandboxRequest, StartSandboxProcessRequest};
 use anyhow::anyhow;
+use async_trait::async_trait;
 use tokio::io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio::time::{self, Duration};
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use super::HTTP_EXOHARNESS_TRACING_TARGET;
-use super::client::HttpExoHarness;
+use crate::HttpExoHarness;
 use crate::ResourceScope;
 use crate::protocol::{Request, Response};
 use crate::{
@@ -13,8 +16,8 @@ use crate::{
     WriteSandboxProcessInputRequest,
 };
 
-pub(super) struct LiveHttpSandboxProcess {
-    pub(super) parts: Option<SandboxProcessParts>,
+struct LiveHttpSandboxProcess {
+    parts: Option<SandboxProcessParts>,
 }
 
 impl SandboxProcess for LiveHttpSandboxProcess {
@@ -25,7 +28,7 @@ impl SandboxProcess for LiveHttpSandboxProcess {
     }
 }
 
-pub(super) fn spawn_http_sandbox_process_event_poller(
+fn spawn_http_sandbox_process_event_poller(
     harness: HttpExoHarness,
     scope: ResourceScope,
     sandbox_id: SandboxId,
@@ -123,7 +126,7 @@ pub(super) fn spawn_http_sandbox_process_event_poller(
     });
 }
 
-pub(super) fn spawn_http_sandbox_process_stdin_forwarder(
+fn spawn_http_sandbox_process_stdin_forwarder(
     harness: HttpExoHarness,
     scope: ResourceScope,
     sandbox_id: SandboxId,
@@ -191,5 +194,71 @@ fn send_http_sandbox_process_wait_result(
             Ok(()) => {}
             Err(_result) => {}
         }
+    }
+}
+
+pub(super) struct HttpProcessTransport;
+
+#[async_trait]
+impl ExoHttpProcessTransport for HttpProcessTransport {
+    async fn run_in_sandbox(
+        &self,
+        harness: &HttpExoHarness,
+        scope: ResourceScope,
+        request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        let sandbox_id = request.id;
+        let process = match harness
+            .request(Request::StartSandboxProcess {
+                scope,
+                request: StartSandboxProcessRequest {
+                    sandbox_id: sandbox_id.clone(),
+                    name: None,
+                    command: request.command,
+                    env: request.env,
+                    cwd: None,
+                    mode: Default::default(),
+                    stdin: Default::default(),
+                    output: Default::default(),
+                    lifecycle: Default::default(),
+                },
+            })
+            .await?
+        {
+            Response::SandboxProcess { process } => process,
+            response => anyhow::bail!("expected sandbox_process response, got {}", response.kind()),
+        };
+        let (stdout_reader, stdout_writer) = tokio::io::duplex(64 * 1024);
+        let (stderr_reader, stderr_writer) = tokio::io::duplex(64 * 1024);
+        let (stdin_reader, stdin_writer) = tokio::io::duplex(64 * 1024);
+        let (wait_tx, wait_rx) = oneshot::channel();
+        spawn_http_sandbox_process_event_poller(
+            harness.clone(),
+            scope,
+            sandbox_id.clone(),
+            process.id.clone(),
+            stdout_writer,
+            stderr_writer,
+            wait_tx,
+        );
+        spawn_http_sandbox_process_stdin_forwarder(
+            harness.clone(),
+            scope,
+            sandbox_id,
+            process.id,
+            stdin_reader,
+        );
+        Ok(Box::new(LiveHttpSandboxProcess {
+            parts: Some(SandboxProcessParts {
+                stdout: Box::pin(stdout_reader.compat()),
+                stderr: Box::pin(stderr_reader.compat()),
+                stdin: Box::pin(stdin_writer.compat_write()),
+                wait: Box::pin(async move {
+                    wait_rx
+                        .await
+                        .unwrap_or_else(|_| Err(anyhow!("HTTP sandbox process poller stopped")))
+                }),
+            }),
+        }))
     }
 }
