@@ -436,6 +436,7 @@ pub struct AddEventsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AddEventsResult {
+    /// IDs in the same order as the submitted event data.
     pub event_ids: Vec<EventId>,
     pub latest_event_id: EventId,
 }

@@ -3544,31 +3544,33 @@ impl ConversationHandle for BasicConversationHandle {
         if let Some(event) = self.harness.inner.storage.get_json_if_exists(&path).await? {
             return Ok(Some(event));
         }
-        for key in self
+        let batch_keys = self
             .harness
             .inner
             .storage
-            .list_keys(self.conversation_dir().join("event_batches"))
+            .list_keys(self.events_dir())
             .await?
-        {
-            let Some(last_id) = event_id_from_key(&key) else {
-                continue;
-            };
-            if last_id < id {
-                continue;
-            }
-            if let Some(batch) = self
-                .harness
-                .inner
-                .storage
-                .get_json_if_exists::<StoredEventBatch>(Path::new(&key))
-                .await?
-                && let Some(event) = batch.events.into_iter().find(|event| event.id == id)
-            {
-                return Ok(Some(event));
-            }
-        }
-        Ok(None)
+            .into_iter()
+            .filter(|key| {
+                event_batch_range_from_key(key)
+                    .is_some_and(|(first, last)| first <= id && id <= last)
+            });
+        let batches = stream::iter(batch_keys)
+            .map(|key| async move {
+                self.harness
+                    .inner
+                    .storage
+                    .get_json_if_exists::<StoredEventBatch>(Path::new(&key))
+                    .await
+            })
+            .buffered(16)
+            .try_collect::<Vec<_>>()
+            .await?;
+        Ok(batches
+            .into_iter()
+            .flatten()
+            .flat_map(|batch| batch.events)
+            .find(|event| event.id == id))
     }
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
@@ -5190,6 +5192,7 @@ async fn append_events_to_conversation(
         };
         events.push(event);
     }
+    let first_event_id = events.first().expect("at least one event").id;
     let latest_event_id = events.last().expect("at least one event").id;
     if events.len() == 1 {
         inner
@@ -5202,14 +5205,15 @@ async fn append_events_to_conversation(
             )
             .await?;
     } else {
-        // One object put commits the whole batch, so readers never see a prefix.
+        // One object put commits the whole batch. The filename bounds let
+        // get_event skip unrelated batches without a separate index write.
         let batch = StoredEventBatch { events };
         inner
             .storage
             .put_json(
                 conversation_dir
-                    .join("event_batches")
-                    .join(format!("{latest_event_id}.json")),
+                    .join("events")
+                    .join(format!("{first_event_id}_{latest_event_id}.batch.json")),
                 &batch,
             )
             .await?;
@@ -5303,18 +5307,35 @@ fn matches_bound(event_id: EventId, bound: &Bound<EventId>) -> bool {
 }
 
 async fn load_events(storage: &BasicObjectStore, conversation_dir: &Path) -> Result<Vec<Event>> {
-    let mut events = storage
-        .list_json_matching_suffix::<Event>(conversation_dir.join("events"), ".json")
-        .await?;
-    for batch in storage
-        .list_json_matching_suffix::<StoredEventBatch>(
-            conversation_dir.join("event_batches"),
-            ".json",
-        )
+    let keys = storage
+        .list_keys(conversation_dir.join("events"))
         .await?
-    {
-        events.extend(batch.events);
-    }
+        .into_iter()
+        .filter(|key| event_id_from_key(key).is_some());
+    let mut events = stream::iter(keys)
+        .map(|key| async move {
+            if is_event_batch_key(&key) {
+                Ok::<_, anyhow::Error>(
+                    storage
+                        .get_json_if_exists::<StoredEventBatch>(Path::new(&key))
+                        .await?
+                        .map(|batch| batch.events)
+                        .unwrap_or_default(),
+                )
+            } else {
+                Ok(storage
+                    .get_json_if_exists::<Event>(Path::new(&key))
+                    .await?
+                    .into_iter()
+                    .collect())
+            }
+        })
+        .buffered(16)
+        .try_collect::<Vec<Vec<Event>>>()
+        .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     events.sort_by_key(|event| event.id);
     Ok(events)
 }
@@ -5336,20 +5357,29 @@ async fn latest_committed_event_id(
     storage: &BasicObjectStore,
     conversation_dir: &Path,
 ) -> Result<Option<EventId>> {
-    let mut latest = None;
-    for directory in ["events", "event_batches"] {
-        for key in storage.list_keys(conversation_dir.join(directory)).await? {
-            let Some(id) = event_id_from_key(&key) else {
-                continue;
-            };
-            latest = Some(latest.map_or(id, |current: EventId| current.max(id)));
-        }
-    }
-    Ok(latest)
+    Ok(storage
+        .list_keys(conversation_dir.join("events"))
+        .await?
+        .iter()
+        .filter_map(|key| event_id_from_key(key))
+        .max())
 }
 
 fn event_id_from_key(key: &str) -> Option<EventId> {
+    if let Some((_, last)) = event_batch_range_from_key(key) {
+        return Some(last);
+    }
     key.rsplit('/').next()?.strip_suffix(".json")?.parse().ok()
+}
+
+fn event_batch_range_from_key(key: &str) -> Option<(EventId, EventId)> {
+    let range = key.rsplit('/').next()?.strip_suffix(".batch.json")?;
+    let (first, last) = range.split_once('_')?;
+    Some((first.parse().ok()?, last.parse().ok()?))
+}
+
+fn is_event_batch_key(key: &str) -> bool {
+    key.ends_with(".batch.json")
 }
 
 async fn load_artifact_versions(
