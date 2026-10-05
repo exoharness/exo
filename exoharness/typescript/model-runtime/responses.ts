@@ -34,7 +34,7 @@ import {
   type PendingToolCall,
   type ToolDefinition,
   type TurnContext,
-} from "../harness";
+} from "../harness/index";
 import { modelUsageRecord } from "./usage";
 import type {
   ChatCompletion,
