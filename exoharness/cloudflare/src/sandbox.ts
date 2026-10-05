@@ -1,36 +1,10 @@
 import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import type { SandboxProcessStartRequest } from "../../typescript/harness/index";
-import codexPackage from "./codex-package.json";
 import type { Env, ExecRequest, ExecResult, SandboxIdentity } from "./env";
 
 const ca = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
 const idleTimeoutMs = 300_000;
-
-// The Worker downloads a pinned package over its trusted connection and pipes it
-// into the sandbox. Agent egress never gains access to the package registry.
-const installCodex = `
-const fs = require('node:fs');
-const {createHash} = require('node:crypto');
-const {Transform} = require('node:stream');
-const {pipeline} = require('node:stream/promises');
-const {execFileSync} = require('node:child_process');
-(async () => {
-  const root = process.argv[1], integrity = process.argv[2];
-  const hash = createHash('sha512');
-  await pipeline(process.stdin, new Transform({transform(chunk, _, cb) {
-    hash.update(chunk); cb(null, chunk);
-  }}), fs.createWriteStream(root + '.tgz'));
-  if ('sha512-' + hash.digest('base64') !== integrity) throw Error('Codex package integrity mismatch');
-  fs.mkdirSync(root, {recursive:true});
-  execFileSync('tar', ['-xzf', root + '.tgz', '-C', root, '--strip-components=1']);
-  const vendor = root + '/vendor/x86_64-unknown-linux-musl';
-  for (const [name, path] of [['codex', '/bin/codex'], ['codex-code-mode-host', '/bin/codex-code-mode-host'], ['rg', '/codex-path/rg']]) {
-    const link = '/usr/local/bin/' + name;
-    if (fs.existsSync(link)) fs.unlinkSync(link);
-    fs.symlinkSync(vendor + path, link);
-  }
-  fs.unlinkSync(root + '.tgz');
-})().catch(e => { console.error(e.message); process.exit(1); });`;
+const managedImage = "cloudflare/debian-trixie";
 
 export class CloudflareProcess extends RpcTarget {
   private readonly stdoutPipe: ReadableStream<Uint8Array>;
@@ -165,9 +139,8 @@ export class CloudflareSandbox {
 
 export class ExoSandbox extends DurableObject<Env> {
   private starting?: Promise<Container>;
-  private installing?: Promise<void>;
   private stopping?: Promise<void>;
-  // Leases live only in this invocation's object instance. Eviction loses them;
+  // Leases live only in this Durable Object instance. Eviction loses them;
   // the shared runtime's recovery scan handles an interrupted turn.
   private readonly activities = new Set<string>();
   private activeExecs = 0;
@@ -176,12 +149,18 @@ export class ExoSandbox extends DurableObject<Env> {
 
   async acquire(
     identity: SandboxIdentity,
+    image: string,
     cwd: string,
     environment: Record<string, string>,
     snapshot: { id: string } | null,
     idleMs: number,
-    codexVersion: string,
-  ): Promise<void> {
+  ): Promise<string> {
+    const container = this.ctx.container;
+    if (!container) throw new Error("native sandbox binding missing");
+    const name = image || managedImage;
+    const reference = name === managedImage ? name : container.images[name];
+    if (!reference)
+      throw new Error(`Cloudflare sandbox image is not configured: ${name}`);
     this.activeExecs++;
     try {
       await this.stopping;
@@ -193,8 +172,9 @@ export class ExoSandbox extends DurableObject<Env> {
       await this.ctx.storage.put("idleMs", idleMs);
       await this.ctx.storage.put("cwd", cwd);
       await this.ctx.storage.put("environment", environment);
+      await this.ctx.storage.put("image", reference);
       await this.start(identity);
-      await this.prepareCodex(identity, codexVersion);
+      return name;
     } finally {
       this.activeExecs--;
       await this.scheduleIdle();
@@ -274,6 +254,8 @@ export class ExoSandbox extends DurableObject<Env> {
       await container.interceptOutboundHttps("*", egress);
       const snapshot =
         await this.ctx.storage.get<ContainerSnapshot>("snapshot");
+      const image = await this.ctx.storage.get<string>("image");
+      if (!image) throw new Error("sandbox has not been acquired");
       const options = {
         entrypoint: ["sleep", "infinity"],
         enableInternet: false,
@@ -282,7 +264,7 @@ export class ExoSandbox extends DurableObject<Env> {
       container.start(
         snapshot
           ? { ...options, containerSnapshot: { id: snapshot.id } }
-          : { ...options, image: "cloudflare/debian-trixie" },
+          : { ...options, image },
       );
       const cwd = await this.ctx.storage.get<string>("cwd");
       const setup = await container.exec(["mkdir", "-p", cwd ?? "/workspace"]);
@@ -359,56 +341,6 @@ export class ExoSandbox extends DurableObject<Env> {
     }
   }
 
-  async prepareCodex(
-    identity: SandboxIdentity,
-    version: string,
-  ): Promise<void> {
-    if (version !== codexPackage.version)
-      throw new Error(
-        "Codex package pin differs from the native harness version",
-      );
-    const container = await this.readyContainer(identity);
-    this.installing ??= this.installCodex(container).finally(() => {
-      this.installing = undefined;
-    });
-    await this.installing;
-  }
-
-  private async installCodex(container: Container): Promise<void> {
-    const check = await container.exec([
-      "sh",
-      "-c",
-      "if test -x /usr/local/bin/codex; then /usr/local/bin/codex --version; fi",
-    ]);
-    const output = await check.output();
-    if (
-      output.exitCode === 0 &&
-      new TextDecoder().decode(output.stdout).trim() ===
-        `codex-cli ${codexPackage.version}`
-    )
-      return;
-    const response = await fetch(codexPackage.url, {
-      signal: AbortSignal.timeout(120_000),
-    });
-    if (!response.ok || !response.body)
-      throw new Error(`Codex package download failed (${response.status})`);
-    const setup = await container.exec(
-      [
-        "node",
-        "-e",
-        installCodex,
-        `/opt/exo-codex-${codexPackage.version}`,
-        codexPackage.integrity,
-      ],
-      { stdin: response.body },
-    );
-    const installed = await setup.output();
-    if (installed.exitCode !== 0)
-      throw new Error(
-        `Codex installation failed: ${new TextDecoder().decode(installed.stderr)}`,
-      );
-  }
-
   private async startProcess(
     identity: SandboxIdentity,
     request: SandboxProcessStartRequest & { cwd?: string },
@@ -431,7 +363,6 @@ export class ExoSandbox extends DurableObject<Env> {
         "/workspace",
       env: {
         HOME: "/home/exo",
-        CODEX_HOME: "/home/exo/.codex",
         ...request.env,
         ...(await this.ctx.storage.get<Record<string, string>>("environment")),
         NODE_EXTRA_CA_CERTS: ca,
@@ -497,8 +428,8 @@ export class ExoSandbox extends DurableObject<Env> {
     await this.ctx.storage.deleteAlarm();
     const container = this.ctx.container;
     if (!container?.running) return;
-    // End the process session before saving its filesystem, so Codex's
-    // history is flushed. Turns do not wait for either operation.
+    // End process sessions before checkpointing so applications can flush
+    // their state. Turns do not wait for either operation.
     await Promise.all([...this.processes].map((process) => process.close()));
     const snapshot = await container.snapshotContainer();
     await this.ctx.storage.put("snapshot", snapshot);

@@ -32,13 +32,17 @@ export async function stopSandboxes(agent, thread, restore = false) {
   for (const sandbox of result.sandboxes) {
     if (!sandbox.running) continue;
     const snapshot = restore
-      ? await rpc({ type: "snapshot_sandbox", scope, sandbox_id: sandbox.id })
+      ? await rpc({
+          type: "snapshot_sandbox",
+          scope: { type: "resource", scope },
+          sandbox_id: sandbox.id,
+        })
       : null;
     await rpc({ type: "stop_sandbox", scope, sandbox_id: sandbox.id });
     if (snapshot)
       await rpc({
         type: "start_sandbox",
-        scope,
+        scope: { type: "resource", scope },
         request: {
           id: sandbox.id,
           snapshot_id: snapshot.snapshot_id,

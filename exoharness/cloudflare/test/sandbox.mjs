@@ -3,16 +3,6 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import { test } from "node:test";
 
-const codexPackage = JSON.parse(
-  await readFile(new URL("../src/codex-package.json", import.meta.url), "utf8"),
-);
-const codexVersion = (
-  await readFile(
-    new URL("../../containers/codex-sandbox/version", import.meta.url),
-    "utf8",
-  )
-).trim();
-
 // Exercise the production adapter with the platform container API replaced.
 // The fixture does not implement turn, idle or checkpoint behavior itself.
 let source = ts.transpileModule(
@@ -32,14 +22,12 @@ class RpcTarget {}
 class RpcStub { constructor(target) { target[Symbol.dispose] = () => {}; return target; } }
 `,
 );
-source = source.replace(
-  'import codexPackage from "./codex-package.json";',
-  `const codexPackage = ${JSON.stringify(codexPackage)};`,
-);
 const { ExoSandbox } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
 );
 const identity = { agentId: "agent", threadId: "thread", sandboxId: "sandbox" };
+const codexImage = `registry.cloudflare.com/test/exo-codex-devbox@sha256:${"a".repeat(64)}`;
+const codexName = "codex-aaaaaaaa";
 
 function fixture() {
   const data = new Map();
@@ -80,6 +68,7 @@ function fixture() {
   };
   const container = {
     running: false,
+    images: { [codexName]: codexImage },
     interceptAllOutboundHttp: async () => {},
     interceptOutboundHttps: async () => {},
     start: (options) => {
@@ -87,15 +76,8 @@ function fixture() {
       container.running = true;
     },
     exec: async (command) => {
-      if (command[0] !== "sh") return process;
-      calls.push("codex-ready");
-      return {
-        output: async () => ({
-          exitCode: 0,
-          stderr: new Uint8Array(),
-          stdout: new TextEncoder().encode(`codex-cli ${codexPackage.version}`),
-        }),
-      };
+      calls.push(["exec", command]);
+      return process;
     },
     setInactivityTimeout: async (value) => calls.push(["timeout", value]),
     snapshotContainer: async () => {
@@ -136,13 +118,18 @@ function fixture() {
 
 test("production sandbox stays warm between turns and checkpoints on idle", async () => {
   const f = fixture();
-  await f.sandbox.acquire(
-    identity,
-    "/workspace",
-    {},
-    null,
-    300_000,
-    codexVersion,
+  await f.sandbox.acquire(identity, "", "/workspace", {}, null, 300_000);
+  assert.equal(
+    f.calls.find((call) => call[0] === "start")[1].image,
+    "cloudflare/debian-trixie",
+  );
+  assert.deepEqual(
+    f.calls.filter((call) => call[0] === "exec"),
+    [["exec", ["mkdir", "-p", "/workspace"]]],
+  );
+  await assert.rejects(
+    f.sandbox.acquire(identity, "unknown", "/workspace", {}, null, 300_000),
+    /image is not configured/,
   );
   await f.sandbox.beginActivity(identity, "first");
   await f.sandbox.beginActivity(identity, "overlapping");
@@ -162,7 +149,7 @@ test("production sandbox stays warm between turns and checkpoints on idle", asyn
   await f.sandbox.alarm();
   assert.deepEqual(
     f.calls.filter((call) => typeof call === "string"),
-    ["codex-ready", "snapshot", "destroy"],
+    ["snapshot", "destroy"],
   );
   await f.sandbox.beginActivity(identity, "third");
   assert.deepEqual(
@@ -175,6 +162,12 @@ test("production sandbox stays warm between turns and checkpoints on idle", asyn
 
 test("production process invocation stays alive; checkpoint finishes before new work", async () => {
   const f = fixture();
+  await f.sandbox.acquire(identity, codexName, "/workspace", {}, null, 300_000);
+  assert.equal(
+    f.calls.find((call) => call[0] === "start")[1].image,
+    codexImage,
+  );
+  assert.equal(await f.storage.get("image"), codexImage);
   await f.sandbox.beginActivity(identity, "first");
   let ready;
   const started = new Promise((resolve) => {

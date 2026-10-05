@@ -37,8 +37,12 @@ impl HarnessModules for WorkerModules {
         );
         Ok(path.into())
     }
-    fn preset_image(&self, _preset: TypeScriptHarnessPreset) -> Option<String> {
-        None
+    fn preset_image(&self, preset: TypeScriptHarnessPreset) -> Option<String> {
+        let (_, digest) = preset
+            .sandbox_image()?
+            .rsplit_once("@sha256:")
+            .expect("Worker harness images must be digest-pinned");
+        Some(format!("{}-{}", preset.agent_slug(), &digest[..8]))
     }
 }
 

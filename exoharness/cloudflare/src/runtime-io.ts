@@ -182,16 +182,15 @@ export class RuntimeIO {
           type: "sandbox_policy",
           request,
         });
-        await stub.acquire(
+        return stub.acquire(
           identity,
+          request.spec.image,
           request.spec.default_workdir,
           environment,
           command.snapshot,
           request.lifecycle.idle_ttl!.secs * 1000 +
             request.lifecycle.idle_ttl!.nanos / 1e6,
-          codexVersion.trim(),
         );
-        return null;
       }
       case "begin_activity":
         await stub.beginActivity(identity, command.id);

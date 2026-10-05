@@ -1,6 +1,6 @@
 # Exo on Cloudflare: managed agents prototype
 
-Exo's API, agent orchestration, state and credential proxy run in Workers and SQLite Durable Objects. The basic harness executes shell tools in a Linux sandbox; the Codex harness also runs its native app-server there. The shared Rust `Runtime` and `LocalProvider` run as WebAssembly inside the Worker. There is no Exo server image, proxy image or Dockerfile. Cloudflare's Linux Sandboxes are backed by Containers; the `containers` configuration attaches that execution capability to `ExoSandbox`.
+Exo's API, agent orchestration, state and credential proxy run in Workers and SQLite Durable Objects. The basic harness executes shell tools in a Linux sandbox; the Codex harness also runs its native app-server there. The shared Rust `Runtime` and `LocalProvider` run as WebAssembly inside the Worker. There is no Exo server or proxy image. Cloudflare's Linux Sandboxes are backed by Containers; the `containers` configuration attaches that execution capability to `ExoSandbox`.
 
 ```mermaid
 flowchart LR
@@ -22,7 +22,7 @@ flowchart LR
 - Managed-agent routes under `/exo` use the same Rust service functions as native Exo. The authenticated `/exo/request` endpoint dispatches the existing ExoHarness protocol in Rust.
 - The existing Rust basic turn loop runs in Worker WebAssembly. JavaScript supplies storage, model Responses calls and sandbox process I/O through a `ManagedSandboxBackend`. The bridge polls Rust futures and holds host I/O with `waitUntil`; it requires no Tokio runtime or native threads.
 - The existing Exo Codex harness, shared with the native deployment. Its app-server runs over native stdin/stdout/stderr with canonical shell/file/message events, ephemeral streamed text deltas and saved thread resume.
-- Thread-scoped sandbox execution using Cloudflare's managed `cloudflare/debian-trixie` image. No custom image build is needed.
+- Thread-scoped sandbox execution using Cloudflare's managed `cloudflare/debian-trixie` image for basic agents and the existing Exo image for Codex agents. No custom image build is needed.
 - HTTP port 80 and HTTPS port 443 go through a Worker binding whose trusted props identify the sandbox and its agent/thread. Rust enforces the thread network policy and credential destinations. Other sandbox network access is disabled. Commands cannot select a different identity through request headers.
 - Opaque environment placeholders, Bearer/custom header and Basic auth substitution, destination checks, manual redirects and live vault revocation. Vault values stay outside the sandbox.
 - Filesystem snapshots and restoration after sandbox destruction. Sandboxes checkpoint on idle expiry or explicit stop; Codex's workspace and native history are included. Artifacts are stored separately in R2.
@@ -48,7 +48,7 @@ pnpm --dir exoharness/cloudflare test
 
 The suite invokes the existing Rust core trait contracts against this backend through `HttpExoHarness` and `/exo/request`: CRUD, thread/conversation APIs, pagination, turn lifecycle and artifact ownership. Integration checks cover approvals, cancellation, SSE, persistence, credential substitution, Codex warm reuse and usage. Separate adapter tests execute the production sandbox lifecycle with a fixture for the platform container API. Run `test:live:contracts` against a deployed Worker to use the same Rust contracts there. Sandbox records, lifecycle operations and process RPC use the shared Rust manager.
 
-Choose the Worker name and R2 bucket in `wrangler.jsonc`, then authenticate Wrangler with your Cloudflare account. `ACCOUNT_ID` names the shared Exo account's Durable Object; it is separate from your Cloudflare account ID. Create the configured bucket and deploy:
+Choose the Worker name and R2 bucket in `wrangler.jsonc`, then authenticate Wrangler with your Cloudflare account. `ACCOUNT_ID` names the shared Exo account's Durable Object; it is separate from your Cloudflare account ID. For Codex, copy and configure its image as described [below](#codex) before deploying. Create the configured bucket and deploy:
 
 ```sh
 pnpm --dir exoharness/cloudflare exec wrangler login
@@ -130,7 +130,36 @@ exo --provider cloudflare vault secret create global openai \
 
 Attach a static model key in an Exo vault with an HTTPS destination policy for `https://api.openai.com` (or your Responses-compatible provider). Thread creation and turn submission use the same managed agents endpoints as the basic harness. Model traffic originates in the sandbox and passes through `ExoEgress`; the real key remains in the Worker vault. The shared sandbox policy builder adds the model credential binding with the same rules as native Exo.
 
-The Cloudflare backend prepares the standard sandbox when it is acquired, streaming the pinned Codex Linux package and verifying its SHA-512 integrity before extraction. This setup also runs for cold basic-harness sandboxes; warm turns reuse the acquired sandbox. It does not build a custom image or grant the agent access to the npm registry. `src/codex-package.json` must match `containers/codex-sandbox/version`. Node and Codex's bundled ripgrep are available; additional project dependencies need authorized network origins and installation.
+Codex agents select `codex-<PIN_PREFIX>`, using the first eight hex characters of the shared native image pin; basic agents use Cloudflare's stock Debian image. The backend resolves configured image names through `ctx.container.images`. A changed pin requires a matching named image, so a deployment with only the previous image fails at acquisition. The shared Codex startup command also checks its version against `containers/codex-sandbox/version`. Codex is already installed in the image, so sandbox acquisition never downloads or installs it.
+
+Cloudflare's `durable_object` scheduling policy requires custom images to be in its managed registry. Copy Exo's existing, digest-pinned `codex-devbox` image from GHCR manually before enabling Codex. Use the current Codex image pin from [`TypeScriptHarnessPreset::sandbox_image`](../../crates/executor/src/managed_agents/config.rs), which must match `containers/codex-sandbox/version`. With Docker running and Wrangler authenticated to the target account:
+
+```sh
+EXO_CODEX_SOURCE='ghcr.io/exoharness/codex-devbox@sha256:<PIN_FROM_CONFIG_RS>'
+EXO_CODEX_NAME='codex-<FIRST_8_HEX_CHARACTERS_OF_PIN>'
+docker buildx imagetools inspect --raw "$EXO_CODEX_SOURCE"
+# Select the linux/amd64 manifest digest from that output:
+EXO_CODEX_AMD64='ghcr.io/exoharness/codex-devbox@sha256:<AMD64_MANIFEST_DIGEST>'
+docker pull --platform linux/amd64 "$EXO_CODEX_AMD64"
+docker tag "$EXO_CODEX_AMD64" "exo-codex-devbox:$EXO_CODEX_NAME"
+pnpm --dir exoharness/cloudflare exec wrangler containers push "exo-codex-devbox:$EXO_CODEX_NAME"
+```
+
+Copy the Linux amd64 manifest rather than the multi-platform index: Wrangler checks the local image's platform before pushing. This copies the image without rebuilding it. Wrangler prints the Cloudflare registry reference. Get its digest with `docker image inspect --format '{{join .RepoDigests "\n"}}' <registry-reference>` and add that digest-pinned reference to the `ExoSandbox` container entry in your deployment's Wrangler configuration:
+
+```jsonc
+{
+  "class_name": "ExoSandbox",
+  "scheduling_policy": "durable_object",
+  "images": {
+    "codex-<PIN_PREFIX>": {
+      "image": "registry.cloudflare.com/<CLOUDFLARE_ACCOUNT_ID>/exo-codex-devbox@sha256:<DIGEST>",
+    },
+  },
+}
+```
+
+Deploy the Worker after configuring the image. The image copy is a manual deployment step for now; repeat it when adopting a new Exo Codex image. No registry permissions are granted to agents. See [Cloudflare image management](https://developers.cloudflare.com/containers/guides/image-management/#use-an-external-image).
 
 The shared Codex harness reuses its app-server and native thread across turns while the sandbox is warm. Processes run through the shared Rust sandbox manager; the `CloudflareSandbox` adapter owns the platform RPC capabilities and invocation lifetime. Its native exec invocation stays open until the process exits. A backend activity guard keeps the sandbox available during each turn, including time spent waiting for the model. Turns finish without stopping Codex or taking a filesystem snapshot. After five minutes of idle time, or an explicit sandbox stop, the sandbox closes its processes, checkpoints their files and stops. `/home/exo/.codex` preserves native thread history across sandbox destruction. Automatic idle shutdown preserves the logical sandbox; an explicit Exo `stop_sandbox` ends it, following the shared lifecycle. Use the existing snapshot/stop/start APIs to restore an explicitly stopped sandbox. A cold session uses `thread/resume`; Exo's existing recovery logic checks unresolved native tools before replaying an interrupted turn.
 
@@ -151,13 +180,13 @@ The agent tests create test agents and threads, exercise model/tool execution an
 ## Limits
 
 - This deployment registers only the Cloudflare sandbox backend. The executor selects its default from the backend registry and uses the shared sandbox interface; another provider needs a wasm-compatible backend and an execution environment with the harness dependencies installed.
-- The `basic` and `codex` harnesses, OpenAI-compatible Responses models and static key credentials are supported. Vault OAuth credential refresh, GitHub CLI credentials, Claude/Pi subprocess harnesses, MCP, custom tool modules, resources, custom execution images, adapters, frontend tools and delivery callbacks require additional integration. Unsupported definition/request options fail explicitly.
+- The `basic` and `codex` harnesses, OpenAI-compatible Responses models and static key credentials are supported. Vault OAuth credential refresh, GitHub CLI credentials, Claude/Pi subprocess harnesses, MCP, custom tool modules, resources, adapters, frontend tools and delivery callbacks require additional integration. Unsupported definition/request options fail explicitly. Custom execution images must be registered as named images in the deployment's Wrangler configuration.
 - The account Durable Object centralizes metadata and runs multiple thread turns. Per-user ownership and tenant isolation are not implemented.
 - A persisted alarm invokes the shared runtime recovery scan after object eviction; model calls can repeat after a crash. Tool dispatch is journaled first. If a tool's outcome is ambiguous after interruption, the sandbox is stopped and the turn ends with an error; the command is never automatically replayed. This is not exactly-once execution.
 - SSE sends canonical persisted events plus ephemeral Codex stream chunks. The basic harness collects model and shell output. Process RPC is supported through the existing ExoHarness protocol; preview/port routing is not implemented.
 - Egress follows Exo's disabled, limited-host or unrestricted network policy. Credential bindings retain their own destination restrictions. Interception supports public HTTP/S destinations on ports 80/443; generic TCP/UDP proxying is outside this implementation.
-- Sandboxes checkpoint and stop after five minutes of idle time or an explicit stop. Snapshots preserve files, not running processes; changes since the last checkpoint can be lost if the sandbox fails unexpectedly. Cloudflare currently expires unused snapshots after 30 days and ties them to their source image. Production should add R2 directory backups for longer retention/image migration.
-- The built-in image has Node 24 and a minimal Linux userspace. Other agents need their dependencies installed or a suitable execution image. Node, Python, curl and Git trust variables point to Cloudflare's interception CA.
+- Sandboxes checkpoint and stop after five minutes of idle time or an explicit stop. Snapshots preserve files, not running processes; changes since the last checkpoint can be lost if the sandbox fails unexpectedly. Restoring a snapshot uses its original image, so a changed image takes effect only in a fresh sandbox without that snapshot. Cloudflare currently expires unused snapshots after 30 days and ties them to their source image. Production should add R2 directory backups for longer retention/image migration.
+- The stock Debian image has Node 24 and a minimal Linux userspace; the Exo Codex image includes the existing devbox tools. Other agents need their dependencies installed or a suitable execution image. Node, Python, curl and Git trust variables point to Cloudflare's interception CA.
 - Worker state uses Rust's record formats. Deploy into a fresh account namespace when replacing an older prototype that used the TypeScript store; there is no prototype-format migration.
 
 Native Sandbox references: [run Linux commands](https://developers.cloudflare.com/sandbox/get-started/), [container API and interception](https://developers.cloudflare.com/containers/api/durable-object-container/), [authenticated API calls](https://developers.cloudflare.com/sandbox/network/call-an-authenticated-api/).

@@ -137,7 +137,7 @@ try {
     second.events.some(
       (event) =>
         event.data.type === "tool_result" &&
-        /tests 4/.test(event.data.result.stdout ?? ""),
+        /tests 4/.test(event.data.result.output ?? ""),
     ),
     "four tests did not pass",
   );

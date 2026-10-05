@@ -20,7 +20,6 @@ use wasm_bindgen::JsValue;
 use crate::host::{Host, HostRequest};
 
 const SNAPSHOT_FORMAT: SnapshotFormat = SnapshotFormat::from_static("cloudflare-snapshot-v1");
-pub(crate) const IMAGE: &str = "cloudflare/debian-trixie";
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -101,16 +100,12 @@ pub(crate) struct CloudflareBackend(pub Arc<Host>);
 impl CloudflareBackend {
     async fn acquire(
         &self,
-        request: SandboxRequest,
+        mut request: SandboxRequest,
         snapshot: Option<Snapshot>,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         ensure!(
             matches!(request.scope, exoharness::ResourceScope::Thread { .. }),
             "Cloudflare sandboxes require a thread scope"
-        );
-        ensure!(
-            request.spec.image.is_empty() || request.spec.image == IMAGE,
-            "custom Cloudflare sandbox images are not supported"
         );
         ensure!(
             request.spec.mounts.is_empty()
@@ -123,8 +118,9 @@ impl CloudflareBackend {
             request.lifecycle.idle_ttl.is_some_and(|ttl| !ttl.is_zero()),
             "Cloudflare sandboxes require a positive idle timeout"
         );
-        self.0
-            .call::<()>(HostRequest::Sandbox {
+        request.spec.image = self
+            .0
+            .call(HostRequest::Sandbox {
                 command: Command::Acquire {
                     request: request.clone(),
                     snapshot,
@@ -200,7 +196,7 @@ impl ManagedSandboxHandle for CloudflareHandle {
         &self.request.sandbox_id
     }
     fn effective_image(&self) -> Option<String> {
-        Some(IMAGE.into())
+        Some(self.request.spec.image.clone())
     }
     async fn command_environment(&self) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())

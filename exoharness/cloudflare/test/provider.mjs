@@ -74,7 +74,7 @@ export class FakeSandbox extends DurableObject {
   async endActivity(id) { this.activities.delete(id); }
   async activityCount() { return this.activities.size; }
   async info() { return {exists: !!await this.ctx.storage.get("identity"), running: await this.ctx.storage.get("running") ?? false}; }
-  async acquire(identity, cwd, environment) { await this.ctx.storage.put("identity", identity); await this.ctx.storage.put("running", true); }
+  async acquire(identity, image, cwd, environment) { image ||= "cloudflare/debian-trixie"; await this.ctx.storage.put("identity", identity); await this.ctx.storage.put("image", image); await this.ctx.storage.put("running", true); return image; }
   async terminate() { await this.stop(); await this.ctx.storage.deleteAll(); }
   async exec(identity, request) {
     const count = (await this.ctx.storage.get("count") ?? 0) + 1;
@@ -82,6 +82,7 @@ export class FakeSandbox extends DurableObject {
     return {stdout: "Linux test\\n", stderr: "", exitCode: 0};
   }
   async count() { return await this.ctx.storage.get("count") ?? 0; }
+  async image() { return await this.ctx.storage.get("image"); }
   async startProcess(request) {
     if (request.command[0] === "cat") return new EchoProcess();
     if (!request.command.join(" ").includes("codex")) {
@@ -116,7 +117,6 @@ export class FakeSandbox extends DurableObject {
     try { await ready(capability); await process.wait(); }
     finally { capability[Symbol.dispose](); this.processes.delete(process); }
   }
-  async prepareCodex() {}
   async waitForProcesses() { await Promise.all([...this.processes].map(p => p.wait())); }
   async snapshot() { return {id: "fixture-snapshot", size: 1}; }
   async processCount() { return this.processes.size; }
@@ -528,6 +528,10 @@ test("managed basic turn calls the model, executes one tool and persists canonic
     active: false,
   });
   assert.equal(await (await sandboxFor(agent, thread)).count(), 1);
+  assert.equal(
+    await (await sandboxFor(agent, thread)).image(),
+    "cloudflare/debian-trixie",
+  );
   assert.equal(modelRequests, 2);
   for (let i = 1; i < events.length; i++)
     assert(events[i - 1].id < events[i].id);
@@ -698,6 +702,10 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   assert.equal(first.harness, "codex-harness");
   const events = await waitTurn(path);
   await assertTurnInactive(thread.id);
+  assert.match(
+    (await sandboxRecord(agent, thread)).image,
+    /^codex-[0-9a-f]{8}$/,
+  );
   assert(
     !events.some((event) => event.data.type === "error"),
     JSON.stringify(events),
