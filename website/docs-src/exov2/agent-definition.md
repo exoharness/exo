@@ -8,14 +8,15 @@ description: Define an agent's harness, instructions, tools, and resources, then
 An **agent** is a configurable bundle of system instructions, [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers, custom tools, resources (like
 git repositories), and defaults (harness, model).
 
-A **thread** is an instance of that agent, containing its conversation history, execution state, and configuration (harness, model, ____).
+A **thread** is an instance of that agent, containing its conversation history, execution state, filesystem state, and configuration
+(harness, model, environment, vaults).
 
-A **session** is an instance of a client interacting with an agent within a thread and can span multiple **turns**. A turn begins 
+A **session** represents a client’s interaction with an agent within a thread and can span multiple **turns**. A turn begins
 with submitted input and includes the agent’s work in response. A thread or even a turn can continue across multiple sessions.
 
 Each thread runs in an **environment** (sandbox and network configuration) and has access to selected **vaults** (named collections
-of secrets). The environment and vault can be configured to enforce policies like which URLs are available for egress or allowed
-to use certain secrets.
+of secrets). The environment can restrict which hosts and ports the sandbox can reach, and each secret can restrict which origins
+or URLs it can be used with.
 
 ### Agent
 
