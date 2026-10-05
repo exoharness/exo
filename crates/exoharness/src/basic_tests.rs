@@ -1057,6 +1057,68 @@ async fn turn_events_continue_after_artifact_writes() {
     assert_eq!(artifact_event.turn_id, Some(turn.record().id));
 }
 
+#[tokio::test]
+async fn rebuilding_a_turn_uses_the_committed_event_head_for_its_next_sandbox_event()
+-> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(temp.path()),
+        Arc::new(RestoreImageTestBackend::default()),
+    )
+    .await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            vaults: vec![],
+            slug: "batch-turn".to_string(),
+            name: "Batch turn".to_string(),
+        })
+        .await?;
+    let thread = agent
+        .new_conversation(NewConversationRequest::default())
+        .await?;
+    let sandbox_id = thread
+        .create_sandbox(CreateSandboxRequest {
+            tcp_ports: vec![],
+            name: None,
+            provider: SandboxProvider::LocalProcess,
+            image: "snapshot-test".to_string(),
+            resources: Default::default(),
+            default_workdir: Some(temp.path().display().to_string()),
+            file_system_mounts: None,
+            durable_file_systems: None,
+            policy: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await?;
+    let turn = thread.begin_turn(BeginTurnRequest::default()).await?;
+    let turn_record = turn.record().clone();
+
+    let added = turn
+        .add_events(vec![
+            EventData::Error {
+                message: "first".to_string(),
+                metadata: None,
+            },
+            EventData::Error {
+                message: "second".to_string(),
+                metadata: None,
+            },
+        ])
+        .await?;
+
+    // Appends do not rewrite record.json. A rebuilt turn must derive its head
+    // from the committed event batch before recording another sandbox event.
+    let rebuilt = thread.turn_handle(turn_record).await?;
+    rebuilt.snapshot_sandbox(sandbox_id).await?;
+    let refreshed = agent
+        .get_thread(&thread.record().id)
+        .await?
+        .expect("thread exists");
+    assert!(refreshed.record().latest_event_id > Some(added.latest_event_id));
+    Ok(())
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn turn_artifact_write_allows_interleaved_conversation_writes() {
     let tempdir = TempDir::new().expect("tempdir");

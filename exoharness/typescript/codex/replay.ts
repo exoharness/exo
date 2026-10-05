@@ -1,5 +1,5 @@
 import { type ResponseInput } from "openai/resources/responses/responses";
-import { type JsonValue, type Message, toJsonValue } from "../harness";
+import { type JsonValue, type Message, toJsonValue } from "../harness/index";
 import { linguaMessagesToResponsesInput } from "../model-runtime/responses";
 import { isRecord } from "../model-runtime/shared";
 import { type CodexNotification } from "./app-server";

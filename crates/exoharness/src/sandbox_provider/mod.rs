@@ -80,7 +80,7 @@ pub use daytona::default_daytona_image;
 pub use daytona::{
     DEFAULT_DAYTONA_API_URL, DEFAULT_DAYTONA_TOOLBOX_URL, DaytonaConfig, DaytonaSandboxBackend,
 };
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 pub(crate) use docker::DEFAULT_DOCKER_IMAGE;
 pub use docker::default_docker_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

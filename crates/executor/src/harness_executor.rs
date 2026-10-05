@@ -14,8 +14,7 @@ use futures::StreamExt;
 use tokio::sync::{Notify, OnceCell, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::braintrust::{BraintrustRuntimeConfig, BraintrustTracer};
-use crate::conversation_wakeup::conversation_send_lock;
+use crate::conversation_lock::conversation_send_lock;
 use crate::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
 use crate::harness::{
     Harness, HarnessCommand, HarnessEventSink, HarnessTurnKey, HarnessTurnOutcome,
@@ -28,6 +27,7 @@ use crate::harness_events::HarnessEvents;
 use crate::harness_helpers::{
     get_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
 };
+use crate::runtime_host::TaskGroup;
 use crate::shared::finalize_turn;
 use crate::{
     AgentConfig, ConversationConfig, ConversationModelConfig, CreateAgentRequest,
@@ -189,13 +189,13 @@ impl RecoverableTurn {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum ExecutorStreamMode<'a> {
+pub enum ExecutorStreamMode<'a> {
     Disabled,
     Enabled(&'a mpsc::UnboundedSender<Result<ExecutionStreamEvent>>),
 }
 
 #[async_trait]
-pub(crate) trait HarnessExecutor: Send + Sync + 'static {
+pub trait HarnessExecutor: Send + Sync + 'static {
     fn with_state(&self, _state: Arc<dyn ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
         anyhow::bail!("this executor does not support caller-scoped execution")
     }
@@ -288,10 +288,11 @@ pub(crate) trait HarnessExecutor: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct Runtime {
     provider: Arc<dyn Provider>,
+    #[cfg(feature = "native")]
     previews: Arc<OnceCell<crate::previews::PreviewProxy>>,
     initialized: Arc<OnceCell<()>>,
     events: Arc<HarnessEvents>,
-    finalizers: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>>,
+    finalizers: Arc<tokio::sync::Mutex<TaskGroup>>,
     tracer: Arc<dyn ExecutionTracer>,
     recovery: Arc<OnceCell<()>>,
     recovery_gate: Arc<RecoveryGate>,
@@ -304,22 +305,26 @@ impl Runtime {
         let mut scoped = self.clone();
         scoped.provider = self.provider.with_caller(caller)?;
         scoped.initialized = Arc::default();
-        scoped.finalizers = Arc::default();
+        scoped.finalizers = Arc::new(tokio::sync::Mutex::new(TaskGroup::new(
+            scoped.provider.runtime_host(),
+        )));
         scoped.recovery = Arc::default();
         Ok(scoped)
     }
 
-    pub fn new(
+    pub fn with_tracer(
         provider: impl Provider + 'static,
-        runtime_config: Option<BraintrustRuntimeConfig>,
+        tracer: Arc<dyn ExecutionTracer>,
     ) -> Self {
+        let host = provider.runtime_host();
         Self {
             provider: Arc::new(provider),
+            #[cfg(feature = "native")]
             previews: Arc::default(),
             initialized: Arc::default(),
             events: Arc::default(),
-            finalizers: Arc::default(),
-            tracer: Arc::new(BraintrustTracer::new(runtime_config)),
+            finalizers: Arc::new(tokio::sync::Mutex::new(TaskGroup::new(host))),
+            tracer,
             recovery: Arc::default(),
             recovery_gate: Arc::default(),
             recovery_agent_concurrency: Arc::new(AtomicUsize::new(4)),
@@ -328,6 +333,7 @@ impl Runtime {
     }
 
     /// Own a single preview listener for every thread served by this runtime.
+    #[cfg(feature = "native")]
     pub async fn start_preview_server(
         &self,
         root: &std::path::Path,
@@ -341,6 +347,7 @@ impl Runtime {
     }
 
     /// Own this inline thread's listener and retain its port across resumes.
+    #[cfg(feature = "native")]
     pub async fn start_inline_previews(
         &self,
         agent: &dyn AgentHandle,
@@ -377,11 +384,13 @@ impl Runtime {
         Ok(())
     }
 
+    #[cfg(feature = "native")]
     pub(crate) fn active_preview_endpoint(&self) -> Option<crate::PreviewEndpoint> {
         self.previews.get().map(|proxy| proxy.endpoint.clone())
     }
 
     /// Discover the owner's address; URLs are derived, never stored on the thread.
+    #[cfg(feature = "native")]
     pub async fn preview_urls(
         &self,
         agent: &dyn AgentHandle,
@@ -447,7 +456,7 @@ impl Runtime {
         result.map(|_| ())
     }
 
-    pub(crate) fn begin_recovery_scan(&self) {
+    pub fn begin_recovery_scan(&self) {
         self.recovery_gate.begin();
     }
 
@@ -843,13 +852,13 @@ impl Runtime {
                         work.thread_config,
                     )
                     .await?;
-                tokio::spawn(async move {
+                runtime.provider.runtime_host().spawn(Box::pin(async move {
                     while let Some(event) = stream.next().await {
                         if let Err(error) = event {
                             tracing::error!(%turn_id, %error, "recovered turn failed");
                         }
                     }
-                });
+                }));
                 Ok::<(), anyhow::Error>(())
             }
             .await;
@@ -974,6 +983,7 @@ impl Runtime {
                     .push(crate::harness_helpers::system_message(&locations));
             }
         }
+        #[cfg(feature = "native")]
         if let Some(previews) = self.preview_urls(agent.as_ref(), thread.clone()).await? {
             agent_config
                 .instructions
@@ -1216,7 +1226,7 @@ impl Runtime {
             .map(|(_, stream)| stream)
     }
 
-    pub(crate) async fn cancel_turn(&self, key: HarnessTurnKey) -> Result<bool> {
+    pub async fn cancel_turn(&self, key: HarnessTurnKey) -> Result<bool> {
         if !self.events.contains(key) {
             return Ok(false);
         }
@@ -1236,6 +1246,7 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        #[cfg(feature = "native")]
         if let Some(previews) = self.previews.get() {
             previews.stop();
         }
@@ -1336,6 +1347,7 @@ impl Runtime {
         if opened.created {
             self.recovery_gate.new_thread(opened.thread.record().id);
         }
+        #[cfg(feature = "native")]
         self.preview_urls(agent.as_ref(), opened.thread.clone())
             .await?;
         Ok(opened)
@@ -1408,6 +1420,7 @@ impl Runtime {
             .exoharness()
             .delete_agent(&agent.record().id)
             .await?;
+        #[cfg(feature = "native")]
         if deleted && let Some(proxy) = self.previews.get() {
             proxy.remove_agent(agent.record().id);
         }
@@ -1431,6 +1444,7 @@ impl Runtime {
             return Ok(false);
         };
         let deleted = agent.delete_conversation(&thread.record().id).await?;
+        #[cfg(feature = "native")]
         if deleted && let Some(proxy) = self.previews.get() {
             proxy.remove(thread.record().id);
         }

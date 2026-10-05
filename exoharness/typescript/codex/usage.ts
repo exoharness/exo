@@ -1,8 +1,6 @@
-import { type CodexProtocolLogEntry } from "./app-server";
 import { messagesEvent, type EventData } from "../harness";
 import { type PricingTable } from "../model-runtime/cost";
 import { modelUsageRecord } from "../model-runtime/usage";
-import { isRecord } from "../model-runtime/shared";
 
 export interface CodexTokenUsage {
   inputTokens?: number;
@@ -13,42 +11,55 @@ export interface CodexTokenUsage {
   reasoningOutputTokens?: number;
 }
 
-export function accumulateCodexUsage(
-  current: CodexTokenUsage | null,
-  entry: CodexProtocolLogEntry,
-): CodexTokenUsage | null {
-  const message = entry.message;
-  if (
-    entry.direction !== "server_to_client" ||
-    !isRecord(message) ||
-    message.method !== "rawResponse/completed" ||
-    !isRecord(message.params)
-  )
-    return current;
-  const last = message.params.usage;
-  if (!isRecord(last)) return current;
-  const input = tokenCount(last.inputTokens);
-  const total = tokenCount(last.totalTokens);
-  const output = tokenCount(last.outputTokens);
-  if (input === undefined || total === undefined || output === undefined)
-    return current;
-  return {
-    inputTokens: add(current?.inputTokens, input),
-    outputTokens: add(current?.outputTokens, output),
-    totalTokens: add(current?.totalTokens, total),
-    cachedInputTokens: add(
-      current?.cachedInputTokens,
-      tokenCount(last.cachedInputTokens),
-    ),
-    cacheWriteInputTokens: add(
-      current?.cacheWriteInputTokens,
-      tokenCount(last.cacheWriteInputTokens),
-    ),
-    reasoningOutputTokens: add(
-      current?.reasoningOutputTokens,
-      tokenCount(last.reasoningOutputTokens),
-    ),
-  };
+export interface CodexTokenUsageUpdate {
+  threadId?: string;
+  turnId?: string;
+  tokenUsage?: { last?: CodexTokenUsage; total?: CodexTokenUsage };
+}
+
+// Record only notifications already filtered to the active native turn. `last`
+// is one model call; `total` includes earlier turns and also identifies repeated
+// notifications. Raw response events are not emitted by resumed app-servers.
+export class CodexUsageAccumulator {
+  value: CodexTokenUsage | null = null;
+  private lastThreadTotal: number | undefined;
+
+  record(params: CodexTokenUsageUpdate | null): void {
+    const { last, total } = params?.tokenUsage ?? {};
+    if (!last || !total) return;
+    const input = tokenCount(last.inputTokens);
+    const output = tokenCount(last.outputTokens);
+    const tokens = tokenCount(last.totalTokens);
+    const threadTotal = tokenCount(total.totalTokens);
+    if (
+      input === undefined ||
+      output === undefined ||
+      tokens === undefined ||
+      threadTotal === undefined ||
+      (this.lastThreadTotal !== undefined &&
+        threadTotal <= this.lastThreadTotal)
+    )
+      return;
+    this.lastThreadTotal = threadTotal;
+    const current = this.value;
+    this.value = {
+      inputTokens: add(current?.inputTokens, input),
+      outputTokens: add(current?.outputTokens, output),
+      totalTokens: add(current?.totalTokens, tokens),
+      cachedInputTokens: add(
+        current?.cachedInputTokens,
+        tokenCount(last.cachedInputTokens),
+      ),
+      cacheWriteInputTokens: add(
+        current?.cacheWriteInputTokens,
+        tokenCount(last.cacheWriteInputTokens),
+      ),
+      reasoningOutputTokens: add(
+        current?.reasoningOutputTokens,
+        tokenCount(last.reasoningOutputTokens),
+      ),
+    };
+  }
 }
 
 function tokenCount(value: unknown): number | undefined {

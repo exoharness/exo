@@ -21,10 +21,9 @@ use crate::{SandboxScope, effective_sandbox_scope};
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, Artifact, ArtifactVersion, ConversationHandle, EventData, ReadArtifactRequest,
-    Result, RunInSandboxRequest, SandboxProcess, SnapshotId, StartSandboxRequest, ToolRequest,
-    ToolResult, TurnHandle, WriteArtifactRequest,
+    Result, RunInSandboxRequest, SnapshotId, StartSandboxRequest, ToolRequest, ToolResult,
+    TurnHandle, WriteArtifactRequest,
 };
-use futures::io::AsyncReadExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -254,17 +253,8 @@ impl ToolRuntime for ExoToolRuntime {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ShellToolArguments {
-    command: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ShellToolResult {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
-}
+use crate::ShellToolArguments;
+use crate::shell_tool::read_shell_process;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -900,30 +890,6 @@ async fn execute_shell_tool(
         })
         .await?;
     read_shell_process(process).await
-}
-
-async fn read_shell_process(process: Box<dyn SandboxProcess>) -> Result<ToolResult> {
-    let parts = process.into_parts();
-    let mut stdout = parts.stdout;
-    let mut stderr = parts.stderr;
-    drop(parts.stdin);
-
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
-    let (stdout_result, stderr_result, wait_result) = tokio::join!(
-        stdout.read_to_end(&mut stdout_bytes),
-        stderr.read_to_end(&mut stderr_bytes),
-        parts.wait,
-    );
-    stdout_result?;
-    stderr_result?;
-    let exit_code = wait_result?;
-
-    Ok(serde_json::to_value(ShellToolResult {
-        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
-        exit_code,
-    })?)
 }
 
 async fn execute_exo_shell_tool(

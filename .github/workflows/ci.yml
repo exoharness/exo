@@ -93,6 +93,23 @@ jobs:
       - name: Check Firecracker and sandbox egress
         run: cargo test -p exoharness --features firecracker --lib --locked
 
+  portable-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          shared-key: portable-runtime
+      # Separate commands prevent workspace feature unification from masking
+      # accidental dependencies on native process, filesystem or Tokio runtime APIs.
+      - run: cargo check --locked -p exoharness --no-default-features --features store
+      - run: cargo check --locked -p exoharness --no-default-features --features store --target wasm32-unknown-unknown
+      - run: cargo check --locked -p executor --no-default-features --target wasm32-unknown-unknown
+
   # Both supported VM backends run the same real CLI + mocked model test.
   # Hosted macOS ARM runners lack nested virtualization; macOS still runs the
   # regular Rust jobs above. Fail explicitly if Linux KVM is unavailable.

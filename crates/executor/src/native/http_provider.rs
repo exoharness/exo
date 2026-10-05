@@ -140,6 +140,10 @@ impl Provider for HttpProvider {
             .await
     }
 
+    fn runtime_host(&self) -> Arc<dyn crate::runtime_host::RuntimeHost> {
+        Arc::new(crate::TokioRuntimeHost)
+    }
+
     async fn is_turn_active(
         &self,
         thread: &dyn exoharness::ThreadHandle,

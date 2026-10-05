@@ -34,6 +34,17 @@ pub struct PermissionPolicies {
 }
 
 impl PermissionPolicies {
+    #[cfg(feature = "client")]
+    pub fn for_mcp_tool(&self, tool: &exo_mcp::McpTool) -> PermissionPolicy {
+        let server = self.mcp_servers.get(&tool.server_name);
+        self.tool_policies
+            .get(&tool.name)
+            .copied()
+            .or_else(|| server.and_then(|s| s.tool_policies.get(&tool.tool_name).copied()))
+            .or_else(|| server.and_then(|s| s.permission_policy))
+            .unwrap_or(PermissionPolicy::AlwaysAsk {})
+    }
+
     pub fn validate_tool_names<'a>(
         &self,
         names: impl IntoIterator<Item = &'a str>,
@@ -53,16 +64,6 @@ impl PermissionPolicies {
             .get(name)
             .copied()
             .unwrap_or(self.permission_policy)
-    }
-
-    pub fn for_mcp_tool(&self, tool: &exo_mcp::McpTool) -> PermissionPolicy {
-        let server = self.mcp_servers.get(&tool.server_name);
-        self.tool_policies
-            .get(&tool.name)
-            .copied()
-            .or_else(|| server.and_then(|s| s.tool_policies.get(&tool.tool_name).copied()))
-            .or_else(|| server.and_then(|s| s.permission_policy))
-            .unwrap_or(PermissionPolicy::AlwaysAsk {})
     }
 }
 
@@ -96,6 +97,16 @@ mod tests {
     }
 
     #[test]
+    fn permission_policies_reject_unknown_options() {
+        assert!(
+            serde_json::from_str::<PermissionPolicy>(r#"{"type":"always_allow","ask":true}"#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<PermissionPolicy>(r#"{"type":"auto"}"#).is_err());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
     fn policies_use_specific_tool_then_server_defaults() {
         let definition = crate::AgentDefinition::parse("---\nname: Policies\nharness: basic\nconfig:\n  model: gpt-5-mini\npermission_policy: {type: always_ask}\ntool_policies:\n  shell: {type: always_allow}\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n    permission_policy: {type: always_allow}\n    tool_policies:\n      write: {type: always_ask}\n---\nUse tools.\n".into()).unwrap();
         let mut policies = definition.permissions();
@@ -125,6 +136,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "client")]
     #[test]
     fn builtin_tools_default_to_allow_and_mcp_tools_default_to_ask() {
         let definition = crate::AgentDefinition::parse("---\nname: Defaults\nharness: basic\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n---\nUse tools.\n".into()).unwrap();
@@ -142,14 +154,5 @@ mod tests {
         assert_eq!(policies.for_mcp_tool(&tool), PermissionPolicy::AlwaysAsk {});
         policies.mcp_servers.clear();
         assert_eq!(policies.for_mcp_tool(&tool), PermissionPolicy::AlwaysAsk {});
-    }
-
-    #[test]
-    fn permission_policies_reject_unknown_options() {
-        assert!(
-            serde_json::from_str::<PermissionPolicy>(r#"{"type":"always_allow","ask":true}"#)
-                .is_err()
-        );
-        assert!(serde_json::from_str::<PermissionPolicy>(r#"{"type":"auto"}"#).is_err());
     }
 }

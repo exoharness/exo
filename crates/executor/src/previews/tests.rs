@@ -107,7 +107,11 @@ async fn direct_connections_preserve_upgrade_bytes_and_report_unavailable_servic
         .join("conversations")
         .join(thread.record().id.to_string())
         .join("events");
-    std::fs::write(events.join("unreadable.json"), b"invalid event JSON")?;
+    let event_file = std::fs::read_dir(events)?
+        .next()
+        .context("thread has no event files")??
+        .path();
+    std::fs::write(event_file, b"invalid event JSON")?;
     assert!(thread.get_events(None).await.is_err());
 
     let upgrade = format!(

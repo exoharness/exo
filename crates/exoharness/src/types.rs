@@ -78,8 +78,30 @@ pub trait SnapshotHandle: Send + Sync {
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
 }
 
+/// Keeps a sandbox available until this guard is dropped.
+#[must_use = "dropping the guard releases sandbox activity"]
+pub struct SandboxActivity {
+    _guard: Box<dyn Send + Sync>,
+}
+
+impl SandboxActivity {
+    pub fn new(guard: impl Send + Sync + 'static) -> Self {
+        Self {
+            _guard: Box::new(guard),
+        }
+    }
+
+    pub fn noop() -> Self {
+        Self::new(())
+    }
+}
+
 #[async_trait]
 pub trait SandboxHandle: SnapshotHandle {
+    /// Hold backend activity until the returned guard is dropped.
+    async fn sandbox_activity(&self, _id: SandboxId) -> Result<SandboxActivity> {
+        Ok(SandboxActivity::noop())
+    }
     async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>>;
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
     async fn fork_sandbox(&self, request: ForkSandboxRequest) -> Result<SandboxId>;
@@ -448,6 +470,7 @@ pub struct AddEventsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AddEventsResult {
+    /// IDs in the same order as the submitted event data.
     pub event_ids: Vec<EventId>,
     pub latest_event_id: EventId,
 }
@@ -1122,11 +1145,27 @@ pub struct GetSandboxProcessEventsResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SandboxProcessEvent {
-    Stdout { cursor: u64, data: Vec<u8> },
-    Stderr { cursor: u64, data: Vec<u8> },
-    Exit { cursor: u64, exit_code: i32 },
-    Error { cursor: u64, message: String },
-    Cancelled { cursor: u64 },
+    Stdout {
+        cursor: u64,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    Stderr {
+        cursor: u64,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    Exit {
+        cursor: u64,
+        exit_code: i32,
+    },
+    Error {
+        cursor: u64,
+        message: String,
+    },
+    Cancelled {
+        cursor: u64,
+    },
 }
 
 impl SandboxProcessEvent {
@@ -1145,6 +1184,7 @@ impl SandboxProcessEvent {
 pub struct WriteSandboxProcessInputRequest {
     pub sandbox_id: SandboxId,
     pub process_id: SandboxProcessId,
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 

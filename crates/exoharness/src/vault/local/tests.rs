@@ -2,6 +2,11 @@ use super::*;
 use crate::test_support::local_test_config;
 use crate::vault::{VaultContext, global_vault};
 use crate::{BasicExoHarness, ExoHarness, ForkThreadRequest, NewAgentRequest, NewThreadRequest};
+use std::path::PathBuf;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use tempfile::TempDir;
 
 fn key(value: &str) -> Secret {
@@ -697,7 +702,7 @@ printf 'read\n' >> "$root/calls"
     assert_eq!(calls()?, 3);
     std::fs::write(directory.join("token"), "after-expiry")?;
     for (age, expected, reads) in [(86_340, "rotated", 3), (86_400, "after-expiry", 4)] {
-        store.inner.github_checked.lock().unwrap().insert(
+        store.inner.native.github_checked.lock().unwrap().insert(
             id,
             (
                 unchanged.revision,

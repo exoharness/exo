@@ -356,15 +356,19 @@ mod tests {
             .create_sandbox(test_support::sandbox_request())
             .await?;
         let (agent_id, thread_id) = (agent.record().id, thread.record().id);
-        std::fs::write(
+        let event_file = std::fs::read_dir(
             temp.path()
                 .join("agents")
                 .join(agent_id.to_string())
                 .join("conversations")
                 .join(thread_id.to_string())
-                .join("events/unreadable.json"),
-            b"invalid",
-        )?;
+                .join("events"),
+        )?
+        .next()
+        .context("thread has no event files")??
+        .path();
+        let original_event = std::fs::read(&event_file)?;
+        std::fs::write(&event_file, b"invalid")?;
         assert!(thread.get_events(None).await.is_err());
         // Process death releases leases without stopping its persisted VMs.
         drop((thread, agent, first));
@@ -386,14 +390,7 @@ mod tests {
         assert_eq!(backend.acquisitions.load(Ordering::SeqCst), 0);
         // Repair history before exercising normal sandbox acquisition, which
         // can load provider state. Ownership recovery above never reads it.
-        std::fs::remove_file(
-            temp.path()
-                .join("agents")
-                .join(agent_id.to_string())
-                .join("conversations")
-                .join(thread_id.to_string())
-                .join("events/unreadable.json"),
-        )?;
+        std::fs::write(&event_file, original_event)?;
         thread
             .create_sandbox(test_support::sandbox_request())
             .await
@@ -433,15 +430,18 @@ mod tests {
                 default_workdir: None,
             })
             .await?;
-        std::fs::write(
+        let event_file = std::fs::read_dir(
             temp.path()
                 .join("agents")
                 .join(agent.record().id.to_string())
                 .join("conversations")
                 .join(thread.record().id.to_string())
-                .join("events/unreadable.json"),
-            b"invalid",
-        )?;
+                .join("events"),
+        )?
+        .next()
+        .context("thread has no event files")??
+        .path();
+        std::fs::write(event_file, b"invalid")?;
         assert!(thread.get_events(None).await.is_err());
         owner.release_local_sessions().await?;
         let sandboxes = thread.list_sandboxes().await?;

@@ -1,5 +1,7 @@
 use super::transport::dns_response;
 use super::*;
+use crate::EgressCredentialBinding;
+use crate::egress_credentials::PLACEHOLDER_PREFIX;
 use crate::{CredentialInjectionLocation, CredentialNetworkPolicy};
 use anyhow::bail;
 use hickory_proto::op::{Message, ResponseCode};
