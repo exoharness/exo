@@ -4,7 +4,6 @@ pub(crate) mod braintrust;
 #[cfg(test)]
 pub(crate) mod braintrust_tests;
 pub(crate) mod conversation_events;
-pub(crate) mod conversation_sandbox;
 pub(crate) mod conversation_wakeup;
 pub(crate) mod harness_js_repl;
 pub(crate) mod harness_runtime;

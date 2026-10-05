@@ -11,7 +11,7 @@ initSync({ module: runtimeWasm });
 interface Progress {
   calls: { id: number; request: HostRequest }[];
   cancelled: number[];
-  completed: { id: number; result: string | null; error: string | null }[];
+  completed: { id: number; result: unknown; error: string | null }[];
   pending: boolean;
 }
 
@@ -38,7 +38,7 @@ export class Runtime {
 
   call<T>(operation: unknown, signal?: AbortSignal): Promise<T> {
     signal?.throwIfAborted();
-    const id = this.wasm.submit(JSON.stringify(operation));
+    const id = this.wasm.submit(operation);
     const result = new Promise<T>((resolve, reject) => {
       this.operations.set(id, {
         resolve: (value) => resolve(value as T),
@@ -65,30 +65,11 @@ export class Runtime {
     request: RawExoRequest,
     signal?: AbortSignal,
   ): Promise<RawExoResponse> {
-    const result = await this.call<{ status: number; body: string }>(
-      {
-        type: "http",
-        request: {
-          method: "POST",
-          path: ["request"],
-          query: "",
-          body: JSON.stringify({ kind: "request", id: 0, request }),
-        },
-      },
-      signal,
-    );
-    const message = JSON.parse(result.body) as {
-      ok: boolean;
-      response?: RawExoResponse;
-      error?: string;
-    };
-    if (result.status !== 200 || !message.ok || !message.response)
-      throw new Error(message.error ?? "Exo request failed");
-    return message.response;
+    return this.call({ type: "request", request }, signal);
   }
 
   private pump(): void {
-    const progress: Progress = JSON.parse(this.wasm.poll());
+    const progress = this.wasm.poll() as Progress;
     for (const id of progress.cancelled) this.calls.get(id)?.abort();
     for (const completion of progress.completed) {
       const operation = this.operations.get(completion.id);
@@ -96,7 +77,7 @@ export class Runtime {
       this.operations.delete(completion.id);
       if (completion.error !== null)
         operation.reject(new Error(completion.error));
-      else operation.resolve(JSON.parse(completion.result!));
+      else operation.resolve(completion.result);
     }
     if (progress.pending && !this.idle) {
       let resolve!: () => void;
@@ -113,17 +94,15 @@ export class Runtime {
       const controller = new AbortController();
       this.calls.set(call.id, controller);
       const respond = async () => {
-        let reply: { result: string } | { error: string };
+        let result: unknown;
+        let message: string | undefined;
         try {
-          const value = await this.handle(call.request, controller.signal);
-          reply = { result: JSON.stringify(value) };
+          result = await this.handle(call.request, controller.signal);
         } catch (error) {
-          reply = {
-            error: error instanceof Error ? error.message : String(error),
-          };
+          message = error instanceof Error ? error.message : String(error);
         }
         this.calls.delete(call.id);
-        this.wasm.resolve(call.id, JSON.stringify(reply));
+        this.wasm.resolve(call.id, result, message);
         this.pump();
       };
       this.waitUntil(respond());

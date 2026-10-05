@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Result, bail, ensure};
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::host::{Host, HostRequest};
 
 const SNAPSHOT_FORMAT: SnapshotFormat = SnapshotFormat::from_static("cloudflare-snapshot-v1");
+pub(crate) const IMAGE: &str = "cloudflare/debian-trixie";
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -47,7 +49,8 @@ pub(crate) enum Command {
     },
     Write {
         process_id: String,
-        bytes: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
     },
     CloseInput {
         process_id: String,
@@ -91,7 +94,7 @@ impl CloudflareBackend {
             "Cloudflare sandboxes require a thread scope"
         );
         ensure!(
-            request.spec.image.is_empty() || request.spec.image == "cloudflare/debian-trixie",
+            request.spec.image.is_empty() || request.spec.image == IMAGE,
             "custom Cloudflare sandbox images are not supported"
         );
         ensure!(
@@ -182,7 +185,7 @@ impl ManagedSandboxHandle for CloudflareHandle {
         &self.request.sandbox_id
     }
     fn effective_image(&self) -> Option<String> {
-        Some("cloudflare/debian-trixie".into())
+        Some(IMAGE.into())
     }
     async fn command_environment(&self) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
@@ -223,7 +226,7 @@ impl ManagedSandboxHandle for CloudflareHandle {
             let id = id.clone();
             Box::pin(
                 futures::stream::try_unfold((host, id), move |(host, id)| async move {
-                    let bytes: Option<Vec<u8>> = host
+                    let bytes: Option<serde_bytes::ByteBuf> = host
                         .call(HostRequest::Sandbox {
                             command: Command::Read {
                                 process_id: id.clone(),
@@ -232,17 +235,18 @@ impl ManagedSandboxHandle for CloudflareHandle {
                         })
                         .await
                         .map_err(std::io::Error::other)?;
-                    Ok(bytes.map(|bytes| (bytes, (host, id))))
+                    Ok(bytes.map(|bytes| (bytes.into_vec(), (host, id))))
                 })
                 .boxed()
                 .into_async_read(),
             ) as exoharness::BoxAsyncRead
         };
         let host = self.host.clone();
+        let finished = Arc::new(AtomicBool::new(false));
         let guard = ProcessGuard {
             host: host.clone(),
             id: id.clone(),
-            finished: false,
+            finished: finished.clone(),
         };
         let wait_id = id.clone();
         Ok(SandboxProcessParts {
@@ -253,9 +257,10 @@ impl ManagedSandboxHandle for CloudflareHandle {
                 id,
                 pending: None,
                 closing: false,
+                finished,
             }),
             wait: Box::pin(async move {
-                let mut guard = guard;
+                let guard = guard;
                 let exit = host
                     .call(HostRequest::Sandbox {
                         command: Command::Wait {
@@ -263,7 +268,9 @@ impl ManagedSandboxHandle for CloudflareHandle {
                         },
                     })
                     .await;
-                guard.finished = exit.is_ok();
+                if exit.is_ok() {
+                    guard.finished.store(true, Ordering::Release);
+                }
                 exit
             }),
         })
@@ -299,11 +306,11 @@ impl ManagedSandboxHandle for CloudflareHandle {
 struct ProcessGuard {
     host: Arc<Host>,
     id: String,
-    finished: bool,
+    finished: Arc<AtomicBool>,
 }
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        if !self.finished {
+        if !self.finished.swap(true, Ordering::AcqRel) {
             let host = self.host.clone();
             let id = self.id.clone();
             self.host.spawn(Box::pin(async move {
@@ -324,10 +331,11 @@ struct ProcessInput {
     id: String,
     pending: Option<BoxFuture<'static, std::io::Result<usize>>>,
     closing: bool,
+    finished: Arc<AtomicBool>,
 }
 impl Drop for ProcessInput {
     fn drop(&mut self) {
-        if !self.closing {
+        if !self.closing && !self.finished.load(Ordering::Acquire) {
             let host = self.host.clone();
             let id = self.id.clone();
             self.host.spawn(Box::pin(async move {
@@ -347,11 +355,12 @@ impl ProcessInput {
     fn poll_command(
         &mut self,
         cx: &mut TaskContext<'_>,
-        command: Command,
+        command: impl FnOnce() -> Command,
         length: usize,
     ) -> Poll<std::io::Result<usize>> {
         let host = self.host.clone();
         let pending = self.pending.get_or_insert_with(|| {
+            let command = command();
             Box::pin(async move {
                 host.call::<()>(HostRequest::Sandbox { command })
                     .await
@@ -375,11 +384,15 @@ impl AsyncWrite for ProcessInput {
         if self.closing {
             return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
         }
-        let command = Command::Write {
-            process_id: self.id.clone(),
-            bytes: bytes.to_vec(),
-        };
-        self.poll_command(cx, command, bytes.len())
+        let process_id = self.id.clone();
+        self.poll_command(
+            cx,
+            || Command::Write {
+                process_id,
+                data: bytes.to_vec(),
+            },
+            bytes.len(),
+        )
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
         if let Some(pending) = self.pending.as_mut() {
@@ -397,6 +410,6 @@ impl AsyncWrite for ProcessInput {
         let command = Command::CloseInput {
             process_id: self.id.clone(),
         };
-        self.poll_command(cx, command, 0).map_ok(|_| ())
+        self.poll_command(cx, || command, 0).map_ok(|_| ())
     }
 }

@@ -13,13 +13,14 @@ import {
   type RawRuntimeRequest,
   type RawRuntimeResponsePayload,
   type RawRuntimeEvent,
-  type RawSandboxProcessStream,
   type RawExoRequest,
   type RawExoResponse,
   type RawTypeScriptStreamEvent,
   type HostToGuestMessage,
   type GuestToHostMessage,
 } from "./client";
+import { SandboxProcessHandle } from "./sandbox-process";
+
 class ProtocolClient {
   private nextRequestId = 1;
   private readonly pending = new Map<
@@ -96,6 +97,14 @@ class ProtocolClient {
   }
 
   async requestExo(request: RawExoRequest): Promise<RawExoResponse> {
+    if (
+      request.type === "write_sandbox_process_input" &&
+      request.request.data instanceof Uint8Array
+    )
+      request = {
+        ...request,
+        request: { ...request.request, data: Array.from(request.request.data) },
+      };
     const id = this.nextRequestId;
     this.nextRequestId += 1;
     const response = new Promise<RawExoResponse>((resolve, reject) => {
@@ -139,11 +148,17 @@ class ProtocolClient {
       );
     }
     const process = new SandboxProcessHandle(
-      this,
-      payload.process_id,
-      payload.sandbox_id ?? undefined,
-      payload.sandbox_process_id ?? undefined,
-      payload.reused === true,
+      {
+        writeStdin: (data) =>
+          this.writeSandboxProcessStdin(payload.process_id, data),
+        closeStdin: () => this.closeSandboxProcessStdin(payload.process_id),
+        close: () => this.closeSandboxProcess(payload.process_id),
+      },
+      {
+        sandboxId: payload.sandbox_id ?? undefined,
+        sandboxProcessId: payload.sandbox_process_id ?? undefined,
+        reused: payload.reused === true,
+      },
     );
     this.sandboxProcesses.set(payload.process_id, process);
     return process;
@@ -293,103 +308,6 @@ class ProtocolClient {
     ) {
       this.sandboxProcesses.delete(event.process_id);
     }
-  }
-}
-
-class SandboxProcessHandle implements SandboxProcess {
-  readonly reused: boolean;
-  readonly stdout: ReadableStream<string>;
-  readonly stderr: ReadableStream<string>;
-  private stdoutController: ReadableStreamDefaultController<string> | null =
-    null;
-  private stderrController: ReadableStreamDefaultController<string> | null =
-    null;
-  private finished = false;
-  private readonly waitPromise: Promise<number | null>;
-  private resolveWait!: (exitCode: number | null) => void;
-  private rejectWait!: (error: Error) => void;
-
-  constructor(
-    private readonly client: ProtocolClient,
-    private readonly processId: number,
-    readonly sandboxId?: string,
-    readonly sandboxProcessId?: string,
-    reused = false,
-  ) {
-    this.reused = reused;
-    this.stdout = new ReadableStream<string>({
-      start: (controller) => {
-        this.stdoutController = controller;
-      },
-    });
-    this.stderr = new ReadableStream<string>({
-      start: (controller) => {
-        this.stderrController = controller;
-      },
-    });
-    this.waitPromise = new Promise<number | null>((resolve, reject) => {
-      this.resolveWait = resolve;
-      this.rejectWait = reject;
-    });
-  }
-
-  async writeStdin(data: string): Promise<void> {
-    await this.client.writeSandboxProcessStdin(this.processId, data);
-  }
-
-  async closeStdin(): Promise<void> {
-    await this.client.closeSandboxProcessStdin(this.processId);
-  }
-
-  async close(): Promise<void> {
-    if (this.finished) {
-      return;
-    }
-    await this.client.closeSandboxProcess(this.processId);
-  }
-
-  wait(): Promise<number | null> {
-    return this.waitPromise;
-  }
-
-  handleEvent(event: RawRuntimeEvent): void {
-    switch (event.type) {
-      case "sandbox_process_output":
-        this.enqueue(event.stream, event.data);
-        return;
-      case "sandbox_process_exit":
-        this.finish(event.exit_code ?? null);
-        return;
-      case "sandbox_process_error":
-        this.fail(new Error(event.message));
-        return;
-    }
-  }
-
-  private enqueue(stream: RawSandboxProcessStream, data: string): void {
-    const controller =
-      stream === "stdout" ? this.stdoutController : this.stderrController;
-    controller?.enqueue(data);
-  }
-
-  private finish(exitCode: number | null): void {
-    if (this.finished) {
-      return;
-    }
-    this.finished = true;
-    this.stdoutController?.close();
-    this.stderrController?.close();
-    this.resolveWait(exitCode);
-  }
-
-  private fail(error: Error): void {
-    if (this.finished) {
-      return;
-    }
-    this.finished = true;
-    this.stdoutController?.error(error);
-    this.stderrController?.error(error);
-    this.rejectWait(error);
   }
 }
 

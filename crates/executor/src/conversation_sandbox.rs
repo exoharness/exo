@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::sandbox_policy::sandbox_policy;
 use crate::{AgentConfig, ConversationConfig};
 use exoharness::{
-    ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
-    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
+    ConversationHandle, CreateSandboxRequest, EventData, EventKind, EventQuery,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -45,7 +45,7 @@ pub(crate) struct ConversationSandboxSpec {
     pub(crate) idle_seconds: u64,
 }
 
-pub(crate) async fn ensure_conversation_sandbox(
+pub async fn ensure_conversation_sandbox(
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
     config: &ConversationConfig,
@@ -205,6 +205,7 @@ async fn conversation_sandbox_candidates(
     Ok(candidates)
 }
 
+#[cfg(feature = "native")]
 pub(crate) async fn create_conversation_sandbox(
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
@@ -244,6 +245,7 @@ async fn create_sandbox(
         .await
 }
 
+#[cfg(feature = "native")]
 pub(crate) async fn conversation_sandboxes(
     conversation: &dyn ConversationHandle,
 ) -> Result<Vec<ConversationSandboxInfo>> {
@@ -260,6 +262,7 @@ pub(crate) async fn conversation_sandboxes(
 // The agent-scoped sandbox is shared by every conversation, so its spec must
 // not depend on which conversation asks for it: it is derived from the agent
 // config alone.
+#[cfg(feature = "native")]
 pub(crate) fn agent_sandbox_spec(agent_config: &AgentConfig) -> ConversationSandboxSpec {
     ConversationSandboxSpec {
         provider: agent_config.sandbox.provider.clone(),
@@ -267,7 +270,7 @@ pub(crate) fn agent_sandbox_spec(agent_config: &AgentConfig) -> ConversationSand
             .sandbox
             .image
             .clone()
-            .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string()),
+            .unwrap_or_else(exoharness::default_docker_image),
         default_workdir: agent_config
             .sandbox
             .mounts
@@ -360,7 +363,7 @@ fn matches_sandbox_policy(
     configured.is_none_or(|configured| actual == Some(configured))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use exoharness::{CredentialNetworkPolicy, SandboxNetworkPolicy};

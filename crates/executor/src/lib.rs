@@ -5,6 +5,7 @@ pub use native::*;
 
 mod basic;
 mod conversation_lock;
+pub mod conversation_sandbox;
 pub mod execution_tracing;
 mod executor_types;
 pub use exoharness::harness;
@@ -22,7 +23,7 @@ mod model_events;
 mod model_execution;
 pub mod permissions;
 mod provider;
-pub mod runtime_host;
+pub use exoharness::runtime_host;
 pub mod sandbox_policy;
 mod shared;
 

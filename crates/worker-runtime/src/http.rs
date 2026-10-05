@@ -66,6 +66,15 @@ pub(crate) async fn handle(
     }
 }
 
+pub(crate) async fn request(
+    runtime: &Runtime,
+    request: exoharness::protocol::Request,
+) -> Result<exoharness::protocol::Response> {
+    exoharness::server::ExoHarnessServer::new(runtime.exoharness_handle())
+        .handle_request(request)
+        .await
+}
+
 async fn route(
     runtime: &Runtime,
     host: &Arc<Host>,
@@ -81,9 +90,7 @@ async fn route(
     let method = r.method.as_str();
     if path == ["request"] && method == "POST" {
         let exoharness::protocol::ClientMessage::Request { id, request } = body(r)?;
-        let result = exoharness::server::ExoHarnessServer::new(runtime.exoharness_handle())
-            .handle_request(request)
-            .await;
+        let result = self::request(runtime, request).await;
         return json(match result {
             Ok(response) => exoharness::protocol::ServerMessage::Response {
                 id,

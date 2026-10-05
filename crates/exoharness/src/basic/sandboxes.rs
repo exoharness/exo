@@ -612,24 +612,37 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .await?;
         let after = query.after.unwrap_or_default();
         let limit = query.limit.unwrap_or(u32::MAX) as usize;
-        let events = process
-            .events
-            .lock()
-            .await
-            .iter()
-            .filter(|event| event.cursor() > after)
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>();
-        let cursor = events
-            .last()
-            .map(SandboxProcessEvent::cursor)
-            .or(query.after);
-        Ok(GetSandboxProcessEventsResult {
-            events,
-            cursor,
-            status: sandbox_process_status(&process).await,
-        })
+        loop {
+            let notified = process.notify.notified();
+            futures::pin_mut!(notified);
+            notified.as_mut().enable();
+            let events = process
+                .events
+                .lock()
+                .await
+                .iter()
+                .filter(|event| event.cursor() > after)
+                .take(limit)
+                .cloned()
+                .collect::<Vec<_>>();
+            let cursor = events
+                .last()
+                .map(SandboxProcessEvent::cursor)
+                .or(query.after);
+            let status = sandbox_process_status(&process).await;
+            if !query.follow.unwrap_or(false)
+                || limit == 0
+                || !events.is_empty()
+                || !status.is_running()
+            {
+                return Ok(GetSandboxProcessEventsResult {
+                    events,
+                    cursor,
+                    status,
+                });
+            }
+            notified.await;
+        }
     }
 
     pub(super) async fn wait_sandbox_process(

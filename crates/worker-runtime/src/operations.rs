@@ -3,13 +3,16 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use executor::Runtime;
 use exoharness::{AgentId, ThreadId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::host::Host;
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
+    Request {
+        request: exoharness::protocol::Request,
+    },
     Progress {
         thread_id: ThreadId,
         turn: exoharness::TurnRecord,
@@ -44,14 +47,30 @@ pub(crate) enum Operation {
     },
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
+pub(crate) enum Output {
+    Http(crate::http::Response),
+    Exo(Box<exoharness::protocol::Response>),
+    Progress(Box<Option<exoharness::Event>>),
+    Events(exoharness::GetEventsResult),
+    Policy(std::collections::HashMap<String, String>),
+    Headers(Vec<(String, String)>),
+    Bool(bool),
+    Unit(()),
+}
+
 pub(crate) async fn run(
     runtime: Runtime,
     host: Arc<Host>,
     updates: Arc<tokio::sync::Mutex<()>>,
     operation: Operation,
-) -> Result<String> {
+) -> Result<Output> {
     let state = runtime.exoharness_handle();
     match operation {
+        Operation::Request { request } => Ok(Output::Exo(Box::new(
+            crate::http::request(&runtime, request).await?,
+        ))),
         Operation::Progress {
             thread_id,
             turn,
@@ -72,11 +91,11 @@ pub(crate) async fn run(
             } else {
                 None
             };
-            Ok(serde_json::to_string(&progress)?)
+            Ok(Output::Progress(Box::new(progress)))
         }
-        Operation::Http { request } => Ok(serde_json::to_string(
-            &crate::http::handle(&runtime, &host, &updates, request).await,
-        )?),
+        Operation::Http { request } => Ok(Output::Http(
+            crate::http::handle(&runtime, &host, &updates, request).await,
+        )),
         Operation::Events {
             agent_id,
             thread_id,
@@ -96,15 +115,15 @@ pub(crate) async fn run(
                 limit: Some(1000),
                 ..Default::default()
             };
-            Ok(serde_json::to_string(
-                &executor::managed_agents::service::wait_events(&service, &path, query).await?,
-            )?)
+            Ok(Output::Events(
+                executor::managed_agents::service::wait_events(&service, &path, query).await?,
+            ))
         }
         Operation::SandboxPolicy { request } => {
             let _guard = updates.lock().await;
-            Ok(serde_json::to_string(
-                &crate::policy::environment(&runtime, &host, request).await?,
-            )?)
+            Ok(Output::Policy(
+                crate::policy::environment(&runtime, &host, request).await?,
+            ))
         }
         Operation::ProxyHeaders {
             agent_id,
@@ -115,8 +134,8 @@ pub(crate) async fn run(
             headers,
         } => {
             let _guard = updates.lock().await;
-            Ok(serde_json::to_string(
-                &crate::policy::proxy_headers(
+            Ok(Output::Headers(
+                crate::policy::proxy_headers(
                     &runtime,
                     &host,
                     agent_id,
@@ -127,7 +146,7 @@ pub(crate) async fn run(
                     headers,
                 )
                 .await?,
-            )?)
+            ))
         }
         Operation::AuthorizeTool {
             agent_id,
@@ -156,9 +175,7 @@ pub(crate) async fn run(
                 executor::ExecutorStreamMode::Disabled,
             )
             .await?;
-            Ok(serde_json::to_string(
-                &exoharness::protocol::Response::Unit,
-            )?)
+            Ok(Output::Exo(Box::new(exoharness::protocol::Response::Unit)))
         }
         Operation::HasUnfinishedTurns => {
             for agent in state.list_agents().await? {
@@ -172,14 +189,14 @@ pub(crate) async fn run(
                     .conversations
                     .is_empty()
                 {
-                    return Ok(serde_json::to_string(&true)?);
+                    return Ok(Output::Bool(true));
                 }
             }
-            Ok(serde_json::to_string(&false)?)
+            Ok(Output::Bool(false))
         }
         Operation::Recover => {
             runtime.recover_unfinished_turns().await?;
-            Ok(serde_json::to_string(&())?)
+            Ok(Output::Unit(()))
         }
     }
 }

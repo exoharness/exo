@@ -1,6 +1,6 @@
 /** Byte storage for Rust's object store. Values and paths remain opaque here. */
 export type StorageOperation =
-  | { type: "put"; key: string; bytes: number[]; blob: boolean }
+  | { type: "put"; key: string; bytes: Uint8Array; blob: boolean }
   | { type: "get" | "delete"; key: string }
   | { type: "list"; prefix: string }
   | { type: "copy"; source: string; destination: string };
@@ -41,15 +41,11 @@ export class Storage {
   async handle(operation: StorageOperation): Promise<unknown> {
     switch (operation.type) {
       case "put":
-        await this.put(
-          operation.key,
-          Uint8Array.from(operation.bytes),
-          operation.blob,
-        );
+        await this.put(operation.key, operation.bytes, operation.blob);
         return null;
       case "get": {
         const entry = await this.kv.get<Entry>(prefix + operation.key);
-        return entry ? Array.from(await this.read(entry)) : null;
+        return entry ? this.read(entry) : null;
       }
       case "list": {
         // Match object-store prefixes on path boundaries, excluding the prefix itself.

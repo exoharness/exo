@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
+use executor::conversation_sandbox::ensure_conversation_sandbox;
 use executor::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
 use executor::managed_agents::{
     HarnessModules, TypeScriptHarnessPreset, agent_config_with_modules,
@@ -115,7 +116,7 @@ impl ToolRuntime for WorkerTools {
             .shell_program
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-        let sandbox_id = ensure_sandbox(thread, agent_config, config).await?;
+        let sandbox_id = ensure_conversation_sandbox(thread, agent_config, config, None).await?;
         let process = thread
             .run_in_sandbox(exoharness::RunInSandboxRequest {
                 id: sandbox_id,
@@ -156,7 +157,7 @@ impl HarnessExecutor for WorkerExecutor {
         thread_config: &ConversationConfig,
     ) -> Result<()> {
         validate_conversation(thread_config)?;
-        ensure_sandbox(thread, config, thread_config).await?;
+        ensure_conversation_sandbox(thread, config, thread_config, None).await?;
         if config.harness == AgentHarnessKind::Basic {
             self.basic
                 .prepare_conversation(agent, thread, config, thread_config)
@@ -274,7 +275,8 @@ impl WorkerExecutor {
             config.harness == AgentHarnessKind::TypeScript,
             "harness is not supported by this Worker"
         );
-        let sandbox_id = ensure_sandbox(thread.as_ref(), config, thread_config).await?;
+        let sandbox_id =
+            ensure_conversation_sandbox(thread.as_ref(), config, thread_config, None).await?;
         let _response: UnitResponse = self
             .host
             .call(HostRequest::Harness {
@@ -324,7 +326,7 @@ fn validate_conversation(config: &ConversationConfig) -> Result<()> {
         config
             .sandbox_image
             .as_deref()
-            .is_none_or(|image| image == "cloudflare/debian-trixie")
+            .is_none_or(|image| image == crate::sandbox::IMAGE)
             && config
                 .sandbox_provider
                 .as_ref()
@@ -335,12 +337,8 @@ fn validate_conversation(config: &ConversationConfig) -> Result<()> {
         let sandbox = &environment.config;
         ensure!(
             sandbox.provider.as_str() == "cloudflare"
-                && sandbox.image == "cloudflare/debian-trixie"
+                && sandbox.image == crate::sandbox::IMAGE
                 && sandbox.resources.is_none()
-                && sandbox
-                    .default_workdir
-                    .as_deref()
-                    .is_none_or(|path| path == "/workspace")
                 && sandbox
                     .file_system_mounts
                     .as_ref()
@@ -350,32 +348,9 @@ fn validate_conversation(config: &ConversationConfig) -> Result<()> {
                     .as_ref()
                     .is_none_or(Vec::is_empty)
                 && sandbox.tcp_ports.is_empty()
-                && sandbox.idle_seconds.is_none_or(|idle| idle == 300),
+                && sandbox.idle_seconds.is_none_or(|idle| idle > 0),
             "this host supports standard-image environments with network policies; custom execution settings are not supported"
         );
     }
     Ok(())
-}
-
-async fn ensure_sandbox(
-    thread: &dyn ConversationHandle,
-    agent: &AgentConfig,
-    config: &ConversationConfig,
-) -> Result<String> {
-    let policy = executor::sandbox_policy::sandbox_policy(thread, agent, config).await?;
-    thread
-        .create_sandbox(exoharness::CreateSandboxRequest {
-            name: Some("exo-runtime".into()),
-            provider: SandboxProvider::from_static("cloudflare"),
-            image: config.sandbox_image.clone().unwrap_or_default(),
-            resources: None,
-            default_workdir: Some("/workspace".into()),
-            file_system_mounts: None,
-            durable_file_systems: None,
-            policy,
-            enable_networking: Some(agent.sandbox.enable_networking),
-            idle_seconds: Some(300),
-            tcp_ports: Vec::new(),
-        })
-        .await
 }

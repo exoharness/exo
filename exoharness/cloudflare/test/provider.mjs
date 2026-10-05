@@ -34,9 +34,11 @@ let modelRequests = 0;
 const fakeSandbox = `import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 ${fakeCodex}
 class FakeProcess extends RpcTarget {
-  constructor(process) {
+  constructor(process, suppress = () => false) {
     super(); this.process = process;
-    this.out = process.stdout.pipeThrough(new TextEncoderStream());
+    this.out = process.stdout.pipeThrough(new TransformStream({transform(line, controller) {
+      if (!suppress(line)) controller.enqueue(line);
+    }})).pipeThrough(new TextEncoderStream());
     this.err = process.stderr.pipeThrough(new TextEncoderStream());
   }
   get stdout() { return this.out; }
@@ -81,6 +83,7 @@ export class FakeSandbox extends DurableObject {
       await this.ctx.storage.put("count", (await this.count()) + 1);
       return new FakeProcess({stdout: new ReadableStream({start(c) { c.enqueue("Linux test\\n"); c.close(); }}), stderr: new ReadableStream({start(c) {c.close();}}), writeStdin: async () => {}, closeStdin: async () => {}, close: async () => {}, wait: async () => 0});
     }
+    let holdTurn = false;
     const app = new FakeCodexAppServer({resumeAvailable: true,
       completedItems: id => [
         {id: "cmd-" + id, type: "commandExecution", command: "node --test", cwd: "/workspace", status: "completed", exitCode: 0, aggregatedOutput: "passed", durationMs: 5},
@@ -99,8 +102,8 @@ export class FakeSandbox extends DurableObject {
       },
     });
     const write = app.process.writeStdin;
-    app.process.writeStdin = async line => {const request = JSON.parse(line); if (["thread/start", "thread/resume"].includes(request.method)) await this.ctx.storage.put("last-method", request.method); await write(line);};
-    return new FakeProcess(app.process);
+    app.process.writeStdin = async line => {const request = JSON.parse(line); if (request.method === "turn/start") holdTurn = JSON.stringify(request.params).includes("hold-turn"); if (["thread/start", "thread/resume"].includes(request.method)) await this.ctx.storage.put("last-method", request.method); await write(line);};
+    return new FakeProcess(app.process, line => holdTurn && JSON.parse(line).method === "turn/completed");
   }
   async runProcess(identity, request, ready) {
     const process = await this.startProcess(request); this.processes.add(process);
@@ -774,6 +777,27 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   assert.equal(started.data.payload.warm_app_server_reused, true);
   assert.equal(started.data.payload.warm_thread_reused, true);
   assert.equal(await sandbox.processCount(), 1);
+  const managed = finished.filter(
+    (event) => event.data.type === "sandbox_process_started",
+  );
+  assert.equal(
+    managed.length,
+    1,
+    "warm Codex must reuse the manager's process",
+  );
+  const scope = { type: "thread", agent_id: agent.id, thread_id: thread.id };
+  const tracked = await rpc({
+    type: "get_sandbox_process_events",
+    scope,
+    query: {
+      sandbox_id: managed[0].data.sandbox_id,
+      process_id: managed[0].data.process_id,
+      after: null,
+      limit: 0,
+      follow: false,
+    },
+  });
+  assert.equal(tracked.result.status.type, "running");
   for (const id of [first.turn.id, second.turn.id]) {
     const usage = finished.filter(
       (event) =>
@@ -807,6 +831,11 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
     !resumed.some((event) => event.data.type === "error"),
     JSON.stringify(resumed),
   );
+  assert.equal(
+    resumed.filter((event) => event.data.type === "sandbox_process_started")
+      .length,
+    2,
+  );
   const resumedStart = resumed.find(
     (event) =>
       event.turn_id === third.turn.id &&
@@ -817,6 +846,48 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   assert.equal(await sandbox.lastMethod(), "thread/resume");
   assert.equal(await sandbox.processCount(), 1);
   await sandbox.stop();
+});
+
+test("Codex cancellation uses the shared turn lifecycle and stops its managed process", async () => {
+  const { agent, thread, path } = await create(false, "codex");
+  const submitted = await api(
+    `${path}/turn`,
+    "POST",
+    { input: { role: "user", content: "hold-turn" } },
+    202,
+  );
+  const events = await waitEvents(path, (events) =>
+    events.some((event) => event.data.event_type === "codex_turn_started"),
+  );
+  assert(!events.some((event) => event.data.type === "turn_ended"));
+  const process = events.find(
+    (event) => event.data.type === "sandbox_process_started",
+  ).data;
+  assert.equal(
+    (await api(`${path}/turn/${submitted.turn.id}/cancel`, "POST", {}))
+      .canceled_active_turn,
+    true,
+  );
+  await waitEvents(path, (events) =>
+    events.some((event) => event.data.type === "turn_ended"),
+  );
+  const result = await rpc({
+    type: "get_sandbox_process_events",
+    scope: {
+      type: "thread",
+      agent_id: agent.id,
+      thread_id: thread.id,
+    },
+    query: {
+      sandbox_id: process.sandbox_id,
+      process_id: process.process_id,
+      after: null,
+      limit: 0,
+      follow: false,
+    },
+  });
+  assert.notEqual(result.result.status.type, "running");
+  assert.equal(await (await sandboxFor(agent, thread)).processCount(), 0);
 });
 
 test("managed thread pagination follows latest activity", async () => {
@@ -902,12 +973,31 @@ test("sandbox process RPC preserves binary stdin, drains output and cancels proc
       })
     ).process.id;
   const process_id = await start();
-  const data = [0, 255, 128, 195, 169, 10];
+  const followed = rpc({
+    type: "get_sandbox_process_events",
+    scope,
+    query: {
+      sandbox_id,
+      process_id,
+      after: null,
+      limit: null,
+      follow: true,
+    },
+  });
+  const waiting = await Promise.race([
+    followed.then(() => false),
+    new Promise((resolve) => setTimeout(() => resolve(true), 20)),
+  ]);
+  assert.equal(waiting, true, "follow should wait for process output");
+  const data = Array.from({ length: 32768 }, (_, i) => i % 256);
   await rpc({
     type: "write_sandbox_process_input",
     scope,
     request: { sandbox_id, process_id, data },
   });
+  assert(
+    (await followed).result.events.some((event) => event.type === "stdout"),
+  );
   await rpc({
     type: "close_sandbox_process_input",
     scope,

@@ -1094,11 +1094,27 @@ pub struct GetSandboxProcessEventsResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SandboxProcessEvent {
-    Stdout { cursor: u64, data: Vec<u8> },
-    Stderr { cursor: u64, data: Vec<u8> },
-    Exit { cursor: u64, exit_code: i32 },
-    Error { cursor: u64, message: String },
-    Cancelled { cursor: u64 },
+    Stdout {
+        cursor: u64,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    Stderr {
+        cursor: u64,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    Exit {
+        cursor: u64,
+        exit_code: i32,
+    },
+    Error {
+        cursor: u64,
+        message: String,
+    },
+    Cancelled {
+        cursor: u64,
+    },
 }
 
 impl SandboxProcessEvent {
@@ -1117,6 +1133,7 @@ impl SandboxProcessEvent {
 pub struct WriteSandboxProcessInputRequest {
     pub sandbox_id: SandboxId,
     pub process_id: SandboxProcessId,
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 

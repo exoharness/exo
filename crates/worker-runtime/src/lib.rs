@@ -20,12 +20,12 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use execution::{WorkerExecutor, WorkerModel, WorkerTools, WorkerTracer};
-use host::{Host, HostCall, HostReply, HostStorage};
+use host::{Host, HostCall, HostStorage};
 
 #[derive(Serialize)]
 struct Completion {
     id: u32,
-    result: Option<String>,
+    result: Option<operations::Output>,
     error: Option<String>,
 }
 #[derive(Serialize)]
@@ -99,8 +99,9 @@ impl WorkerRuntime {
         })
     }
 
-    pub fn submit(&mut self, json: &str) -> Result<u32, JsValue> {
-        let operation: operations::Operation = serde_json::from_str(json).map_err(js_error)?;
+    pub fn submit(&mut self, input: JsValue) -> Result<u32, JsValue> {
+        let operation: operations::Operation =
+            serde_wasm_bindgen::from_value(input).map_err(js_error)?;
         let id = self.next_operation;
         self.next_operation = self
             .next_operation
@@ -147,12 +148,11 @@ impl WorkerRuntime {
         self.host.awake.store(true, Ordering::Release);
     }
 
-    pub fn resolve(&self, id: u32, json: &str) -> Result<bool, JsValue> {
-        let reply: HostReply = serde_json::from_str(json).map_err(js_error)?;
-        Ok(self.host.resolve(id, reply))
+    pub fn resolve(&self, id: u32, result: JsValue, error: Option<String>) -> bool {
+        self.host.resolve(id, error.map_or(Ok(result), Err))
     }
 
-    pub fn poll(&mut self) -> Result<String, JsValue> {
+    pub fn poll(&mut self) -> Result<JsValue, JsValue> {
         let waker = waker(self.host.clone());
         let mut cx = Context::from_waker(&waker);
         loop {
@@ -179,12 +179,15 @@ impl WorkerRuntime {
         for completion in &completed {
             self.cancellations.remove(&completion.id);
         }
-        serde_json::to_string(&Progress {
+        Progress {
             calls,
             cancelled,
             completed,
             pending: !self.running.is_empty(),
-        })
+        }
+        .serialize(
+            &serde_wasm_bindgen::Serializer::json_compatible().serialize_bytes_as_arrays(false),
+        )
         .map_err(js_error)
     }
 }

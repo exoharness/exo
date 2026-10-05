@@ -220,7 +220,63 @@ export type RawResourceScope =
   | { type: "agent"; agent_id: string }
   | { type: "thread"; agent_id: string; thread_id: string };
 
+export type RawSandboxProcessStatus =
+  | { type: "running" }
+  | { type: "exited"; exit_code: number }
+  | { type: "failed"; message: string }
+  | { type: "cancelled" };
+export interface RawSandboxProcessPage {
+  events: (
+    | { type: "stdout" | "stderr"; cursor: number; data: number[] | Uint8Array }
+    | { type: "exit"; cursor: number; exit_code: number }
+    | { type: "error"; cursor: number; message: string }
+    | { type: "cancelled"; cursor: number }
+  )[];
+  cursor: number | null;
+  status: RawSandboxProcessStatus;
+}
+
 export type RawExoRequest =
+  | {
+      type: "start_sandbox_process";
+      scope: RawResourceScope;
+      request: {
+        sandbox_id: string;
+        command: string[];
+        env: Record<string, string>;
+        cwd: string | null;
+        stdin: "open";
+        lifecycle: "attached";
+      };
+    }
+  | {
+      type: "write_sandbox_process_input";
+      scope: RawResourceScope;
+      request: {
+        sandbox_id: string;
+        process_id: string;
+        data: number[] | Uint8Array;
+      };
+    }
+  | {
+      type: "close_sandbox_process_input" | "cancel_sandbox_process";
+      scope: RawResourceScope;
+      request: {
+        sandbox_id: string;
+        process_id: string;
+      };
+    }
+  | {
+      type: "get_sandbox_process_events";
+      scope: RawResourceScope;
+      query: {
+        sandbox_id: string;
+        process_id: string;
+        after: number | null;
+        limit: number;
+        follow: boolean;
+      };
+    }
   | { type: "list_vaults"; scope: RawResourceScope }
   | { type: "get_vault"; scope: RawResourceScope; vault_id: string }
   | { type: "create_vault"; name: string }
@@ -385,6 +441,16 @@ export type RawExoRequest =
     };
 
 export type RawExoResponse =
+  | {
+      type: "sandbox_process";
+      process: {
+        id: string;
+        sandbox_id: string;
+        status: RawSandboxProcessStatus;
+      };
+    }
+  | { type: "sandbox_process_events"; result: RawSandboxProcessPage }
+  | { type: "sandbox_process_status"; status: RawSandboxProcessStatus }
   | { type: "agents"; agents: RawAgentRecord[] }
   | { type: "agent"; agent: RawAgentRecord | null }
   | { type: "bool"; value: boolean }

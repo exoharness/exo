@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use executor::runtime_host::RuntimeHost;
 use executor::{AgentConfig, ConversationConfig, ModelRequest, SendRequest};
@@ -10,7 +10,8 @@ use exoharness::{AgentId, ThreadId, TurnRecord};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::task::ArcWake;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
+use wasm_bindgen::JsValue;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -42,11 +43,7 @@ pub(crate) struct HostCall {
     pub request: HostRequest,
 }
 
-#[derive(Deserialize)]
-pub(crate) struct HostReply {
-    pub result: Option<String>,
-    pub error: Option<String>,
-}
+type HostReply = Result<JsValue, String>;
 
 #[derive(Default)]
 pub(crate) struct Host {
@@ -72,11 +69,8 @@ impl Host {
         let reply = receiver
             .await
             .context("Worker host stopped before replying")?;
-        if let Some(error) = reply.error {
-            bail!("{error}");
-        }
-        serde_json::from_str(&reply.result.context("missing Worker host response")?)
-            .context("decoding Worker host response")
+        let result = reply.map_err(anyhow::Error::msg)?;
+        serde_wasm_bindgen::from_value(result).context("decoding Worker host response")
     }
 
     pub fn resolve(&self, id: u32, reply: HostReply) -> bool {
@@ -129,6 +123,7 @@ impl ArcWake for Host {
 pub(crate) enum StorageOperation {
     Put {
         key: String,
+        #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
         blob: bool,
     },
@@ -162,11 +157,13 @@ impl exoharness::Storage for HostStorage {
             .await
     }
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        self.0
+        let bytes: Option<serde_bytes::ByteBuf> = self
+            .0
             .call(HostRequest::Storage {
                 operation: StorageOperation::Get { key: key.into() },
             })
-            .await
+            .await?;
+        Ok(bytes.map(serde_bytes::ByteBuf::into_vec))
     }
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
         self.0

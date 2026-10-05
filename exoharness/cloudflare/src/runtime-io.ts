@@ -10,6 +10,7 @@ import {
 import {
   createTurnContext,
   type HarnessClient,
+  type RawExoRequest,
   type RawAgentRecord,
   type RawConversationHandleInfo,
   type RawTurnRecord,
@@ -19,7 +20,12 @@ import type {
   RawConversationConfig,
   RawSendRequest,
 } from "../../typescript/harness/wire";
-import type { Message, ToolDefinition } from "../../typescript/harness/index";
+import type {
+  Message,
+  ToolDefinition,
+  SandboxProcessStartRequest,
+} from "../../typescript/harness/index";
+import { SandboxProcessHandle } from "../../typescript/harness/sandbox-process";
 import type { Env, SandboxIdentity, SandboxRequest } from "./env";
 import { CloudflareSandbox } from "./sandbox";
 import { Storage, type StorageOperation } from "./storage";
@@ -42,7 +48,7 @@ type SandboxCommand =
   | { type: "stop"; request: SandboxRequest; terminate: boolean }
   | { type: "exec" | "start"; request: SandboxRequest; command: ProcessCommand }
   | { type: "read"; process_id: string; stream: "stdout" | "stderr" }
-  | { type: "write"; process_id: string; bytes: number[] }
+  | { type: "write"; process_id: string; data: Uint8Array }
   | { type: "close_input" | "wait" | "close"; process_id: string };
 type Process = Awaited<ReturnType<CloudflareSandbox["openProcess"]>>;
 type RunningProcess = {
@@ -142,8 +148,6 @@ export class RuntimeIO {
     if ("process_id" in command) {
       const entry = this.processes.get(command.process_id);
       if (!entry) {
-        if (command.type === "close" || command.type === "close_input")
-          return null;
         throw new Error("sandbox process not found");
       }
       switch (command.type) {
@@ -152,16 +156,16 @@ export class RuntimeIO {
           try {
             result = await entry[command.stream].read();
           } catch (error) {
-            this.processes.delete(command.process_id);
+            this.finished(command.process_id, entry, command.stream);
             await entry.process.close();
             throw error;
           }
           const { done, value } = result;
           if (done) this.finished(command.process_id, entry, command.stream);
-          return done ? null : [...value];
+          return done ? null : value;
         }
         case "write":
-          await entry.process.writeStdin(new Uint8Array(command.bytes));
+          await entry.process.writeStdin(command.data);
           return null;
         case "close_input":
           await entry.process.closeStdin();
@@ -306,7 +310,7 @@ export class RuntimeIO {
       },
       startSandboxProcess: async (request) => {
         await sandbox.prepareCodex(codexVersion.trim());
-        return sandbox.startProcess(request);
+        return this.startHarnessProcess(r, request);
       },
       emitStream: async (
         event: Parameters<NonNullable<HarnessClient["emitStream"]>>[0],
@@ -332,22 +336,161 @@ export class RuntimeIO {
       mcp_servers: [],
       tools: [],
     });
-    const stop = () =>
-      this.ctx.waitUntil(this.env.SANDBOXES.getByName(r.sandbox_id).stop());
     signal.throwIfAborted();
-    signal.addEventListener("abort", stop, { once: true });
-    const timer = setTimeout(stop, 600_000);
-    try {
-      return await sandbox.runTurn(r.turn.id, async () => {
-        await initLingua(linguaWasm);
-        if (r.recovering) await this.codex.resumeTurn!(context);
-        else await this.codex.runTurn(context);
-        signal.throwIfAborted();
-        return {};
-      });
-    } finally {
-      clearTimeout(timer);
-      signal.removeEventListener("abort", stop);
-    }
+    return sandbox.runTurn(r.turn.id, async () => {
+      await initLingua(linguaWasm);
+      if (r.recovering) await this.codex.resumeTurn!(context);
+      else await this.codex.runTurn(context);
+      signal.throwIfAborted();
+      return {};
+    });
+  }
+
+  private async startHarnessProcess(
+    r: HarnessRequest,
+    request: SandboxProcessStartRequest,
+  ) {
+    const call = (request: RawExoRequest, signal?: AbortSignal) =>
+      this.runtime.requestExo(request, signal);
+    const scope = {
+      type: "thread" as const,
+      agent_id: r.agent_id,
+      thread_id: r.thread_id,
+    };
+    const response = await call({
+      type: "start_sandbox_process",
+      scope,
+      request: {
+        sandbox_id: r.sandbox_id,
+        command: request.command,
+        env: request.env ?? {},
+        cwd: null,
+        stdin: "open",
+        lifecycle: "attached",
+      },
+    });
+    if (response.type !== "sandbox_process")
+      throw new Error("expected sandbox process");
+    const started = response.process;
+    const identity = { sandbox_id: started.sandbox_id, process_id: started.id };
+    const abort = new AbortController();
+    const process = new SandboxProcessHandle(
+      {
+        writeStdin: async (data) => {
+          await call({
+            type: "write_sandbox_process_input",
+            scope,
+            request: { ...identity, data: new TextEncoder().encode(data) },
+          });
+        },
+        closeStdin: async () => {
+          await call({
+            type: "close_sandbox_process_input",
+            scope,
+            request: identity,
+          });
+        },
+        close: async () => {
+          await call({
+            type: "cancel_sandbox_process",
+            scope,
+            request: identity,
+          });
+          abort.abort();
+          process.handleEvent({
+            type: "sandbox_process_exit",
+            exit_code: null,
+          });
+        },
+      },
+      {
+        sandboxId: started.sandbox_id,
+        sandboxProcessId: started.id,
+        reused: false,
+      },
+    );
+    const read = async () => {
+      let cursor: number | null = null;
+      const decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
+      try {
+        while (!abort.signal.aborted) {
+          const response = await call(
+            {
+              type: "get_sandbox_process_events",
+              scope,
+              query: {
+                ...identity,
+                after: cursor,
+                limit: 100,
+                follow: true,
+              },
+            },
+            abort.signal,
+          );
+          if (response.type !== "sandbox_process_events")
+            throw new Error("expected sandbox process events");
+          const page = response.result;
+          cursor = page.cursor ?? cursor;
+          for (const event of page.events) {
+            if (event.type === "stdout" || event.type === "stderr") {
+              if (!(event.data instanceof Uint8Array))
+                throw new Error("expected binary process output from wasm");
+              process.handleEvent({
+                type: "sandbox_process_output",
+                stream: event.type,
+                data: decoders[event.type].decode(event.data, { stream: true }),
+              });
+            }
+          }
+          const terminal = page.events.find(
+            (event) => event.type !== "stdout" && event.type !== "stderr",
+          );
+          if (
+            !terminal &&
+            (page.status.type === "running" || page.events.length === 100)
+          )
+            continue;
+          for (const stream of ["stdout", "stderr"] as const) {
+            const data = decoders[stream].decode();
+            if (data)
+              process.handleEvent({
+                type: "sandbox_process_output",
+                stream,
+                data,
+              });
+          }
+          const failure =
+            terminal?.type === "error"
+              ? terminal.message
+              : page.status.type === "failed"
+                ? page.status.message
+                : undefined;
+          if (failure !== undefined)
+            process.handleEvent({
+              type: "sandbox_process_error",
+              message: failure,
+            });
+          else
+            process.handleEvent({
+              type: "sandbox_process_exit",
+              exit_code:
+                terminal?.type === "exit"
+                  ? terminal.exit_code
+                  : page.status.type === "exited"
+                    ? page.status.exit_code
+                    : null,
+            });
+          return;
+        }
+      } catch (error) {
+        if (!abort.signal.aborted)
+          process.handleEvent({
+            type: "sandbox_process_error",
+            message: error instanceof Error ? error.message : String(error),
+          });
+      }
+    };
+    this.ctx.waitUntil(read());
+    return process;
   }
 }

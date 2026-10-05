@@ -1,8 +1,5 @@
 import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
-import type {
-  SandboxProcess,
-  SandboxProcessStartRequest,
-} from "../../typescript/harness/index";
+import type { SandboxProcessStartRequest } from "../../typescript/harness/index";
 import codexPackage from "./codex-package.json";
 import type { Env, ExecRequest, ExecResult, SandboxIdentity } from "./env";
 
@@ -124,18 +121,6 @@ export class CloudflareSandbox {
 
   async prepareCodex(version: string): Promise<void> {
     await this.stub.prepareCodex(this.identity, version);
-  }
-
-  async startProcess(
-    request: SandboxProcessStartRequest,
-  ): Promise<SandboxProcess> {
-    const process = await this.openProcess(request);
-    return {
-      ...process,
-      stdout: process.stdout.pipeThrough(new TextDecoderStream()),
-      stderr: process.stderr.pipeThrough(new TextDecoderStream()),
-      writeStdin: (data) => process.writeStdin(new TextEncoder().encode(data)),
-    };
   }
 
   async openProcess(request: SandboxProcessStartRequest & { cwd?: string }) {
@@ -266,8 +251,8 @@ export class ExoSandbox extends DurableObject<Env> {
   private async scheduleIdle(): Promise<void> {
     if (!this.ctx.container?.running) return;
     await this.ctx.storage.setAlarm(Date.now() + this.idleMs);
-    // The alarm checkpoints before the platform's inactivity shutdown. During
-    // a turn, the runtime's ten-minute limit owns cancellation instead.
+    // The alarm checkpoints before the platform's inactivity shutdown.
+    // Active turns postpone the alarm; the Rust runtime owns cancellation.
     await this.ctx.container.setInactivityTimeout(this.idleMs + 60_000);
   }
 
