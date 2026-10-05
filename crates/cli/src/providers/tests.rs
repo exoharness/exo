@@ -127,6 +127,69 @@ async fn configure(store: &mut Store, args: &[&str]) -> Result<()> {
     run(command.as_ref(), store).await
 }
 
+#[tokio::test]
+async fn clear_removes_the_effective_directory_selection_before_the_global_selection() -> Result<()>
+{
+    let temp = tempfile::TempDir::new()?;
+    let mut store = store_with_profiles(temp.path())?;
+    let cwd = std::env::current_dir()?;
+    let parent = cwd.parent().unwrap().to_path_buf();
+    store.update(|config| {
+        config.default = Some("original".into());
+        config.default_context = Some(BTreeMap::from([("scope".into(), "global".into())]));
+        for directory in [&cwd, &parent] {
+            config
+                .directory_defaults
+                .insert(directory.clone(), "other".into());
+            config.directory_contexts.insert(
+                directory.clone(),
+                BTreeMap::from([("scope".into(), "directory".into())]),
+            );
+        }
+        Ok(())
+    })?;
+
+    configure(&mut store, &["clear"]).await?;
+    assert!(!store.config.directory_defaults.contains_key(&cwd));
+    assert!(!store.config.directory_contexts.contains_key(&cwd));
+    assert_eq!(store.config.default.as_deref(), Some("original"));
+    let selection = store.selected(None, None, None)?.unwrap();
+    assert_eq!(selection.name, "other");
+    assert!(matches!(selection.source, SelectionSource::Directory(path) if path == parent));
+
+    configure(&mut store, &["clear"]).await?;
+    assert!(store.config.directory_defaults.is_empty());
+    assert!(store.config.directory_contexts.is_empty());
+    assert_eq!(store.selected(None, None, None)?.unwrap().name, "original");
+
+    configure(&mut store, &["clear"]).await?;
+    assert!(store.config.default.is_none());
+    assert!(store.config.default_context.is_none());
+    assert!(store.selected(None, None, None)?.is_none());
+    assert_eq!(store.config.profiles.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_clear_scope_preserves_the_other_scope() -> Result<()> {
+    let temp = tempfile::TempDir::new()?;
+    let mut store = store_with_profiles(temp.path())?;
+    configure(&mut store, &["switch", "original"]).await?;
+    configure(&mut store, &["clear", "--local"]).await?;
+    assert_eq!(store.config.default.as_deref(), Some("original"));
+
+    configure(&mut store, &["switch", "other", "--local"]).await?;
+    configure(&mut store, &["clear", "--global"]).await?;
+    assert!(store.config.default.is_none());
+    assert_eq!(store.selected(None, None, None)?.unwrap().name, "other");
+    configure(&mut store, &["clear", "--local"]).await?;
+    assert!(store.selected(None, None, None)?.is_none());
+    assert!(
+        crate::Cli::try_parse_from(["exo", "provider", "clear", "--local", "--global"]).is_err()
+    );
+    Ok(())
+}
+
 #[test]
 fn aliases_pin_account_agent_and_provider_across_reload() -> Result<()> {
     let temp = tempfile::TempDir::new()?;
