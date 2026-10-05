@@ -51,8 +51,8 @@ pub(crate) enum Output {
     Http(crate::http::Response),
     Harness(executor::typescript_runtime::RuntimeResponsePayload),
     Exo(Box<exoharness::protocol::Response>),
-    Progress(Box<Option<exoharness::Event>>),
-    Events(exoharness::GetEventsResult),
+    // JSON/SSE byte fields must be arrays; host process I/O stays Uint8Array.
+    Json(serde_json::Value),
     Policy(std::collections::HashMap<String, String>),
     Headers(Vec<(String, String)>),
     Bool(bool),
@@ -91,7 +91,7 @@ pub(crate) async fn run(
             } else {
                 None
             };
-            Ok(Output::Progress(Box::new(progress)))
+            Ok(Output::Json(serde_json::to_value(progress)?))
         }
         Operation::Http { request } => Ok(Output::Http(
             crate::http::handle(&runtime, &host, &updates, request).await,
@@ -115,9 +115,9 @@ pub(crate) async fn run(
                 limit: Some(1000),
                 ..Default::default()
             };
-            Ok(Output::Events(
+            Ok(Output::Json(serde_json::to_value(
                 executor::managed_agents::service::wait_events(&service, &path, query).await?,
-            ))
+            )?))
         }
         Operation::SandboxPolicy { request } => {
             let _guard = updates.lock().await;

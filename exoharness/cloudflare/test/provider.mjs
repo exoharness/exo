@@ -722,6 +722,17 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   );
   await streaming.collect;
   streaming.cancel();
+  const processEvent = events.find(
+    (event) =>
+      event.data.type === "sandbox_process_event" &&
+      ["stdout", "stderr"].includes(event.data.event.type),
+  );
+  assert(processEvent, "process byte events must be persisted");
+  assert.deepEqual(
+    streaming.received.find((event) => event.id === processEvent.id),
+    processEvent,
+    "SSE byte fields must match the REST JSON representation",
+  );
   assert(
     streaming.received.some(
       (event) => event.data.type === "lingua_stream_chunk",
