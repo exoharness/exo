@@ -16,6 +16,9 @@ let modelRequests = 0;
 const fakeSandbox = `import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 ${fakeCodex}
 export class FakeSandbox extends DurableObject {
+  constructor(ctx, env) { super(ctx, env); this.processes = new Set(); }
+  async beginTurn(identity, turnId) { await this.ctx.storage.deleteAlarm(); }
+  async endTurn(turnId) { await this.ctx.storage.setAlarm(Date.now() + 300000); }
   async exec(identity, request) {
     const count = (await this.ctx.storage.get("count") ?? 0) + 1;
     await this.ctx.storage.put("count", count);
@@ -23,11 +26,23 @@ export class FakeSandbox extends DurableObject {
   }
   async count() { return await this.ctx.storage.get("count") ?? 0; }
   async startProcess() { return new FakeCodexProcess(this.ctx.storage); }
-  async runProcess(identity, request, ready) { const process = await this.startProcess(); await ready(new RpcStub(process)); await process.wait(); }
+  async runProcess(identity, request, ready) {
+    const process = await this.startProcess(); this.processes.add(process);
+    try { await ready(new RpcStub(process)); await process.wait(); }
+    finally { this.processes.delete(process); }
+  }
   async prepareCodex() {}
-  async snapshot() { return {id:"fixture-snapshot", size:1}; }
+  async waitForProcesses() { await Promise.all([...this.processes].map(p => p.wait())); }
+  async snapshot() {
+    await this.ctx.storage.put("snapshots", (await this.snapshotCount()) + 1);
+    return {id:"fixture-snapshot", size:1};
+  }
+  async snapshotCount() { return await this.ctx.storage.get("snapshots") ?? 0; }
+  async processCount() { return this.processes.size; }
   async lastMethod() { return await this.ctx.storage.get("last-method"); }
-  async stop() {}
+  async stop() { await Promise.all([...this.processes].map(p => p.close())); await this.snapshot(); }
+  async alarm() { await this.stop(); }
+  async expireIdleForTest() { await this.alarm(); }
 }
 export default { fetch() { return new Response("fixture"); } };`;
 
@@ -826,7 +841,7 @@ test("vault contents are encrypted at rest and origin rules cannot silently broa
   );
 });
 
-test("Codex uses JSONL over RPC streams, persists tools and resumes the native thread", async () => {
+test("Codex reuses its RPC process across turns and resumes after an idle checkpoint", async () => {
   const { thread, path } = await create(false, "codex");
   const first = await api(
     `${path}/turn`,
@@ -870,16 +885,17 @@ test("Codex uses JSONL over RPC streams, persists tools and resumes the native t
     !finished.some((event) => event.data.type === "error"),
     JSON.stringify(finished),
   );
-  assert.equal(
-    await sandbox.getByName(thread.id).lastMethod(),
-    "thread/resume",
-  );
+  assert.equal(await sandbox.getByName(thread.id).lastMethod(), "thread/start");
   const started = finished.find(
     (event) =>
       event.turn_id === second.turn.id &&
       event.data.event_type === "codex_turn_started",
   );
   assert.equal(started.data.payload.hydrated_from, "warm_codex_thread");
+  assert.equal(started.data.payload.warm_app_server_reused, true);
+  assert.equal(started.data.payload.warm_thread_reused, true);
+  assert.equal(await sandbox.getByName(thread.id).processCount(), 1);
+  assert.equal(await sandbox.getByName(thread.id).snapshotCount(), 0);
   for (const id of [first.turn.id, second.turn.id]) {
     const usage = finished.filter(
       (event) =>
@@ -895,6 +911,39 @@ test("Codex uses JSONL over RPC streams, persists tools and resumes the native t
       prompt_cached_tokens: 5,
     });
   }
+  await sandbox.getByName(thread.id).expireIdleForTest();
+  assert.equal(await sandbox.getByName(thread.id).snapshotCount(), 1);
+  assert.equal(await sandbox.getByName(thread.id).processCount(), 0);
+  const third = await api(
+    `${path}/turn`,
+    "POST",
+    { input: { role: "user", content: "resume after idle" } },
+    202,
+  );
+  const resumed = await waitEvents(path, (events) =>
+    events.some(
+      (event) =>
+        event.turn_id === third.turn.id && event.data.type === "turn_ended",
+    ),
+  );
+  assert(
+    !resumed.some((event) => event.data.type === "error"),
+    JSON.stringify(resumed),
+  );
+  const resumedStart = resumed.find(
+    (event) =>
+      event.turn_id === third.turn.id &&
+      event.data.event_type === "codex_turn_started",
+  );
+  assert.equal(resumedStart.data.payload.warm_app_server_reused, false);
+  assert.equal(resumedStart.data.payload.hydrated_from, "warm_codex_thread");
+  assert.equal(
+    await sandbox.getByName(thread.id).lastMethod(),
+    "thread/resume",
+  );
+  assert.equal(await sandbox.getByName(thread.id).snapshotCount(), 1);
+  assert.equal(await sandbox.getByName(thread.id).processCount(), 1);
+  await sandbox.getByName(thread.id).stop();
 });
 
 for (const name of Object.keys(harnessContracts)) {

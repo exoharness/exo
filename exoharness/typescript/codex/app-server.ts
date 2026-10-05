@@ -211,6 +211,10 @@ export class CodexAppServer {
     }
   }
 
+  get isRunning(): boolean {
+    return !this.closing && !this.finished;
+  }
+
   async close(): Promise<void> {
     this.closing = true;
     await this.transport.close();

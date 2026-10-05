@@ -58,7 +58,6 @@ export type HostRequest =
 
 export class RuntimeIO {
   private readonly codex = createCodexHarness(codexVersion.trim(), {
-    reuseSessions: false,
     sandboxEnv: { HOME: "/home/exo", CODEX_HOME: "/home/exo/.codex" },
   });
   constructor(
@@ -179,7 +178,7 @@ export class RuntimeIO {
     } satisfies SandboxPolicy);
     const append = (
       event_type: string,
-      payload: { text?: string; ttft_ms?: number; duration_ms?: number },
+      payload: { text?: string; ttft_ms?: number },
     ) =>
       harness.current.turn
         .addEvents([{ type: "custom", event_type, payload }])
@@ -209,16 +208,7 @@ export class RuntimeIO {
         await sandbox.prepareCodex(codexVersion.trim());
         const process = await sandbox.startProcess(request);
         await append("codex_process_started", {});
-        return {
-          ...process,
-          close: async () => {
-            const startedAt = Date.now();
-            await process.close();
-            await append("codex_process_closed", {
-              duration_ms: Date.now() - startedAt,
-            });
-          },
-        };
+        return process;
       },
       stream: {
         firstChunk: (ttft_ms) => append("codex_first_chunk", { ttft_ms }),
@@ -233,17 +223,13 @@ export class RuntimeIO {
     signal.addEventListener("abort", stop, { once: true });
     const timer = setTimeout(stop, 600_000);
     try {
-      await initLingua(linguaWasm);
-      if (r.recovering) await this.codex.resumeTurn!(context);
-      else await this.codex.runTurn(context);
-      signal.throwIfAborted();
-      // The harness closes Codex and flushes its history before this snapshot.
-      const snapshotStartedAt = Date.now();
-      await this.env.SANDBOXES.getByName(r.thread_id).snapshot(identity);
-      await append("codex_snapshot_completed", {
-        duration_ms: Date.now() - snapshotStartedAt,
+      return await sandbox.runTurn(r.turn.id, async () => {
+        await initLingua(linguaWasm);
+        if (r.recovering) await this.codex.resumeTurn!(context);
+        else await this.codex.runTurn(context);
+        signal.throwIfAborted();
+        return {};
       });
-      return {};
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", stop);

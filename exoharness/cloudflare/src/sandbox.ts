@@ -7,6 +7,7 @@ import codexPackage from "./codex-package.json";
 import type { Env, ExecRequest, ExecResult, SandboxIdentity } from "./env";
 
 const ca = "/etc/cloudflare/certs/cloudflare-containers-ca.crt";
+const idleTimeoutMs = 300_000;
 
 // The Worker downloads a pinned package over its trusted connection and pipes it
 // into the sandbox. Agent egress never gains access to the package registry.
@@ -39,6 +40,8 @@ export class CloudflareProcess extends RpcTarget {
   private readonly stderrPipe: ReadableStream<Uint8Array>;
   private readonly writer: WritableStreamDefaultWriter<Uint8Array>;
   private inputClosed = false;
+  private exited = false;
+  private closing?: Promise<void>;
 
   constructor(private readonly process: ExecProcess) {
     super();
@@ -67,9 +70,17 @@ export class CloudflareProcess extends RpcTarget {
     }
   }
   async close(): Promise<void> {
+    if (this.exited) return;
+    this.closing ??= this.terminate();
+    await this.closing;
+  }
+  private async terminate(): Promise<void> {
     await this.closeStdin();
+    if (this.exited) return;
     this.process.kill(15);
-    const timer = setTimeout(() => this.process.kill(9), 5000);
+    const timer = setTimeout(() => {
+      if (!this.exited) this.process.kill(9);
+    }, 5000);
     try {
       await this.process.exitCode;
     } finally {
@@ -77,7 +88,11 @@ export class CloudflareProcess extends RpcTarget {
     }
   }
   async wait(): Promise<number> {
-    return this.process.exitCode;
+    try {
+      return await this.process.exitCode;
+    } finally {
+      this.exited = true;
+    }
   }
 }
 
@@ -89,6 +104,19 @@ export class CloudflareSandbox {
     private readonly identity: SandboxIdentity,
     private readonly waitUntil: (promise: Promise<unknown>) => void,
   ) {}
+
+  async runTurn<T>(turnId: string, run: () => Promise<T>): Promise<T> {
+    await this.stub.beginTurn(this.identity, turnId);
+    try {
+      return await run();
+    } finally {
+      await this.stub.endTurn(turnId);
+      // Pending operations keep a Durable Object alive for at most 15 minutes
+      // from their start. Refresh both sides' keepalive after each turn so a
+      // long conversation can still use the full idle window.
+      this.waitUntil(this.stub.waitForProcesses());
+    }
+  }
 
   async prepareCodex(version: string): Promise<void> {
     await this.stub.prepareCodex(this.identity, version);
@@ -145,6 +173,44 @@ export class CloudflareSandbox {
 export class ExoSandbox extends DurableObject<Env> {
   private starting?: Promise<Container>;
   private installing?: Promise<void>;
+  private stopping?: Promise<void>;
+  private activeTurn: string | null = null;
+  private activeExecs = 0;
+  private readonly processes = new Set<CloudflareProcess>();
+
+  async beginTurn(identity: SandboxIdentity, turnId: string): Promise<void> {
+    this.activeTurn = turnId;
+    // A checkpoint may take longer than blockConcurrencyWhile's time limit.
+    // New work waits for that checkpoint before restarting the sandbox.
+    await this.stopping;
+    await this.ctx.storage.deleteAlarm();
+    await this.start(identity);
+  }
+
+  async endTurn(turnId: string): Promise<void> {
+    if (this.activeTurn !== turnId) return;
+    this.activeTurn = null;
+    await this.scheduleIdle();
+  }
+
+  private async scheduleIdle(): Promise<void> {
+    if (!this.ctx.container?.running) return;
+    await this.ctx.storage.setAlarm(Date.now() + idleTimeoutMs);
+    // The alarm checkpoints before the platform's inactivity shutdown. During
+    // a turn, the runtime's ten-minute limit owns cancellation instead.
+    await this.ctx.container.setInactivityTimeout(idleTimeoutMs + 60_000);
+  }
+
+  async alarm(): Promise<void> {
+    const scheduled = await this.ctx.storage.getAlarm();
+    if (
+      this.activeTurn !== null ||
+      this.activeExecs > 0 ||
+      (scheduled !== null && scheduled > Date.now())
+    )
+      return;
+    await this.stop();
+  }
 
   private async start(identity: SandboxIdentity): Promise<Container> {
     const saved = await this.ctx.storage.get<SandboxIdentity>("identity");
@@ -180,11 +246,29 @@ export class ExoSandbox extends DurableObject<Env> {
           `sandbox setup failed (${setupOutput.exitCode}): ${new TextDecoder().decode(setupOutput.stderr)}`,
         );
     }
-    await container.setInactivityTimeout(300_000);
+    await container.setInactivityTimeout(
+      this.activeTurn === null ? idleTimeoutMs + 60_000 : 660_000,
+    );
     return container;
   }
 
   async exec(
+    identity: SandboxIdentity,
+    request: ExecRequest,
+  ): Promise<ExecResult> {
+    this.activeExecs++;
+    try {
+      await this.stopping;
+      await this.ctx.storage.deleteAlarm();
+      return await this.execCommand(identity, request);
+    } finally {
+      this.activeExecs--;
+      if (this.activeTurn === null && this.activeExecs === 0)
+        await this.scheduleIdle();
+    }
+  }
+
+  private async execCommand(
     identity: SandboxIdentity,
     request: ExecRequest,
   ): Promise<ExecResult> {
@@ -338,18 +422,52 @@ export class ExoSandbox extends DurableObject<Env> {
     // Native exec handles belong to the invocation that created them. Keep it
     // alive while the caller consumes the pipes and controls the RPC target.
     const process = await this.startProcess(identity, request);
-    await ready(new RpcStub(process));
-    await process.wait();
+    this.processes.add(process);
+    try {
+      await ready(new RpcStub(process));
+      await process.wait();
+    } finally {
+      this.processes.delete(process);
+    }
+  }
+
+  async waitForProcesses(): Promise<void> {
+    await Promise.all([...this.processes].map((process) => process.wait()));
   }
 
   async snapshot(identity: SandboxIdentity): Promise<ContainerSnapshot> {
-    const container = await this.start(identity);
-    const snapshot = await container.snapshotContainer();
-    await this.ctx.storage.put("snapshot", snapshot);
-    return snapshot;
+    this.activeExecs++;
+    try {
+      await this.stopping;
+      await this.ctx.storage.deleteAlarm();
+      const container = await this.start(identity);
+      const snapshot = await container.snapshotContainer();
+      await this.ctx.storage.put("snapshot", snapshot);
+      return snapshot;
+    } finally {
+      this.activeExecs--;
+      if (this.activeTurn === null && this.activeExecs === 0)
+        await this.scheduleIdle();
+    }
   }
 
   async stop(): Promise<void> {
-    if (this.ctx.container) await this.ctx.container.destroy();
+    this.activeTurn = null;
+    this.stopping ??= this.checkpointAndStop().finally(() => {
+      this.stopping = undefined;
+    });
+    await this.stopping;
+  }
+
+  private async checkpointAndStop(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+    const container = this.ctx.container;
+    if (!container?.running) return;
+    // End the process session before saving its filesystem, so Codex's
+    // history is flushed. Turns do not wait for either operation.
+    await Promise.all([...this.processes].map((process) => process.close()));
+    const snapshot = await container.snapshotContainer();
+    await this.ctx.storage.put("snapshot", snapshot);
+    await container.destroy();
   }
 }

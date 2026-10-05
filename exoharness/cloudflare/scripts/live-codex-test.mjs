@@ -24,7 +24,7 @@ async function exec(path, source) {
   assert.equal(result.exitCode, 0, result.stderr);
   return result.stdout.trim();
 }
-const source = `---\nname: Cloudflare Codex Test\nharness: codex\nconfig:\n  model: ${process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol"}\n  credential: OPENAI_API_KEY\n---\nYou are a coding agent. Work in /workspace. Implement the requested changes and run node tests. Keep the final answer concise.`;
+const source = `---\nname: Cloudflare Codex Test\nharness: codex\nconfig:\n  model: ${process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol"}\n  credential: openai\n---\nYou are a coding agent. Work in /workspace. Implement the requested changes and run node tests. Keep the final answer concise.`;
 const agent = await api("agent", "POST", {
   slug: `cloudflare-codex-${Date.now()}`,
   name: "Cloudflare Codex Test",
@@ -101,10 +101,8 @@ async function turn(content) {
       duration_ms:
         Date.parse(markers.get("turn_ended").created_at) -
         Date.parse(markers.get("turn_started").created_at),
-      shutdown_ms: markers.get("codex_process_closed")?.data.payload
-        .duration_ms,
-      snapshot_ms: markers.get("codex_snapshot_completed")?.data.payload
-        .duration_ms,
+      warm_app_server_reused: started.data.payload.warm_app_server_reused,
+      warm_thread_reused: started.data.payload.warm_thread_reused,
       usage: usage[0],
     }),
   );
@@ -146,6 +144,26 @@ try {
   checks.push(
     "Codex receives only a placeholder; unauthorized HTTPS remains blocked",
   );
+  const warm = await turn(
+    "Run node --test sum.test.mjs again. Include the phase tag from our conversation in your final answer. Do not use any network tools.",
+  );
+  assert.equal(warm.nativeThread, first.nativeThread);
+  const warmStart = warm.events.find(
+    (event) => event.data.event_type === "codex_turn_started",
+  );
+  assert.equal(warmStart.data.payload.warm_app_server_reused, true);
+  assert.equal(warmStart.data.payload.warm_thread_reused, true);
+  assert(
+    !warm.events.some((event) =>
+      ["codex_process_start_requested", "codex_snapshot_completed"].includes(
+        event.data.event_type,
+      ),
+    ),
+    "warm turn started another process or snapshotted the sandbox",
+  );
+  checks.push(
+    "consecutive turns reuse the live Codex process and native thread",
+  );
   await api(`${path}/sandbox/stop`, "POST", {});
   const second = await turn(
     "Add a fourth test for decimal inputs to the existing sum.test.mjs. Run the tests. In your final answer, include the phase tag I gave you in our earlier message. Do not use any network tools.",
@@ -170,7 +188,7 @@ try {
   assert.equal(tests.exitCode, 0, tests.stderr);
   assert.match(tests.stdout, /tests 4/);
   checks.push(
-    "automatic snapshot restores workspace and native Codex history after sandbox destruction; resumed usage is reported and follow-up changes pass four tests",
+    "session-end checkpoint restores workspace and native Codex history after sandbox destruction; resumed usage is reported and follow-up changes pass four tests",
   );
   for (const check of checks) console.log(`PASS ${check}`);
 } finally {

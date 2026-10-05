@@ -55,17 +55,13 @@ async function put(name, value, origin) {
   }
   return api(`vault/${vault.id}/secret`, "POST", { name, ...body });
 }
-await put(
-  "OPENAI_API_KEY",
-  process.env.OPENAI_API_KEY,
-  "https://api.openai.com",
-);
+await put("openai", process.env.OPENAI_API_KEY, "https://api.openai.com");
 const probeId = await put(
   "LIVE_PROBE",
   process.env.PROBE_KEY,
   new URL(base).origin,
 );
-const source = `---\nname: Cloudflare Live Test\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: OPENAI_API_KEY\n  max_tool_round_trips: 3\n  max_output_tokens: 1024\n---\nUse the shell tool to read /workspace/persisted.txt. Reply with the exact contents. Do not claim you read a file without using shell.`;
+const source = `---\nname: Cloudflare Live Test\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: openai\n  max_tool_round_trips: 3\n  max_output_tokens: 1024\n---\nUse the shell tool to read /workspace/persisted.txt. Reply with the exact contents. Do not claim you read a file without using shell.`;
 const agent = await api("agent", "POST", {
   slug: `cloudflare-live-${Date.now()}`,
   name: "Cloudflare Live Test",

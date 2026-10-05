@@ -427,8 +427,10 @@ export function createCodexHarness(
         warm_session_key: sessionKey,
       },
       () =>
-        codexSessions.get(sessionKey, () =>
-          CodexWarmSession.start(scope, sessionKey),
+        codexSessions.get(
+          sessionKey,
+          () => CodexWarmSession.start(scope, sessionKey),
+          (session) => session.server.isRunning,
         ),
     );
     session.setTurnScope(scope);

@@ -89,10 +89,13 @@ export class WarmResourceCache<T> {
   async get(
     key: string,
     create: () => Promise<T>,
+    isValid: (resource: T) => boolean = () => true,
   ): Promise<{ resource: T; reused: boolean }> {
     const existing = this.entries.get(key);
     if (existing) {
-      return { resource: await existing, reused: true };
+      const resource = await existing;
+      if (isValid(resource)) return { resource, reused: true };
+      this.entries.delete(key);
     }
 
     const created = create().catch((error: unknown) => {
