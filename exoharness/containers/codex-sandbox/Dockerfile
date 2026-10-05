@@ -15,6 +15,7 @@ RUN apt-get update \
         git \
         openssh-client \
         ripgrep \
+        sudo \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "@openai/codex@$(cat /tmp/codex-version)" && rm /tmp/codex-version
@@ -27,8 +28,15 @@ RUN if [ "$DEVBOX_TOOLS" = true ]; then \
         && npm install -g pnpm@10.26.2 typescript@5.9.3 tsx@4.21.0; \
     fi
 
-RUN mkdir -p /home/exo/.codex /home/exo/workspace
+RUN groupadd --gid 10001 exo \
+    && useradd --uid 10001 --gid exo --create-home --shell /bin/bash exo \
+    && printf 'exo ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/exo \
+    && chmod 0440 /etc/sudoers.d/exo \
+    && mkdir -p /home/exo/.codex /home/exo/workspace \
+    && chown -R exo:exo /home/exo
 
 WORKDIR /home/exo/workspace
+
+USER exo
 
 CMD ["bash"]

@@ -4061,10 +4061,14 @@ fn spawn_jailed_firecracker(
         record
             .runtime
             .memory_mib
-            .checked_add(256)
+            .checked_add(1024)
             .context("Firecracker cgroup memory limit overflow")?,
     ) * 1024
         * 1024;
+    // Guest RAM is anonymous memory in the VMM. Block-device page cache and
+    // kernel allocations also count against this cgroup. Start reclaim before
+    // the hard limit, with room for disk writeback to complete at full guest RAM.
+    let memory_high = (u64::from(record.runtime.memory_mib) + 256) * 1024 * 1024;
     let cpu_max = format!("{} 100000", u32::from(record.runtime.vcpu_count) * 100_000);
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
@@ -4092,6 +4096,8 @@ fn spawn_jailed_firecracker(
         .arg("2")
         .arg("--cgroup")
         .arg(format!("memory.max={memory_max}"))
+        .arg("--cgroup")
+        .arg(format!("memory.high={memory_high}"))
         .arg("--cgroup")
         .arg(format!("cpu.max={cpu_max}"));
     // The API socket path is injected here, next to the constant that

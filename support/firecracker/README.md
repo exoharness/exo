@@ -49,9 +49,10 @@ use Docker or containerd, and the host never mounts or executes image content.
 Every manifest, config, and layer blob is verified against its sha256 digest
 before use; downloads and layer decompression are held to budgets derived from
 the configured image size, so a malicious image cannot exhaust host disk.
-setuid/setgid bits and xattrs (including `security.capability`) are stripped
-during extraction. Images are cached by immutable manifest-list digest and
-platform under `EXO_FIRECRACKER_STATE_ROOT/images/v4`. After the first
+Setuid/setgid bits are preserved so guest tools such as `sudo` work. Xattrs,
+including `security.capability`, are not extracted on the host. Images are
+cached by immutable manifest-list digest and platform under
+`EXO_FIRECRACKER_STATE_ROOT/images/v6`. After the first
 materialization, a digest-pinned OCI reference reaches this cache without a
 registry request. Tag references resolve through the registry over HTTPS and
 then cache by the returned digest; the first resolution of a tag trusts
@@ -69,10 +70,11 @@ Most ordinary Linux container images work, subject to these constraints:
   `ENTRYPOINT`, `CMD`, `USER`, environment, and working-directory metadata are
   not applied; commands and their environment are supplied through the sandbox
   API instead.
-- Workload processes run as UID/GID 10001 with `no_new_privs`. Images whose
-  programs or data are only accessible to root, or which require privileged
-  container operations, must be adapted. Exo also strips setuid/setgid bits,
-  xattrs, and file capabilities while materializing the image.
+- Workload processes start as UID/GID 10001. Guest privilege elevation is
+  allowed; the generic Codex image provides the `exo` user and passwordless
+  `sudo`. Package installation and Docker run inside the guest. Other images
+  must provide their own user and privilege elevation tools. Xattrs and file
+  capabilities are not extracted while materializing the image.
 - `sandbox connect` requires the selected shell to exist in the image. It uses
   `/bin/bash` by default; pass `--shell /bin/sh` for smaller images. Distroless
   and `scratch` images can still be used with `sandbox exec` when you name an
@@ -106,8 +108,14 @@ initramfs. It mounts the immutable base and sparse upper with OverlayFS, mounts
 the pseudo filesystems, configures the guest network, mounts an optional
 workspace, reaps orphaned descendants like an init should, and serves the
 bounded process protocol only to the host vsock CID. Every workload child
-clears supplementary groups and irreversibly drops to UID/GID 10001 with
-`no_new_privs`, and all image content is mounted `nosuid,nodev`. OCI images do
+clears supplementary groups and starts as UID/GID 10001. The root filesystem
+permits setuid tools; repository resource mounts remain `nosuid,nodev`.
+Cgroup v2 and a writable `/dev/shm` tmpfs are mounted inside the guest.
+Standard `/dev/fd` and stdio links are provided. Boot moves the
+merged filesystem over the initramfs root so container exec joins the correct
+mount namespace. The guest also gets a hostname and localhost mappings.
+The host cgroup allows 1 GiB above guest RAM for VMM, kernel, and block-device
+cache memory, with reclaim starting at guest RAM plus 256 MiB. OCI images do
 not need Python, a shell, `ip`, `mount`, `setpriv`, or other boot-time
 utilities.
 
@@ -222,8 +230,8 @@ credentials, local directory imports, and thread cleanup.
 
 ## Security model
 
-Isolation is layered rather than resting on one wall. The workload runs as an
-unprivileged user under `no_new_privs` inside the guest; the guest is contained
+Workloads can become root inside the guest. The isolation boundary is the VM:
+the guest is contained
 by KVM's hardware boundary; the VMM runs under Firecracker's default seccomp
 filters inside a jailer chroot with a unique unprivileged UID per VM, its own
 PID namespace, network namespace, and cgroup v2 CPU/memory limits; and the

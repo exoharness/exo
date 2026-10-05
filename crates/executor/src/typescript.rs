@@ -181,9 +181,19 @@ where
         }
 
         let key = format!("{}:{}", turn.conversation.record().id, module_path);
-        let runner = self
+        let mut runner = self
             .runner(&key, &module_path, Arc::clone(&turn.conversation))
             .await?;
+        let processes_running = runner.lock().await.reusable_processes_are_running().await?;
+        if !processes_running {
+            self.remove_runner(&key, &runner).await;
+            if let Err(error) = runner.lock().await.shutdown().await {
+                tracing::debug!(%error, "retired TypeScript runner after its sandbox process stopped");
+            }
+            runner = self
+                .runner(&key, &module_path, Arc::clone(&turn.conversation))
+                .await?;
+        }
         let result = {
             let mut runner = runner.lock().await;
             runner.execute_turn(self, turn).await
@@ -298,6 +308,7 @@ struct RunningSandboxProcess {
     sandbox_id: SandboxId,
     process_id: SandboxProcessId,
     event_task: JoinHandle<()>,
+    reusable: bool,
 }
 
 const TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT: &str = "typescript_sandbox_process_reuse";
@@ -322,6 +333,48 @@ struct TypeScriptTurn<'a> {
 }
 
 impl TypeScriptRunnerProcess {
+    async fn reusable_processes_are_running(&self) -> Result<bool> {
+        if !self
+            .sandbox_processes
+            .values()
+            .any(|process| process.reusable)
+        {
+            return Ok(true);
+        }
+        let sandboxes = self.thread.list_sandboxes().await?;
+        for process in self
+            .sandbox_processes
+            .values()
+            .filter(|process| process.reusable)
+        {
+            if !sandboxes
+                .iter()
+                .any(|sandbox| sandbox.id == process.sandbox_id && sandbox.running)
+            {
+                return Ok(false);
+            }
+            let status = self
+                .thread
+                .get_sandbox_process_events(SandboxProcessEventQuery {
+                    sandbox_id: process.sandbox_id.clone(),
+                    process_id: process.process_id.clone(),
+                    after: None,
+                    limit: Some(1),
+                    follow: Some(false),
+                })
+                .await;
+            match status {
+                Ok(status) if status.status.is_running() => {}
+                Ok(_) => return Ok(false),
+                Err(error) => {
+                    tracing::debug!(%error, "cached sandbox process is unavailable");
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
     async fn shutdown(&mut self) -> Result<()> {
         let child_result = self.child.kill().await;
         let processes = std::mem::take(&mut self.sandbox_processes);
@@ -692,6 +745,7 @@ impl TypeScriptRunnerProcess {
     {
         let sandbox_id =
             ensure_shell_sandbox(conversation, agent_config, conversation_config).await?;
+        let reusable = reuse_key.is_some();
         let reusable_process = match reuse_key.as_deref() {
             Some(reuse_key) => {
                 reusable_sandbox_process(conversation, reuse_key, &sandbox_id).await?
@@ -755,6 +809,7 @@ impl TypeScriptRunnerProcess {
                 sandbox_id: sandbox_id.clone(),
                 process_id: sandbox_process_id.clone(),
                 event_task,
+                reusable,
             },
         );
 
@@ -1369,6 +1424,189 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use super::*;
+
+    struct CachedRunnerTest {
+        runtime: crate::Runtime,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ConversationHandle>,
+        config: AgentConfig,
+        _temp: tempfile::TempDir,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RunnerOutput {
+        turn: u32,
+        sandbox_id: SandboxId,
+        process_id: SandboxProcessId,
+    }
+
+    impl CachedRunnerTest {
+        async fn new() -> Result<Self> {
+            use crate::{
+                BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config,
+            };
+            use exoharness::{BasicExoHarness, NewAgentRequest};
+
+            let temp = tempfile::TempDir::new()?;
+            let module = temp.path().join("cached-process.mjs");
+            std::fs::write(
+                &module,
+                r#"
+let process;
+let reader;
+let turns = 0;
+export default {
+  async runTurn(context) {
+    if (!process) {
+      process = await context.startSandboxProcess({
+        command: ["/bin/sh", "-c", "while read line; do echo $line; done"],
+        reuseKey: "warm-test"
+      });
+      reader = process.stdout.getReader();
+    }
+    await process.writeStdin("ping\n");
+    const reply = await reader.read();
+    if (!reply.value?.includes("ping")) throw new Error("missing process reply");
+    await context.stream.text(JSON.stringify({
+      turn: ++turns,
+      sandbox_id: process.sandboxId,
+      process_id: process.sandboxProcessId
+    }));
+  }
+};
+"#,
+            )?;
+            let state =
+                Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+            let agent = state
+                .new_agent(NewAgentRequest {
+                    slug: "cached-runner".into(),
+                    name: "Cached runner".into(),
+                    vaults: vec![],
+                })
+                .await?;
+            let thread = agent.new_conversation(Default::default()).await?;
+            let config = serde_json::from_value(serde_json::json!({
+                "instructions": [], "harness": "typescript",
+                "typescript": { "module_path": module },
+                "sandbox": { "provider": "local_process" },
+                "model": "gpt-5-mini"
+            }))?;
+            let runtime = Runtime::new(
+                LocalProvider::typescript(
+                    state,
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                    HashMap::new(),
+                    Arc::new(BasicToolRuntime),
+                ),
+                None,
+            );
+            Ok(Self {
+                runtime,
+                agent,
+                thread,
+                config,
+                _temp: temp,
+            })
+        }
+
+        async fn turn(&self) -> Result<RunnerOutput> {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let (_, mut stream) = self
+                    .runtime
+                    .start_turn(
+                        self.agent.clone(),
+                        self.thread.clone(),
+                        SendRequest {
+                            input: vec![],
+                            session_id: None,
+                        },
+                        true,
+                        Some(self.config.clone()),
+                    )
+                    .await?;
+                let mut output = String::new();
+                let mut completed = false;
+                while let Some(event) = stream.next().await {
+                    match event? {
+                        ExecutionStreamEvent::Chunk(chunk) => {
+                            for choice in chunk.choices {
+                                if let Some(content) =
+                                    choice.delta_view().and_then(|delta| delta.content)
+                                {
+                                    output.push_str(&content);
+                                }
+                            }
+                        }
+                        ExecutionStreamEvent::Completed(_) => completed = true,
+                        _ => {}
+                    }
+                }
+                anyhow::ensure!(completed, "cached runner turn did not complete");
+                Ok(serde_json::from_str(&output)?)
+            })
+            .await?
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_runner_reuses_live_process() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        let second = test.turn().await?;
+
+        assert_eq!((first.turn, second.turn), (1, 2));
+        assert_eq!(second.sandbox_id, first.sandbox_id);
+        assert_eq!(second.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn cached_runner_restarts_after_process_exit() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        test.thread
+            .cancel_sandbox_process(CancelSandboxProcessRequest {
+                sandbox_id: first.sandbox_id.clone(),
+                process_id: first.process_id.clone(),
+                signal: None,
+            })
+            .await?;
+        let resumed = test.turn().await?;
+
+        assert_eq!(resumed.turn, 1);
+        assert_eq!(resumed.sandbox_id, first.sandbox_id);
+        assert_ne!(resumed.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn cached_runner_restarts_after_sandbox_stop() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        test.thread.stop_sandbox(first.sandbox_id.clone()).await?;
+        let resumed = test.turn().await?;
+
+        assert_eq!(resumed.turn, 1);
+        assert_eq!(resumed.sandbox_id, first.sandbox_id);
+        assert_ne!(resumed.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn cached_runner_restarts_after_sandbox_replacement() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        test.thread
+            .terminate_sandbox(first.sandbox_id.clone())
+            .await?;
+        let resumed = test.turn().await?;
+
+        assert_eq!(resumed.turn, 1);
+        assert_ne!(resumed.sandbox_id, first.sandbox_id);
+        assert_ne!(resumed.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
 
     #[tokio::test]
     async fn recovery_calls_typescript_resume_turn_instead_of_run_turn() -> Result<()> {

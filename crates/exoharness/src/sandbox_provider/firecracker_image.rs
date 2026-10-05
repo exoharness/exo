@@ -32,7 +32,7 @@ use tempfile::{Builder as TempBuilder, NamedTempFile};
 use tokio::io::AsyncWriteExt;
 use tracing::Instrument;
 
-const MATERIALIZER_VERSION: u32 = 5;
+const MATERIALIZER_VERSION: u32 = 6;
 const EXT4_MAGIC_OFFSET: u64 = 1024 + 0x38;
 const EXT4_MAGIC: [u8; 2] = [0x53, 0xef];
 const GUEST_UID: u32 = 10_001;
@@ -875,9 +875,8 @@ fn apply_layer(rootfs: &Path, layer: &CachedLayer, decompressed_budget: u64) -> 
     archive.set_preserve_permissions(true);
     archive.set_preserve_ownerships(true);
     archive.set_preserve_mtime(true);
-    // Do not materialize xattrs: extraction runs as root, and an image-supplied
-    // security.capability xattr would otherwise grant file capabilities that
-    // only the guest's nosuid mounts keep inert.
+    // File capabilities are not materialized on the host. Guest-root access
+    // uses ordinary setuid binaries such as sudo inside the VM.
     archive.set_unpack_xattrs(false);
     archive.set_overwrite(true);
     // The byte budget alone does not bound inodes: tar headers are 512 bytes,
@@ -910,23 +909,11 @@ fn apply_layer(rootfs: &Path, layer: &CachedLayer, decompressed_budget: u64) -> 
                 path.display()
             );
         }
-        let mode = entry.header().mode()?;
         if !entry.unpack_in(rootfs)? {
             bail!(
                 "OCI layer entry escapes the root filesystem: {}",
                 path.display()
             );
-        }
-        // Image content is untrusted, so setuid/setgid never survive into the
-        // filesystem. Guest workloads run with no_new_privs on nosuid mounts,
-        // which makes these bits unusable anyway; stripping them here keeps
-        // that true even if a future mount option changes.
-        if mode & 0o6000 != 0 && (entry_type.is_file() || entry_type.is_dir()) {
-            let target = rootfs.join(&path);
-            let metadata = fs::symlink_metadata(&target)?;
-            if !metadata.file_type().is_symlink() {
-                fs::set_permissions(&target, Permissions::from_mode(metadata.mode() & 0o1777))?;
-            }
         }
     }
     Ok(())
@@ -1642,7 +1629,7 @@ mod tests {
     }
 
     #[test]
-    fn setuid_and_setgid_bits_are_stripped_from_layers() {
+    fn setuid_and_setgid_bits_survive_for_guest_privilege_elevation() {
         let directory = tempfile::tempdir().unwrap();
         let rootfs = directory.path().join("rootfs");
         fs::create_dir(&rootfs).unwrap();
@@ -1650,7 +1637,7 @@ mod tests {
         let mut builder = Builder::new(Vec::new());
         append_file_with_mode(
             &mut builder,
-            "bin/backdoor",
+            "bin/sudo",
             b"#!/bin/sh",
             u64::from(metadata.uid()),
             u64::from(metadata.gid()),
@@ -1673,10 +1660,10 @@ mod tests {
         };
 
         apply_layer(&rootfs, &layer, TEST_LAYER_BUDGET).unwrap();
-        let suid_mode = fs::metadata(rootfs.join("bin/backdoor")).unwrap().mode();
+        let suid_mode = fs::metadata(rootfs.join("bin/sudo")).unwrap().mode();
         let sgid_mode = fs::metadata(rootfs.join("bin/sgid")).unwrap().mode();
-        assert_eq!(suid_mode & 0o7777, 0o755, "setuid bit must be stripped");
-        assert_eq!(sgid_mode & 0o7777, 0o755, "setgid bit must be stripped");
+        assert_eq!(suid_mode & 0o7777, 0o4755);
+        assert_eq!(sgid_mode & 0o7777, 0o2755);
     }
 
     #[test]

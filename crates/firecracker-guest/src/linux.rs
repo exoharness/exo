@@ -644,7 +644,7 @@ fn command(argv: &[String], cwd: &str, env: &HashMap<String, String>) -> Command
     let mut command = base_command(argv, cwd, env);
     command.process_group(0);
     unsafe {
-        command.pre_exec(drop_command_privileges);
+        command.pre_exec(set_command_user);
     }
     command
 }
@@ -659,7 +659,7 @@ fn terminal_command(argv: &[String], cwd: &str, env: &HashMap<String, String>) -
             if libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            drop_command_privileges()
+            set_command_user()
         });
     }
     command
@@ -679,7 +679,7 @@ fn base_command(argv: &[String], cwd: &str, env: &HashMap<String, String>) -> Co
     command
 }
 
-fn drop_command_privileges() -> std::io::Result<()> {
+fn set_command_user() -> std::io::Result<()> {
     if unsafe { libc::setgroups(0, ptr::null()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -687,9 +687,6 @@ fn drop_command_privileges() -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     if unsafe { libc::setresuid(GUEST_UID, GUEST_UID, GUEST_UID) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
@@ -1000,6 +997,7 @@ fn initialize_guest() -> Result<(), String> {
     mount_pseudo_filesystems()?;
     let command_line = fs::read_to_string("/proc/cmdline").map_err(|error| error.to_string())?;
     setup_root_overlay()?;
+    configure_hostname()?;
     configure_network(&command_line)?;
     let workspace = command_line_value(&command_line, "exo_workdir")
         .unwrap_or_else(|| "/home/exo/workspace".to_string());
@@ -1051,14 +1049,14 @@ fn setup_root_overlay() -> Result<(), String> {
         Some("/dev/vda"),
         "/mnt/lower",
         Some("ext4"),
-        libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+        libc::MS_RDONLY | libc::MS_NODEV,
         None,
     )?;
     mount_filesystem(
         Some("/dev/vdb"),
         "/mnt/upper",
         Some("ext4"),
-        libc::MS_NOSUID | libc::MS_NODEV,
+        libc::MS_NODEV,
         None,
     )?;
     for path in ["/mnt/upper/upper", "/mnt/upper/work"] {
@@ -1068,7 +1066,7 @@ fn setup_root_overlay() -> Result<(), String> {
         Some("overlay"),
         "/mnt/newroot",
         Some("overlay"),
-        libc::MS_NOSUID | libc::MS_NODEV,
+        libc::MS_NODEV,
         Some("lowerdir=/mnt/lower,upperdir=/mnt/upper/upper,workdir=/mnt/upper/work"),
     )?;
     for path in ["proc", "sys", "dev"] {
@@ -1078,11 +1076,16 @@ fn setup_root_overlay() -> Result<(), String> {
             Some(&format!("/{path}")),
             &target,
             None,
-            libc::MS_BIND | libc::MS_REC,
+            libc::MS_MOVE,
             None,
         )?;
     }
-    let newroot = c_string("/mnt/newroot")?;
+    // A chroot alone leaves the mount namespace rooted in the initramfs.
+    // Container runtimes join that namespace for exec and would see the wrong
+    // root. Move the merged mount over / before changing the process root.
+    std::env::set_current_dir("/mnt/newroot").map_err(|error| error.to_string())?;
+    mount_filesystem(Some("."), "/", None, libc::MS_MOVE, None)?;
+    let newroot = c_string(".")?;
     if unsafe { libc::chroot(newroot.as_ptr()) } != 0 {
         return Err(format!(
             "switching to merged root filesystem: {}",
@@ -1090,6 +1093,23 @@ fn setup_root_overlay() -> Result<(), String> {
         ));
     }
     std::env::set_current_dir("/").map_err(|error| error.to_string())
+}
+
+fn configure_hostname() -> Result<(), String> {
+    let hostname = b"exo";
+    if unsafe { libc::sethostname(hostname.as_ptr().cast(), hostname.len()) } != 0 {
+        return Err(format!(
+            "setting guest hostname: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    fs::create_dir_all("/etc").map_err(|error| error.to_string())?;
+    fs::write("/etc/hostname", "exo\n").map_err(|error| error.to_string())?;
+    fs::write(
+        "/etc/hosts",
+        "127.0.0.1 localhost exo\n::1 localhost ip6-localhost ip6-loopback\n",
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn wait_for_device(path: &str) -> Result<(), String> {
@@ -1121,6 +1141,14 @@ fn mount_pseudo_filesystems() -> Result<(), String> {
         libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
         None,
     )?;
+    fs::create_dir_all("/sys/fs/cgroup").map_err(|error| error.to_string())?;
+    mount_filesystem(
+        Some("cgroup2"),
+        "/sys/fs/cgroup",
+        Some("cgroup2"),
+        libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV,
+        None,
+    )?;
     mount_filesystem(
         Some("devtmpfs"),
         "/dev",
@@ -1136,6 +1164,23 @@ fn mount_pseudo_filesystems() -> Result<(), String> {
         libc::MS_NOSUID | libc::MS_NOEXEC,
         Some("mode=0620,ptmxmode=0666"),
     )?;
+    fs::create_dir_all("/dev/shm").map_err(|error| error.to_string())?;
+    mount_filesystem(
+        Some("tmpfs"),
+        "/dev/shm",
+        Some("tmpfs"),
+        libc::MS_NOSUID | libc::MS_NODEV,
+        Some("mode=1777"),
+    )?;
+    for (name, target) in [
+        ("fd", "/proc/self/fd"),
+        ("stdin", "/proc/self/fd/0"),
+        ("stdout", "/proc/self/fd/1"),
+        ("stderr", "/proc/self/fd/2"),
+    ] {
+        std::os::unix::fs::symlink(target, format!("/dev/{name}"))
+            .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
