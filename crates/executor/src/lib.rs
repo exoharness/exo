@@ -24,13 +24,15 @@ mod model_execution;
 pub mod permissions;
 mod provider;
 pub mod runtime_host;
+pub mod sandbox_policy;
 mod shared;
 
 pub use executor_types::{
     AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig, ConversationModelConfig,
     ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult, ToolDefinition,
-    ToolRuntime, TypeScriptHarnessConfig, effective_sandbox_scope,
+    ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult,
+    ShellToolArguments, ShellToolResult, ToolDefinition, ToolRuntime, TypeScriptHarnessConfig,
+    effective_sandbox_scope,
 };
 pub use exo_managed_agents::{BraintrustProject, BraintrustTracingConfig};
 

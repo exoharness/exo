@@ -14,3 +14,7 @@ pub struct NativeMcpTool {
     pub name: String,
     pub exposed_name: String,
 }
+
+pub(crate) fn credential_variable(id: &exoharness::SecretId) -> String {
+    format!("EXO_MCP_{}", id.to_string().replace('-', "_"))
+}

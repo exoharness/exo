@@ -5,7 +5,7 @@ import type {
   Message,
   PermissionPolicy,
   SendRequest,
-} from "./core";
+} from "./index";
 
 export interface RawAgentConfig {
   instructions: Message[];

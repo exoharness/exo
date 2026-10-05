@@ -1,9 +1,6 @@
 pub mod http;
 pub mod mcp;
-#[cfg(feature = "client")]
-mod mcp_permissions;
 pub mod permissions;
-#[cfg(feature = "client")]
 pub mod vaults;
 
 use std::path::{Path, PathBuf};

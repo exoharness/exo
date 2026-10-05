@@ -63,7 +63,6 @@ pub(crate) fn worker_agent_config(definition: &AgentDefinition) -> Result<AgentC
         None,
         &WorkerModules,
     )?;
-    exoharness::vault::model_endpoint(config.base_url.as_deref(), "OPENAI_API_KEY")?;
     if f.harness == "codex" {
         ensure!(
             definition.permissions().permission_policy
@@ -99,8 +98,11 @@ impl ModelClient for WorkerModel {
 
 pub(crate) struct WorkerTools(pub Arc<Host>);
 #[derive(Deserialize)]
-struct ToolResponse {
-    result: ToolResult,
+#[serde(rename_all = "camelCase")]
+struct ExecOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
 }
 #[async_trait]
 impl ToolRuntime for WorkerTools {
@@ -110,18 +112,29 @@ impl ToolRuntime for WorkerTools {
         thread: &dyn ConversationHandle,
         _turn: Option<&dyn TurnHandle>,
         _agent_config: &AgentConfig,
-        _config: &ConversationConfig,
+        config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
-        let response: ToolResponse = self
+        ensure!(request.function_name == "shell", "unsupported Worker tool");
+        let args: executor::ShellToolArguments =
+            serde_json::from_value(serde_json::to_value(&request.arguments)?)?;
+        let program = config
+            .shell_program
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
+        let response: ExecOutput = self
             .0
-            .call(HostRequest::Tool {
+            .call(HostRequest::Exec {
                 agent_id: agent.record().id,
                 thread_id: thread.record().id,
-                request: request.clone(),
+                command: vec![program.clone(), "-lc".into(), args.command],
             })
             .await?;
-        Ok(response.result)
+        Ok(serde_json::to_value(executor::ShellToolResult {
+            stdout: response.stdout,
+            stderr: response.stderr,
+            exit_code: response.exit_code,
+        })?)
     }
 }
 
@@ -153,6 +166,7 @@ impl HarnessExecutor for WorkerExecutor {
         config: &AgentConfig,
         thread_config: &ConversationConfig,
     ) -> Result<()> {
+        validate_conversation(thread_config)?;
         if config.harness == AgentHarnessKind::Basic {
             self.basic
                 .prepare_conversation(agent, thread, config, thread_config)
@@ -236,6 +250,7 @@ impl WorkerExecutor {
         trace: Option<&dyn TurnExecutionTrace>,
         recovering: bool,
     ) -> Result<()> {
+        validate_conversation(thread_config)?;
         if config.harness == AgentHarnessKind::Basic {
             if recovering {
                 return self
@@ -304,4 +319,49 @@ impl ExecutionTracer for WorkerTracer {
     ) -> Option<Box<dyn TurnExecutionTrace>> {
         None
     }
+}
+
+fn validate_conversation(config: &ConversationConfig) -> Result<()> {
+    ensure!(
+        config.resources.is_empty()
+            && config.resource_mounts.is_empty()
+            && config.mounts.is_empty()
+            && config.durable_file_systems.is_empty(),
+        "filesystem resources and mounts are not supported by this host"
+    );
+    ensure!(
+        config
+            .sandbox_image
+            .as_deref()
+            .is_none_or(|image| image == "cloudflare/debian-trixie")
+            && config
+                .sandbox_provider
+                .as_ref()
+                .is_none_or(|provider| provider.as_str() == "cloudflare"),
+        "this host uses the standard Cloudflare sandbox image"
+    );
+    if let Some(environment) = &config.environment {
+        let sandbox = &environment.config;
+        ensure!(
+            sandbox.provider.as_str() == "cloudflare"
+                && sandbox.image == "cloudflare/debian-trixie"
+                && sandbox.resources.is_none()
+                && sandbox
+                    .default_workdir
+                    .as_deref()
+                    .is_none_or(|path| path == "/workspace")
+                && sandbox
+                    .file_system_mounts
+                    .as_ref()
+                    .is_none_or(Vec::is_empty)
+                && sandbox
+                    .durable_file_systems
+                    .as_ref()
+                    .is_none_or(Vec::is_empty)
+                && sandbox.tcp_ports.is_empty()
+                && sandbox.idle_seconds.is_none_or(|idle| idle == 300),
+            "this host supports standard-image environments with network policies; custom execution settings are not supported"
+        );
+    }
+    Ok(())
 }

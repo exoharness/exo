@@ -10,22 +10,13 @@ export interface Env {
   // Set to require the platform-verified Cloudflare Access application audience.
   ACCESS_AUD?: string;
   VAULT_KEY: string;
-  // Optional test receiver: responds with booleans, never reflects the key.
-  PROBE_KEY?: string;
 }
 
 export interface SandboxIdentity {
   agentId: string;
   threadId: string;
 }
-export interface SandboxPolicy {
-  origins: string[];
-  credentials: {
-    environmentVariable: string;
-    credential: string;
-    placeholder: string;
-  }[];
-}
+export type SandboxPolicy = Record<string, string>;
 export interface ExecRequest {
   command: string[];
   env?: Record<string, string>;

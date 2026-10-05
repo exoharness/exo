@@ -14,11 +14,15 @@ async-trait.workspace = true
 cost = { path = "../cost" }
 executor = { path = "../executor", default-features = false }
 exo-managed-agents = { path = "../managed-agents", default-features = false }
-exoharness = { path = "../exoharness", features = ["rpc-client"] }
+exoharness = { path = "../exoharness", features = ["store"] }
 futures.workspace = true
+http = "1"
 lingua.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_urlencoded = "0.7"
 url.workspace = true
 tracing.workspace = true
 wasm-bindgen = "=0.2.115"
+
+tokio = { version = "1.52.1", default-features = false, features = ["sync"] }

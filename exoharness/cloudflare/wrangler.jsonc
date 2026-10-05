@@ -5,7 +5,6 @@
   "compatibility_date": "2026-10-04",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
-  "alias": { "@exo/harness": "../typescript/harness/core.ts" },
   "rules": [
     {
       "type": "Text",

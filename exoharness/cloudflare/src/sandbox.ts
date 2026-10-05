@@ -2,7 +2,7 @@ import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 import type {
   SandboxProcess,
   SandboxProcessStartRequest,
-} from "../../typescript/harness/core";
+} from "../../typescript/harness/index";
 import codexPackage from "./codex-package.json";
 import type { Env, ExecRequest, ExecResult, SandboxIdentity } from "./env";
 
@@ -178,6 +178,25 @@ export class ExoSandbox extends DurableObject<Env> {
   private activeExecs = 0;
   private readonly processes = new Set<CloudflareProcess>();
 
+  async info(
+    identity: SandboxIdentity,
+  ): Promise<{ exists: boolean; running: boolean }> {
+    const saved = await this.ctx.storage.get<SandboxIdentity>("identity");
+    if (
+      saved &&
+      (saved.agentId !== identity.agentId ||
+        saved.threadId !== identity.threadId)
+    )
+      throw new Error("sandbox identity mismatch");
+    return { exists: !!saved, running: this.ctx.container?.running ?? false };
+  }
+
+  async terminate(identity: SandboxIdentity): Promise<void> {
+    await this.info(identity);
+    await this.stop();
+    await this.ctx.storage.deleteAll();
+  }
+
   async beginTurn(identity: SandboxIdentity, turnId: string): Promise<void> {
     this.activeTurn = turnId;
     // A checkpoint may take longer than blockConcurrencyWhile's time limit.
@@ -287,18 +306,14 @@ export class ExoSandbox extends DurableObject<Env> {
       this.starting = undefined;
     });
     const container = await this.starting;
-    const policy = await this.env.PROVIDERS.getByName(
+    const environment = await this.env.PROVIDERS.getByName(
       this.env.ACCOUNT_ID,
     ).sandboxPolicy(identity);
-    const environment = Object.fromEntries(
-      policy.credentials.map((binding) => [
-        binding.environmentVariable,
-        binding.placeholder,
-      ]),
-    );
     const process = await container.exec(request.command, {
       cwd: "/workspace",
       env: {
+        HOME: "/home/exo",
+        CODEX_HOME: "/home/exo/.codex",
         ...request.env,
         ...environment,
         NODE_EXTRA_CA_CERTS: ca,
@@ -388,18 +403,14 @@ export class ExoSandbox extends DurableObject<Env> {
       this.starting = undefined;
     });
     const container = await this.starting;
-    const policy = await this.env.PROVIDERS.getByName(
+    const environment = await this.env.PROVIDERS.getByName(
       this.env.ACCOUNT_ID,
     ).sandboxPolicy(identity);
-    const environment = Object.fromEntries(
-      policy.credentials.map((binding) => [
-        binding.environmentVariable,
-        binding.placeholder,
-      ]),
-    );
     const process = await container.exec(request.command, {
       cwd: "/workspace",
       env: {
+        HOME: "/home/exo",
+        CODEX_HOME: "/home/exo/.codex",
         ...request.env,
         ...environment,
         NODE_EXTRA_CA_CERTS: ca,

@@ -19,17 +19,6 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
-    // Optional live-test target, using a synthetic secret rather than a real API.
-    if (url.pathname === "/_probe" && env.PROBE_KEY)
-      return Response.json({
-        authenticated:
-          request.headers.get("authorization") === `Bearer ${env.PROBE_KEY}` ||
-          request.headers.get("authorization") ===
-            `Basic ${btoa(`user:${env.PROBE_KEY}`)}`,
-        placeholderReceived: (
-          request.headers.get("authorization") ?? ""
-        ).includes("exo_egress_"),
-      });
     if (!url.pathname.startsWith("/exo/"))
       return new Response("Not found", { status: 404 });
     const provider = env.PROVIDERS.getByName(env.ACCOUNT_ID);

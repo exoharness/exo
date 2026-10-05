@@ -8,79 +8,88 @@ import {
   responseToolCalls,
 } from "../../typescript/model-runtime/responses";
 import {
-  toAgentConfig,
-  toConversationConfig,
-  toSendRequest,
-  type RawAgentConfig,
-  type RawConversationConfig,
-  type RawSendRequest,
-} from "../../typescript/harness/wire";
+  createTurnContext,
+  type HarnessClient,
+  type RawAgentRecord,
+  type RawConversationHandleInfo,
+  type RawExoResponse,
+  type RawTurnRecord,
+} from "../../typescript/harness/client";
 import type {
-  Conversation,
-  Message,
-  ToolDefinition,
-  TurnContext,
-} from "../../typescript/harness/core";
-import { fields, text } from "./definition";
-import type { Env, SandboxIdentity, SandboxPolicy } from "./env";
-import { PLACEHOLDER_PREFIX } from "./network";
+  RawAgentConfig,
+  RawConversationConfig,
+  RawSendRequest,
+} from "../../typescript/harness/wire";
+import type { Message, ToolDefinition } from "../../typescript/harness/index";
+import type { Env, SandboxIdentity } from "./env";
 import { CloudflareSandbox } from "./sandbox";
-import { CloudflareExoHarness } from "./state";
-import { stateRequest, type StateRequest } from "./state-protocol";
+import { Storage, type StorageOperation } from "./storage";
+import type { Runtime } from "./runtime";
 
-interface ModelRequest {
-  model: string;
-  api_key: string;
-  base_url: string | null;
-  messages: Message[];
-  tools: ToolDefinition[];
-  max_output_tokens: number | null;
-}
 type Identity = { agent_id: string; thread_id: string };
+type SandboxCommand = Identity &
+  ({ type: "info" | "snapshot" } | { type: "stop"; terminate: boolean });
 type HarnessRequest = Identity & {
   type: "harness";
-  turn: { id: string; session_id: string };
+  turn: RawTurnRecord;
   agent_config: RawAgentConfig;
   conversation_config: RawConversationConfig;
   request: RawSendRequest;
   recovering: boolean;
 };
 export type HostRequest =
-  | { type: "state"; request: StateRequest }
-  | (Identity & { type: "watch"; after: string | null })
-  | { type: "model"; request: ModelRequest }
+  | { type: "storage"; operation: StorageOperation }
+  | { type: "sandbox"; command: SandboxCommand }
+  | {
+      type: "model";
+      request: {
+        model: string;
+        api_key: string;
+        base_url: string | null;
+        messages: Message[];
+        tools: ToolDefinition[];
+        max_output_tokens: number | null;
+      };
+    }
   | (Identity & {
-      type: "tool";
-      request: { function_name: string; arguments: unknown };
+      type: "exec";
+      command: string[];
     })
   | HarnessRequest
   | { type: "stop_sandbox"; thread_id: string };
 
 export class RuntimeIO {
-  private readonly codex = createCodexHarness(codexVersion.trim(), {
-    sandboxEnv: { HOME: "/home/exo", CODEX_HOME: "/home/exo/.codex" },
-  });
+  private readonly codex = createCodexHarness(codexVersion.trim());
+  private readonly storage: Storage;
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly env: Env,
-    private readonly harness: CloudflareExoHarness,
-    private readonly watch: (
-      request: Extract<HostRequest, { type: "watch" }>,
-      signal: AbortSignal,
-    ) => Promise<unknown>,
-    private readonly credential: (
-      context: Conversation,
-      name: string,
-      url: string,
-    ) => Promise<string>,
-  ) {}
+    private readonly runtime: Runtime,
+  ) {
+    this.storage = new Storage(ctx.storage, env.ARTIFACTS, ctx.id.toString());
+  }
 
   async handle(request: HostRequest, signal: AbortSignal): Promise<unknown> {
     switch (request.type) {
-      case "state":
-        return stateRequest(this.harness, this.ctx, request.request);
-      case "watch":
-        return this.watch(request, signal);
+      case "storage":
+        return this.storage.handle(request.operation);
+      case "sandbox": {
+        const command = request.command;
+        const sandbox = this.env.SANDBOXES.getByName(command.thread_id);
+        const identity = {
+          agentId: command.agent_id,
+          threadId: command.thread_id,
+        };
+        if (command.type === "info") return sandbox.info(identity);
+        if (command.type === "snapshot")
+          return (await sandbox.snapshot(identity)).id;
+        if (command.type === "stop") {
+          if (command.terminate) await sandbox.terminate(identity);
+          else await sandbox.stop();
+          return null;
+        }
+        throw new Error("unsupported sandbox command");
+      }
       case "stop_sandbox":
         await this.env.SANDBOXES.getByName(request.thread_id).stop();
         return {};
@@ -119,20 +128,12 @@ export class RuntimeIO {
             : null,
         };
       }
-      case "tool": {
+      case "exec": {
         signal.throwIfAborted();
-        if (request.request.function_name !== "shell")
-          throw new Error("unsupported Worker tool");
-        const args = fields(request.request.arguments, ["command"]);
-        const output = await this.env.SANDBOXES.getByName(
-          request.thread_id,
-        ).exec(
+        return this.env.SANDBOXES.getByName(request.thread_id).exec(
           { agentId: request.agent_id, threadId: request.thread_id },
-          {
-            command: ["/bin/bash", "-lc", text(args.command, "shell command")],
-          },
+          { command: request.command },
         );
-        return { result: output };
       }
       case "harness":
         return this.runHarness(request, signal);
@@ -147,76 +148,80 @@ export class RuntimeIO {
       agentId: r.agent_id,
       threadId: r.thread_id,
     };
-    const harness = await this.harness.forTurn(r.agent_id, r.thread_id, {
-      id: r.turn.id,
-      sessionId: r.turn.session_id,
-    });
-    const agentConfig = toAgentConfig(r.agent_config);
-    const conversationConfig = toConversationConfig(r.conversation_config);
-    const baseURL = agentConfig.baseUrl ?? "https://api.openai.com/v1";
-    const credential = text(agentConfig.credential, "credential");
-    await this.credential(
-      harness.current.conversation,
-      credential,
-      `${baseURL.replace(/\/$/, "")}/responses`,
-    );
-    const saved = this.harness.store.get<SandboxPolicy>(
-      `codex-policy/${r.thread_id}`,
-    );
-    this.harness.store.put(`codex-policy/${r.thread_id}`, {
-      origins: [new URL(baseURL).origin],
-      credentials: [
-        {
-          environmentVariable: "OPENAI_API_KEY",
-          credential,
-          placeholder:
-            saved?.credentials[0]?.credential === credential
-              ? saved.credentials[0].placeholder
-              : `${PLACEHOLDER_PREFIX}${crypto.randomUUID()}`,
-        },
-      ],
-    } satisfies SandboxPolicy);
-    const append = (
-      event_type: string,
-      payload: { text?: string; ttft_ms?: number },
-    ) =>
-      harness.current.turn
-        .addEvents([{ type: "custom", event_type, payload }])
-        .then(() => {});
     const sandbox = new CloudflareSandbox(
       this.env.SANDBOXES.getByName(r.thread_id),
       identity,
       (promise) => this.ctx.waitUntil(promise),
     );
-    const context: TurnContext = {
-      exoharness: harness,
-      agentConfig,
-      conversationConfig,
-      request: toSendRequest(r.request),
-      mcpServers: [],
-      tools: [],
-      streaming: true,
-      authorizeTool: async () => {},
-      executeTool: async () => {
-        throw new Error("custom Codex tools are not supported");
+    const agent = await this.runtime.call<RawExoResponse>({
+      type: "state",
+      request: { type: "get_agent", agent_id: r.agent_id },
+    });
+    const thread = await this.runtime.call<RawExoResponse>({
+      type: "state",
+      request: {
+        type: "get_conversation",
+        agent_id: r.agent_id,
+        conversation_id: r.thread_id,
       },
-      executePendingTools: async () => {
-        throw new Error("custom Codex tools are not supported");
+    });
+    if (
+      agent.type !== "agent" ||
+      !agent.agent ||
+      thread.type !== "conversation" ||
+      !thread.conversation
+    )
+      throw new Error("turn context disappeared");
+    const client: HarnessClient = {
+      requestExo: (request) =>
+        this.runtime.call({ type: "state", request }, signal),
+      requestRuntime: (request) => {
+        if (request.type !== "authorize_tool")
+          throw new Error("custom Codex tools are not supported");
+        return this.runtime.call(
+          {
+            type: "authorize_tool",
+            agent_id: r.agent_id,
+            thread_id: r.thread_id,
+            turn: r.turn,
+            request: request.request,
+          },
+          signal,
+        );
       },
       startSandboxProcess: async (request) => {
-        await append("codex_process_start_requested", {});
+        await context.exoharness.current.turn.addEvents([
+          {
+            type: "custom",
+            event_type: "codex_process_start_requested",
+            payload: {},
+          },
+        ]);
         await sandbox.prepareCodex(codexVersion.trim());
         const process = await sandbox.startProcess(request);
-        await append("codex_process_started", {});
+        await context.exoharness.current.turn.addEvents([
+          { type: "custom", event_type: "codex_process_started", payload: {} },
+        ]);
         return process;
       },
-      stream: {
-        firstChunk: (ttft_ms) => append("codex_first_chunk", { ttft_ms }),
-        text: (text) => append("codex_text_delta", { text }),
-        toolCall: async () => {},
-        toolResult: async () => {},
+      emitStream: async (event) => {
+        await context.exoharness.current.turn.addEvents([
+          { type: "custom", event_type: `codex_${event.type}`, payload: event },
+        ]);
       },
     };
+    const context = createTurnContext(client, {
+      agent: agent.agent as RawAgentRecord,
+      conversation: thread.conversation as RawConversationHandleInfo,
+      turn: { conversation: thread.conversation, record: r.turn },
+      agent_config: r.agent_config,
+      conversation_config: r.conversation_config,
+      request: r.request,
+      streaming: true,
+      recovering: r.recovering,
+      mcp_servers: [],
+      tools: [],
+    });
     const stop = () =>
       this.ctx.waitUntil(this.env.SANDBOXES.getByName(r.thread_id).stop());
     signal.throwIfAborted();

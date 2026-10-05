@@ -254,17 +254,7 @@ impl ToolRuntime for ExoToolRuntime {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct ShellToolArguments {
-    command: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ShellToolResult {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
-}
+use crate::{ShellToolArguments, ShellToolResult};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

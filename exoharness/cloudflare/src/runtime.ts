@@ -13,7 +13,7 @@ interface Progress {
 
 /** Owns the portable Rust runtime; JavaScript supplies asynchronous host I/O. */
 export class Runtime {
-  private readonly wasm = new WorkerRuntime();
+  private readonly wasm: WorkerRuntime;
   private readonly operations = new Map<
     number,
     { resolve(value: unknown): void; reject(error: Error): void }
@@ -22,14 +22,18 @@ export class Runtime {
   private idle?: { promise: Promise<void>; resolve(): void };
 
   constructor(
+    masterKey: string,
     private readonly handle: (
       request: HostRequest,
       signal: AbortSignal,
     ) => Promise<unknown>,
     private readonly waitUntil: (promise: Promise<unknown>) => void,
-  ) {}
+  ) {
+    this.wasm = new WorkerRuntime(masterKey);
+  }
 
-  call<T>(operation: unknown): Promise<T> {
+  call<T>(operation: unknown, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
     const id = this.wasm.submit(JSON.stringify(operation));
     const result = new Promise<T>((resolve, reject) => {
       this.operations.set(id, {
@@ -37,15 +41,28 @@ export class Runtime {
         reject,
       });
     });
+    const abort = () => {
+      this.operations.delete(id);
+      this.wasm.cancel(id);
+      this.pump();
+    };
+    const abortResult = () => {
+      this.operations.get(id)?.reject(signal!.reason);
+      abort();
+    };
+    signal?.addEventListener("abort", abortResult, { once: true });
     this.pump();
-    return result;
+    return result.finally(() =>
+      signal?.removeEventListener("abort", abortResult),
+    );
   }
 
   private pump(): void {
     const progress: Progress = JSON.parse(this.wasm.poll());
     for (const id of progress.cancelled) this.calls.get(id)?.abort();
     for (const completion of progress.completed) {
-      const operation = this.operations.get(completion.id)!;
+      const operation = this.operations.get(completion.id);
+      if (!operation) continue;
       this.operations.delete(completion.id);
       if (completion.error !== null)
         operation.reject(new Error(completion.error));

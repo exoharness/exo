@@ -2126,9 +2126,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
- "getrandom 0.4.2",
  "hybrid-array",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2845,9 +2843,12 @@ dependencies = [
  "exo-managed-agents",
  "exoharness",
  "futures",
+ "http 1.4.0",
  "lingua",
  "serde",
  "serde_json",
+ "serde_urlencoded",
+ "tokio",
  "tracing",
  "url",
  "wasm-bindgen",
@@ -2872,6 +2873,7 @@ dependencies = [
  "flate2",
  "futures",
  "hickory-proto",
+ "http 1.4.0",
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",

@@ -1,5 +1,4 @@
-#[path = "auth.rs"]
-mod auth;
+use crate::auth;
 
 use crate::{McpServerConfig, validate_servers};
 
@@ -40,7 +39,7 @@ pub struct McpCredential {
 pub struct McpAuthenticationError {
     pub server_name: String,
     pub credential_supplied: bool,
-    details: String,
+    pub(crate) details: String,
 }
 
 impl std::fmt::Display for McpAuthenticationError {

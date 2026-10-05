@@ -10,7 +10,7 @@
     "noEmit": true,
     "resolveJsonModule": true,
     "paths": {
-      "@exo/harness": ["../typescript/harness/core.ts"],
+      "@exo/harness": ["../typescript/harness/index.ts"],
       "@exo/codex/app-server": ["../typescript/codex/app-server.ts"],
       "@exo/model-runtime/*": ["../typescript/model-runtime/*.ts"]
     }

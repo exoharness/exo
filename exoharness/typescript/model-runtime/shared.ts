@@ -94,12 +94,15 @@ export class WarmResourceCache<T> {
     const existing = this.entries.get(key);
     if (existing) {
       const resource = await existing;
+      // Another waiter may already have replaced an invalid resource.
+      if (this.entries.get(key) !== existing)
+        return this.get(key, create, isValid);
       if (isValid(resource)) return { resource, reused: true };
       this.entries.delete(key);
     }
 
     const created = create().catch((error: unknown) => {
-      this.entries.delete(key);
+      if (this.entries.get(key) === created) this.entries.delete(key);
       throw error;
     });
     this.entries.set(key, created);

@@ -84,16 +84,6 @@ impl BasicExoHarness {
         Ok(())
     }
 
-    pub(super) fn check_sandbox(&self, sandbox: &StoredSandbox) -> Result<()> {
-        if let Some(caller) = &self.caller {
-            anyhow::ensure!(
-                sandbox.principal.as_deref() == Some(&caller.principal),
-                "sandbox belongs to another caller"
-            );
-        }
-        Ok(())
-    }
-
     pub(super) async fn default_vault(&self) -> Result<Arc<dyn VaultHandle>> {
         match &self.caller {
             Some(caller) => {

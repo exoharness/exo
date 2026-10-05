@@ -9,9 +9,16 @@ rust-version.workspace = true
 default = []
 smolvm = ["basic-backend", "dep:smolmachines"]
 http-client = ["dep:reqwest"]
-rpc-client = []
+store = ["dep:aes-gcm", "dep:tracing", "dep:tokio", "dep:tokio-stream", "dep:base64", "dep:http"]
 basic-backend = [
-  "rpc-client",
+  "store",
+  "tokio/fs",
+  "tokio/io-std",
+  "tokio/io-util",
+  "tokio/net",
+  "tokio/process",
+  "tokio/rt",
+  "tokio/time",
   "dep:oci-client",
   "dep:libc",
   "dep:sha2",
@@ -59,7 +66,7 @@ aws-agentcore = [
 contract-tests = []
 
 [dependencies]
-aes-gcm = { version = "0.11.0-rc.3", optional = true }
+aes-gcm = { version = "0.11.0-rc.3", default-features = false, features = ["aes", "alloc"], optional = true }
 actix-web = { workspace = true, optional = true }
 anyhow.workspace = true
 async-trait.workspace = true
@@ -74,6 +81,7 @@ exo-firecracker-protocol = { path = "../firecracker-protocol", optional = true }
 flate2 = { workspace = true, optional = true, features = ["zlib-rs"] }
 futures.workspace = true
 hickory-proto = { version = "0.25.2", default-features = false, optional = true }
+http = { version = "1", optional = true }
 http-body-util = { version = "0.1.3", optional = true }
 hyper = { version = "1.8.1", features = ["http1", "server"], optional = true }
 hyper-util = { version = "0.1.20", features = ["tokio"], optional = true }
@@ -96,16 +104,7 @@ sha2 = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio = { version = "1.52.1", default-features = false, features = [
-  "fs",
-  "io-std",
-  "io-util",
-  "net",
-  "process",
-  "rt",
-  "sync",
-  "time",
-], optional = true }
+tokio = { version = "1.52.1", default-features = false, features = ["sync"], optional = true }
 tokio-rustls = { version = "0.26.4", default-features = false, features = [
   "ring",
   "tls12",

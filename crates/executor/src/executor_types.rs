@@ -319,3 +319,14 @@ impl Stream for ExecutionStreamHandle {
         Pin::new(&mut self.event_stream).poll_next(cx)
     }
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ShellToolArguments {
+    pub command: String,
+}
+#[derive(Debug, serde::Serialize)]
+pub struct ShellToolResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}

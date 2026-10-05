@@ -8,9 +8,7 @@ use crate::{AgentConfig, ConversationConfig, ToolDefinition, ToolRuntime};
 
 use crate::{NativeMcpServer, NativeMcpTool};
 
-pub(crate) fn credential_variable(id: &exoharness::SecretId) -> String {
-    format!("EXO_MCP_{}", id.to_string().replace('-', "_"))
-}
+pub(crate) use crate::mcp_types::credential_variable;
 
 pub struct McpToolRuntime<T> {
     inner: T,

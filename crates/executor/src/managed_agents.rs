@@ -1,4 +1,5 @@
 pub(crate) mod config;
+pub mod service;
 #[cfg(feature = "native")]
 pub use crate::native::config::agent_config;
 pub use config::{

@@ -3,8 +3,8 @@ import { readFile, readdir, mkdtemp, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { Miniflare } from "miniflare";
-import { stripTypeScriptTypes } from "node:module";
-import { harnessContracts } from "../../typescript/harness/contracts.ts";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { fakeCodex } from "./fixtures/fake-codex.mjs";
 
 const token = "test-operator-token";
@@ -17,8 +17,10 @@ const fakeSandbox = `import { DurableObject, RpcTarget, RpcStub } from "cloudfla
 ${fakeCodex}
 export class FakeSandbox extends DurableObject {
   constructor(ctx, env) { super(ctx, env); this.processes = new Set(); }
-  async beginTurn(identity, turnId) { await this.ctx.storage.deleteAlarm(); }
+  async beginTurn(identity, turnId) { await this.ctx.storage.put("identity", identity); await this.ctx.storage.deleteAlarm(); }
   async endTurn(turnId) { await this.ctx.storage.setAlarm(Date.now() + 300000); }
+  async info() { return {exists: !!await this.ctx.storage.get("identity"), running: this.processes.size > 0}; }
+  async terminate() { await this.stop(); await this.ctx.storage.deleteAll(); }
   async exec(identity, request) {
     const count = (await this.ctx.storage.get("count") ?? 0) + 1;
     await this.ctx.storage.put("count", count);
@@ -51,39 +53,12 @@ async function options({ accessAud, access, staticToken = token } = {}) {
     "index.js": {
       type: "esm",
       contents: `import { ExoProvider as Provider } from "./implementation.js";
-import { harnessContracts, seedHarnessCheckpoint, verifyHarnessCheckpoint } from "./contracts.js";
 export class ExoProvider extends Provider {
   async recoverForTest() { await this.alarm(); }
-  fixture() {
-    return {
-      harness: this.harness,
-      beginTurn: async (agent, conversation, input, sessionId) => {
-        const turn = await this.harness.beginTurn(agent.record.id, conversation.record.id, input.length ? [{type:"messages", messages:input}] : [], sessionId);
-        return this.harness.forTurn(agent.record.id, conversation.record.id, turn.record);
-      },
-      finishTurn: turn => turn.finish(),
-    };
-  }
-  async runContract(name) {
-    try { await harnessContracts[name](this.fixture()); return JSON.stringify({ok:true}); }
-    catch(error) { return JSON.stringify({ok:false, error:error.message, stack:error.stack}); }
-  }
-  async seedCheckpoint() { return JSON.stringify(await seedHarnessCheckpoint(this.fixture())); }
-  async verifyCheckpoint(saved) {
-    try { await verifyHarnessCheckpoint(this.fixture(), JSON.parse(saved)); return JSON.stringify({ok:true}); }
-    catch(error) { return JSON.stringify({ok:false, error:error.message, stack:error.stack}); }
-  }
+  async environmentForTest(identity) { return JSON.stringify(await this.sandboxPolicy(identity)); }
+  async storedBytesForTest(key) { return new TextDecoder().decode((await this.ctx.storage.get(key)).bytes); }
 }
 export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
-    },
-    "contracts.js": {
-      type: "esm",
-      contents: stripTypeScriptTypes(
-        await readFile(
-          new URL("../../typescript/harness/contracts.ts", import.meta.url),
-          "utf8",
-        ),
-      ),
     },
     "implementation.js": {
       type: "esm",
@@ -151,7 +126,10 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
           outboundService: {
             type: "fetcher",
             handler: async (request) => {
-              if (new URL(request.url).hostname !== "model.example")
+              if (
+                new URL(request.url).hostname !== "model.example" ||
+                new URL(request.url).pathname === "/echo"
+              )
                 return Response.json(
                   {
                     header: request.headers.get("authorization"),
@@ -501,12 +479,13 @@ test("approval pauses durably, rejects the wrong session and executes only after
 });
 
 test("artifact versions, event cursors and encrypted vaults survive a runtime restart", async () => {
+  const contents = Array.from({ length: 70 * 1024 }, (_, i) => i % 256);
   const { agent, path } = await create();
-  const first = await api(`${path}/artifact`, "POST", {
+  const first = await writeThreadArtifact(agent.id, path.split("/")[3], {
     path: "result.bin",
-    contents: [0, 255, 10],
+    contents,
   });
-  const second = await api(`${path}/artifact`, "POST", {
+  const second = await writeThreadArtifact(agent.id, path.split("/")[3], {
     path: "result.bin",
     contents: [1, 2],
   });
@@ -522,7 +501,7 @@ test("artifact versions, event cursors and encrypted vaults survive a runtime re
         `${path}/artifact/read?artifact_id=${first.artifact_id}&version=1`,
       )
     ).contents,
-    [0, 255, 10],
+    contents,
   );
   assert.deepEqual(
     (await api(`${path}/event?after=${eventsBefore[0].id}`)).events,
@@ -542,170 +521,6 @@ test("artifact versions, event cursors and encrypted vaults survive a runtime re
   await waitEvents(path, (events) =>
     events.some((event) => event.data.type === "turn_ended"),
   );
-});
-
-test("proxy replaces only scoped placeholders, checks destination and returns redirects without following", async () => {
-  const { agent, thread, path } = await create();
-  const vault = (await api("vault"))[0];
-  await api(`vault/${vault.id}/secret`, "POST", {
-    name: "PROBE",
-    secret: { type: "key", value: "synthetic-probe-key" },
-    policy: policy("https://echo.example"),
-  });
-  await api(`${path}/sandbox/policy`, "PUT", {
-    origins: [
-      "https://echo.example",
-      "http://echo.example",
-      "https://other.example",
-    ],
-    credentials: [{ environment_variable: "PROBE_KEY", credential: "PROBE" }],
-  });
-  const configured = await api(`${path}/sandbox/policy`);
-  const placeholder = configured.credentials[0].placeholder;
-  const { PROVIDERS } = await mf.getBindings("exo");
-  const provider = PROVIDERS.getByName("test-account");
-  const identity = { agentId: agent.id, threadId: thread.id };
-  const send = (url, value, name = "authorization") =>
-    provider.proxy(identity, new Request(url, { headers: { [name]: value } }));
-  const response = await send(
-    "https://echo.example/check",
-    `Bearer ${placeholder}`,
-  );
-  assert.equal(response.status, 302);
-  assert.equal((await response.json()).header, "Bearer synthetic-probe-key");
-  assert.equal(
-    (
-      await (
-        await send(
-          "https://echo.example/check",
-          `Basic ${btoa(`user:${placeholder}`)}`,
-        )
-      ).json()
-    ).header,
-    `Basic ${btoa("user:synthetic-probe-key")}`,
-  );
-  await assert.rejects(
-    send("https://other.example/check", `Bearer ${placeholder}`),
-  );
-  await assert.rejects(send("https://denied.example/check", "none"));
-  await assert.rejects(
-    send("http://echo.example/check", `Bearer ${placeholder}`),
-  );
-  await assert.rejects(
-    send("https://echo.example/check", `Bearer ${PLACEHOLDER_PREFIX}unknown`),
-  );
-  await assert.rejects(send("https://echo.example/check", placeholder, "host"));
-  const other = await create();
-  await assert.rejects(
-    provider.proxy(
-      { agentId: other.agent.id, threadId: other.thread.id },
-      new Request("https://echo.example/check", {
-        headers: { authorization: `Bearer ${placeholder}` },
-      }),
-    ),
-  );
-  const id = (await api(`vault/${vault.id}/secret`)).find(
-    (secret) => secret.name === "PROBE",
-  ).id;
-  await api(`vault/${vault.id}/secret/${id}`, "DELETE");
-  await assert.rejects(
-    send("https://echo.example/check", `Bearer ${placeholder}`),
-  );
-});
-
-const PLACEHOLDER_PREFIX = "exo_egress_";
-test("unsupported agent features and invalid origins fail explicitly", async () => {
-  const { agent, path } = await create();
-  await api(
-    `${path}/sandbox/policy`,
-    "PUT",
-    { origins: ["http://127.0.0.1"], credentials: [] },
-    400,
-  );
-  await api(
-    `${path}/sandbox/policy`,
-    "PUT",
-    { origins: ["https://echo.example/path"], credentials: [] },
-    400,
-  );
-  await api(
-    `agent/${agent.id}/artifact`,
-    "POST",
-    {
-      path: "managed-agents/agent.md",
-      contents: [
-        ...new TextEncoder().encode(
-          definition(false).replace("harness: basic", "harness: claude"),
-        ),
-      ],
-    },
-    400,
-  );
-});
-
-test("pending approvals survive eviction; an ambiguous tool execution is ended without replay", async () => {
-  const { thread, path } = await create(true);
-  const submitted = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "Print Linux." } },
-    202,
-  );
-  const events = await waitEvents(path, (events) =>
-    events.some(
-      (event) => event.data.event_type === "agent_runtime.approval_requested",
-    ),
-  );
-  const approval = events.find(
-    (event) => event.data.event_type === "agent_runtime.approval_requested",
-  ).data.payload;
-  await mf.dispose();
-  mf = new Miniflare(await options());
-  await mf.ready;
-  assert.deepEqual(await api(`${path}/turn/${submitted.turn.id}`), {
-    active: true,
-  });
-  assert(
-    (await api(`${path}/event`)).events.some(
-      (event) => event.data.payload?.approval_id === approval.approval_id,
-    ),
-  );
-  const storage = await mf.unsafeGetDurableObjectStorage("exo", "ExoProvider", {
-    name: "test-account",
-  });
-  const requested = events.find(
-    (event) => event.data.event_type === "agent_runtime.approval_requested",
-  );
-  // An unresolved tool call without a pending approval has an unknown outcome.
-  // Remove only the pending-approval marker from the persisted canonical log.
-  requested.data.event_type = "fixture.removed_approval";
-  await storage.exec(
-    "UPDATE state SET json = ? WHERE key = ?",
-    JSON.stringify({
-      id: requested.id,
-      conversationId: thread.id,
-      sessionId: requested.session_id,
-      turnId: requested.turn_id,
-      createdAt: requested.created_at,
-      data: requested.data,
-    }),
-    `event/${thread.id}/${requested.id}`,
-  );
-  await mf.dispose();
-  mf = new Miniflare(await options());
-  await mf.ready;
-  const { PROVIDERS, SANDBOXES } = await mf.getBindings("exo");
-  await PROVIDERS.getByName("test-account").recoverForTest();
-  const recovered = (await api(`${path}/event`)).events;
-  assert(
-    recovered.some(
-      (event) =>
-        event.data.type === "error" &&
-        event.data.message.includes("unresolved tool call"),
-    ),
-  );
-  assert(recovered.some((event) => event.data.type === "turn_ended"));
-  assert.equal(await SANDBOXES.getByName(thread.id).count(), 0);
 });
 
 test("shared runtime serializes concurrent submissions and cancellation prevents pending tools", async () => {
@@ -817,30 +632,6 @@ test("SSE replays a cursor and streams new events without duplicates", async () 
   }
 });
 
-test("vault contents are encrypted at rest and origin rules cannot silently broaden a path", async () => {
-  const storage = await mf.unsafeGetDurableObjectStorage("exo", "ExoProvider", {
-    name: "test-account",
-  });
-  const rows = await storage.exec(
-    "SELECT json FROM state WHERE substr(key, 1, 7) = ?",
-    "secret/",
-  );
-  assert(rows.length);
-  assert(!JSON.stringify(rows).includes(key));
-  assert(rows.every((row) => Array.isArray(JSON.parse(row.json).ciphertext)));
-  const vault = (await api("vault"))[0];
-  await api(
-    `vault/${vault.id}/secret`,
-    "POST",
-    {
-      name: "INVALID",
-      secret: { type: "key", value: "synthetic" },
-      policy: policy("https://model.example/private"),
-    },
-    400,
-  );
-});
-
 test("Codex reuses its RPC process across turns and resumes after an idle checkpoint", async () => {
   const { thread, path } = await create(false, "codex");
   const first = await api(
@@ -849,7 +640,7 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
     { input: { role: "user", content: "run tests" } },
     202,
   );
-  assert.equal(first.harness, "codex");
+  assert.equal(first.harness, "codex-harness");
   const events = await waitEvents(path, (events) =>
     events.some((event) => event.data.type === "turn_ended"),
   );
@@ -866,9 +657,7 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
   assert(events.some((event) => event.data.event_type === "codex_text_delta"));
   const sandbox = await mf.getDurableObjectNamespace("SANDBOXES", "exo");
   assert.equal(await sandbox.getByName(thread.id).lastMethod(), "thread/start");
-  const policy = await api(`${path}/sandbox/policy`);
-  assert.deepEqual(policy.origins, ["https://model.example"]);
-  assert(policy.credentials[0].placeholder.startsWith("exo_egress_"));
+
   const second = await api(
     `${path}/turn`,
     "POST",
@@ -946,35 +735,14 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
   await sandbox.getByName(thread.id).stop();
 });
 
-for (const name of Object.keys(harnessContracts)) {
-  test(`ExoHarness direct contract: ${name}`, async () => {
-    const { PROVIDERS } = await mf.getBindings("exo");
-    const result = JSON.parse(
-      await PROVIDERS.getByName(`contract-${name}`).runContract(name),
-    );
-    assert.equal(result.ok, true, result.stack ?? result.error);
-  });
-}
-
-test("ExoHarness direct contract: SQLite, R2, vaults and cursors survive runtime restart", async () => {
-  let { PROVIDERS } = await mf.getBindings("exo");
-  const checkpoint = await PROVIDERS.getByName(
-    "contract-persistence",
-  ).seedCheckpoint();
-  await mf.dispose();
-  mf = new Miniflare(await options());
-  await mf.ready;
-  ({ PROVIDERS } = await mf.getBindings("exo"));
-  await PROVIDERS.getByName("contract-persistence").verifyCheckpoint(
-    checkpoint,
-  );
-});
-
 test("managed thread pagination follows latest activity", async () => {
-  const { agent, thread, path } = await create();
+  const { agent, thread } = await create();
   const second = (await api(`agent/${agent.id}/thread`, "POST", {})).thread;
   const third = (await api(`agent/${agent.id}/thread`, "POST", {})).thread;
-  await api(`${path}/artifact`, "POST", { path: "touch.txt", contents: [1] });
+  await writeThreadArtifact(agent.id, thread.id, {
+    path: "touch.txt",
+    contents: [1],
+  });
   const page = await api(`agent/${agent.id}/thread?limit=2`);
   assert.deepEqual(
     page.threads.map((item) => item.id),
@@ -989,4 +757,123 @@ test("managed thread pagination follows latest activity", async () => {
     [second.id],
   );
   assert.equal(next.next_cursor, null);
+});
+
+async function rpc(request) {
+  const response = await api("request", "POST", {
+    kind: "request",
+    id: 1,
+    request,
+  });
+  assert.equal(response.ok, true, response.error);
+  return response.response;
+}
+async function writeThreadArtifact(agent_id, conversation_id, request) {
+  return (
+    await rpc({
+      type: "conversation_write_artifact",
+      agent_id,
+      conversation_id,
+      request,
+    })
+  ).artifact;
+}
+
+test("existing Rust trait contracts run against the Worker store", async () => {
+  const endpoint = new URL("/exo", await mf.ready).href;
+  const child = spawn(
+    "cargo",
+    [
+      "test",
+      "-p",
+      "exoharness",
+      "--features",
+      "basic-backend",
+      "hosted_http_exoharness_core_contract",
+      "--",
+      "--ignored",
+      "--exact",
+      "http_tests::hosted_http_exoharness_core_contract",
+    ],
+    {
+      cwd: fileURLToPath(new URL("../../../", import.meta.url)),
+      env: {
+        ...process.env,
+        EXO_CONTRACT_TEST_URL: endpoint,
+        EXO_CONTRACT_TEST_BEARER: token,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let output = "";
+  child.stdout.on("data", (chunk) => (output += chunk));
+  child.stderr.on("data", (chunk) => (output += chunk));
+  const code = await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", resolve);
+  });
+  assert.equal(code, 0, output);
+});
+
+test("the Worker persists encrypted Rust vault records", async () => {
+  const { PROVIDERS } = await mf.getBindings("exo");
+  const persisted = await PROVIDERS.getByName(
+    "test-account",
+  ).storedBytesForTest("runtime/vaults/vaults.json");
+  assert(persisted.includes("ciphertext"));
+  assert(!persisted.includes(key));
+});
+
+test("Rust egress checks scoped placeholders, revocation, TLS and redirects", async () => {
+  const { agent, thread } = await create(false, "codex");
+  const { PROVIDERS } = await mf.getBindings("exo");
+  const provider = PROVIDERS.getByName("test-account");
+  const identity = { agentId: agent.id, threadId: thread.id };
+  const environment = JSON.parse(await provider.environmentForTest(identity));
+  const placeholder = environment.OPENAI_API_KEY;
+  assert(placeholder.startsWith("exo_egress_"));
+  assert.equal(
+    (await provider.sandboxPolicy(identity)).OPENAI_API_KEY,
+    placeholder,
+  );
+  for (const url of ["http://model.example/v1", "https://other.example/v1"]) {
+    await assert.rejects(
+      provider.proxy(
+        identity,
+        new Request(url, {
+          headers: { authorization: `Bearer ${placeholder}` },
+        }),
+      ),
+    );
+  }
+  const response = await provider.proxy(
+    identity,
+    new Request("https://model.example/echo", {
+      headers: { authorization: `Basic ${btoa(`user:${placeholder}`)}` },
+    }),
+  );
+  assert.equal(response.status, 302);
+  assert.equal((await response.json()).header, `Basic ${btoa(`user:${key}`)}`);
+  const vault = (await api("vault"))[0];
+  const secret = (await api(`vault/${vault.id}/secret`))[0];
+  await api(`vault/${vault.id}/secret/${secret.id}`, "PUT", {
+    secret: { type: "key", value: "rotated-key" },
+  });
+  const rotated = await provider.proxy(
+    identity,
+    new Request("https://model.example/echo", {
+      headers: { authorization: `Bearer ${placeholder}` },
+    }),
+  );
+  assert.equal((await rotated.json()).header, "Bearer rotated-key");
+  await api(`vault/${vault.id}/secret/${secret.id}`, "PUT", {
+    secret: { type: "key", value: key },
+  });
+  const bytes = await rpc({
+    type: "vault_get_secret",
+    scope: { type: "global" },
+    vault_id: vault.id,
+    secret_id: secret.id,
+  });
+  assert.equal(bytes.secret.value, key);
 });
