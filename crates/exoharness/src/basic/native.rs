@@ -1803,7 +1803,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         let Some(name) = &request.name else {
             return Ok(None);
         };
-        let mut events = load_events(&self.harness.inner.storage, &self.owner_dir.join("events"))
+        let mut events = load_events(&self.harness.inner.storage, &self.owner_dir)
             .await?
             .into_iter()
             .filter(|event| event.data.kind() == EventKind::SANDBOX_CREATED)
@@ -1918,12 +1918,8 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         match self.event_sink {
             BasicSandboxEventSink::None => Ok(()),
             BasicSandboxEventSink::Conversation { conversation_id } => {
-                let mut record = self
-                    .harness
-                    .inner
-                    .storage
-                    .get_json::<ConversationRecord>(self.owner_dir.join("record.json"))
-                    .await?;
+                let mut record =
+                    load_conversation_record(&self.harness.inner.storage, &self.owner_dir).await?;
                 append_events_to_conversation(
                     &self.harness.inner,
                     &self.owner_dir,
@@ -1935,11 +1931,6 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                     &mut record,
                 )
                 .await?;
-                self.harness
-                    .inner
-                    .storage
-                    .put_json(self.owner_dir.join("record.json"), &record)
-                    .await?;
                 Ok(())
             }
             BasicSandboxEventSink::Turn {
@@ -1949,12 +1940,8 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                 state,
             } => {
                 let expected_head = state.lock().expect("turn state poisoned").latest_event_id;
-                let mut record = self
-                    .harness
-                    .inner
-                    .storage
-                    .get_json::<ConversationRecord>(self.owner_dir.join("record.json"))
-                    .await?;
+                let mut record =
+                    load_conversation_record(&self.harness.inner.storage, &self.owner_dir).await?;
                 let add_result = append_events_to_conversation(
                     &self.harness.inner,
                     &self.owner_dir,
@@ -1966,11 +1953,6 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                     &mut record,
                 )
                 .await?;
-                self.harness
-                    .inner
-                    .storage
-                    .put_json(self.owner_dir.join("record.json"), &record)
-                    .await?;
                 state.lock().expect("turn state poisoned").latest_event_id =
                     Some(add_result.latest_event_id);
                 Ok(())
@@ -2467,7 +2449,7 @@ pub(super) async fn load_sandbox_provider_state(
     let ResourceScope::Thread { .. } = owner else {
         return Ok(None);
     };
-    let mut events = load_events(&harness.inner.storage, &owner_dir.join("events"))
+    let mut events = load_events(&harness.inner.storage, owner_dir)
         .await?
         .into_iter()
         .filter(|event| event.data.kind() == EventKind::custom(SANDBOX_PROVIDER_STATE_EVENT))
@@ -3016,11 +2998,8 @@ pub(super) async fn append_sandbox_process_data(
         return Ok(());
     };
     let _guard = event_log.inner.write_lock.lock().await;
-    let mut record = event_log
-        .inner
-        .storage
-        .get_json::<ConversationRecord>(event_log.conversation_dir.join("record.json"))
-        .await?;
+    let mut record =
+        load_conversation_record(&event_log.inner.storage, &event_log.conversation_dir).await?;
     append_events_to_conversation(
         &event_log.inner,
         &event_log.conversation_dir,
@@ -3032,11 +3011,6 @@ pub(super) async fn append_sandbox_process_data(
         &mut record,
     )
     .await?;
-    event_log
-        .inner
-        .storage
-        .put_json(event_log.conversation_dir.join("record.json"), &record)
-        .await?;
     Ok(())
 }
 
@@ -3163,6 +3137,108 @@ pub(crate) fn build_secret_cipher(
         SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
     };
     Ok(SecretCipher::new(provider))
+}
+
+#[cfg(test)]
+mod atomicity_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_event_batch_is_invisible_and_can_be_retried_after_restart() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let harness =
+            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                slug: "atomicity-test".to_string(),
+                name: "Atomicity test".to_string(),
+                vaults: vec![],
+            })
+            .await?;
+        let thread = agent
+            .new_conversation(NewConversationRequest::default())
+            .await?;
+        let agent_id = agent.record().id;
+        let thread_id = thread.record().id;
+        let committed_head = thread.record().latest_event_id;
+
+        let batch = AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: vec![
+                EventData::Error {
+                    message: "first".to_string(),
+                    metadata: None,
+                },
+                EventData::Error {
+                    message: "second".to_string(),
+                    metadata: None,
+                },
+            ],
+        };
+
+        // The entire batch is one object write, so a failed write publishes no events.
+        harness.inner.storage.fail_json_put_after(0);
+        let error = thread
+            .add_events(batch.clone())
+            .await
+            .expect_err("the batch object write should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("injected JSON object write failure")
+        );
+
+        drop(thread);
+        drop(agent);
+        drop(harness);
+
+        let reopened =
+            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+        let agent = reopened
+            .get_agent(&agent_id)
+            .await?
+            .expect("agent survives restart");
+        let thread = agent
+            .get_thread(&thread_id)
+            .await?
+            .expect("thread survives restart");
+        let events = thread.get_events(None).await?.events;
+        let error_messages = events
+            .iter()
+            .filter_map(|event| match &event.data {
+                EventData::Error { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(error_messages.is_empty());
+        assert_eq!(thread.record().latest_event_id, committed_head);
+        assert_eq!(events.last().map(|event| event.id), committed_head);
+
+        // Retrying publishes each event exactly once.
+        let retry = thread.add_events(batch).await?;
+        let thread = agent
+            .get_thread(&thread_id)
+            .await?
+            .expect("thread survives retry");
+        let error_messages = thread
+            .get_events(None)
+            .await?
+            .events
+            .into_iter()
+            .filter_map(|event| match event.data {
+                EventData::Error { message, .. } => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(error_messages, ["first", "second"]);
+        assert_eq!(thread.record().latest_event_id, Some(retry.latest_event_id));
+        for id in retry.event_ids {
+            assert!(thread.get_event(id).await?.is_some());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

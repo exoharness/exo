@@ -41,11 +41,25 @@ mod native;
 #[derive(Clone)]
 pub(crate) struct BasicObjectStore {
     store: Arc<dyn Storage>,
+    #[cfg(test)]
+    fail_json_put_after: Arc<std::sync::Mutex<Option<usize>>>,
 }
 
 impl BasicObjectStore {
     pub(crate) fn new(store: Arc<dyn Storage>) -> Self {
-        Self { store }
+        Self {
+            store,
+            #[cfg(test)]
+            fail_json_put_after: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_json_put_after(&self, successful_puts: usize) {
+        *self
+            .fail_json_put_after
+            .lock()
+            .expect("fault counter poisoned") = Some(successful_puts);
     }
 
     pub(crate) async fn put_json<T: Serialize>(
@@ -53,6 +67,20 @@ impl BasicObjectStore {
         key: impl AsRef<Path>,
         value: &T,
     ) -> Result<()> {
+        #[cfg(test)]
+        {
+            let mut remaining = self
+                .fail_json_put_after
+                .lock()
+                .expect("fault counter poisoned");
+            if let Some(count) = *remaining {
+                if count == 0 {
+                    *remaining = None;
+                    anyhow::bail!("injected JSON object write failure");
+                }
+                *remaining = Some(count - 1);
+            }
+        }
         let bytes = serde_json::to_vec_pretty(value)?;
         let blob = bytes.len() > 64 * 1024;
         self.store

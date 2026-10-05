@@ -68,6 +68,114 @@ mod resource_tests;
 
 const UNFINISHED_TURNS_DIR: &str = "recovery/unfinished_turns";
 
+#[derive(Serialize, Deserialize)]
+struct StoredEventBatch {
+    events: Vec<Event>,
+}
+
+#[derive(Default)]
+struct EventBatchIndex {
+    batches: Vec<IndexedEventBatch>,
+}
+
+struct IndexedEventBatch {
+    first: EventId,
+    last: EventId,
+    max_last: EventId,
+    key: String,
+}
+
+impl EventBatchIndex {
+    fn from_keys(keys: &[String]) -> Self {
+        let mut batches = keys
+            .iter()
+            .filter_map(|key| {
+                let (first, last) = event_batch_range_from_key(key)?;
+                Some(IndexedEventBatch {
+                    first,
+                    last,
+                    max_last: last,
+                    key: key.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        batches.sort_by_key(|batch| batch.first);
+        let mut max_last = None;
+        for batch in &mut batches {
+            batch.max_last =
+                max_last.map_or(batch.last, |current: EventId| current.max(batch.last));
+            max_last = Some(batch.max_last);
+        }
+        Self { batches }
+    }
+
+    fn insert(&mut self, first: EventId, last: EventId, key: String) {
+        let offset = self.batches.partition_point(|batch| batch.first <= first);
+        self.batches.insert(
+            offset,
+            IndexedEventBatch {
+                first,
+                last,
+                max_last: last,
+                key,
+            },
+        );
+        let mut max_last = if offset == 0 {
+            None
+        } else {
+            Some(self.batches[offset - 1].max_last)
+        };
+        for batch in &mut self.batches[offset..] {
+            batch.max_last =
+                max_last.map_or(batch.last, |current: EventId| current.max(batch.last));
+            max_last = Some(batch.max_last);
+        }
+    }
+
+    fn keys_containing(&self, id: EventId) -> Vec<String> {
+        let end = self.batches.partition_point(|batch| batch.first <= id);
+        let mut keys = Vec::new();
+        for batch in self.batches[..end].iter().rev() {
+            if batch.max_last < id {
+                break;
+            }
+            if id <= batch.last {
+                keys.push(batch.key.clone());
+            }
+        }
+        keys
+    }
+}
+
+fn event_batch_path(conversation_dir: &Path, first: EventId, last: EventId) -> PathBuf {
+    conversation_dir
+        .join("events")
+        .join(format!("{first}_{last}.batch.json"))
+}
+
+fn remember_appended_batch(
+    index: &Mutex<Option<EventBatchIndex>>,
+    conversation_dir: &Path,
+    added: &AddEventsResult,
+) {
+    if added.event_ids.len() < 2 {
+        return;
+    }
+    let first = added.event_ids[0];
+    let last = added.latest_event_id;
+    index
+        .lock()
+        .expect("event batch index poisoned")
+        .get_or_insert_with(EventBatchIndex::default)
+        .insert(
+            first,
+            last,
+            event_batch_path(conversation_dir, first, last)
+                .to_string_lossy()
+                .into_owned(),
+        );
+}
+
 fn unfinished_turn_marker_path(
     agent_id: AgentId,
     thread_id: ConversationId,
@@ -709,6 +817,7 @@ impl AgentHandle for BasicAgentHandle {
                             harness: self.harness.clone(),
                             agent_id: self.record.id,
                             record,
+                            event_batch_index: Arc::new(Mutex::new(None)),
                         }) as Arc<dyn ConversationHandle>
                     })
             })
@@ -748,7 +857,7 @@ impl AgentHandle for BasicAgentHandle {
             .conversations_dir()
             .join(id.to_string())
             .join("record.json");
-        let Some(record) = self
+        let Some(mut record) = self
             .harness
             .inner
             .storage
@@ -757,10 +866,19 @@ impl AgentHandle for BasicAgentHandle {
         else {
             return Ok(None);
         };
+        let conversation_dir = record_path.parent().expect("record has a parent");
+        let event_keys = self
+            .harness
+            .inner
+            .storage
+            .list_keys(conversation_dir.join("events"))
+            .await?;
+        record.latest_event_id = latest_event_id_from_keys(&event_keys);
         Ok(Some(Arc::new(BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.record.id,
             record,
+            event_batch_index: Arc::new(Mutex::new(Some(EventBatchIndex::from_keys(&event_keys)))),
         })))
     }
 
@@ -834,6 +952,7 @@ impl AgentHandle for BasicAgentHandle {
             harness: self.harness.clone(),
             agent_id: self.record.id,
             record,
+            event_batch_index: Arc::new(Mutex::new(Some(EventBatchIndex::default()))),
         }))
     }
 
@@ -897,12 +1016,8 @@ impl AgentHandle for BasicAgentHandle {
             {
                 continue;
             }
-            if let Ok(mut record) = self
-                .harness
-                .inner
-                .storage
-                .get_json::<ConversationRecord>(conversation_dir.join("record.json"))
-                .await
+            if let Ok(mut record) =
+                load_conversation_record(&self.harness.inner.storage, &conversation_dir).await
             {
                 append_events_to_conversation(
                     &self.harness.inner,
@@ -1036,7 +1151,18 @@ impl BasicAgentHandle {
                 .collect::<Vec<_>>()
         };
         let mut conversations = stream::iter(paths)
-            .map(|path| async move { storage.get_json_if_exists::<ConversationRecord>(path).await })
+            .map(|path| async move {
+                let Some(mut record) = storage
+                    .get_json_if_exists::<ConversationRecord>(&path)
+                    .await?
+                else {
+                    return Ok::<_, anyhow::Error>(None);
+                };
+                record.latest_event_id =
+                    latest_committed_event_id(storage, path.parent().expect("record has a parent"))
+                        .await?;
+                Ok(Some(record))
+            })
             .buffer_unordered(16)
             .try_collect::<Vec<_>>()
             .await?
@@ -1127,6 +1253,7 @@ struct BasicConversationHandle {
     harness: BasicExoHarness,
     agent_id: AgentId,
     record: ConversationRecord,
+    event_batch_index: Arc<Mutex<Option<EventBatchIndex>>>,
 }
 
 #[async_trait]
@@ -1199,6 +1326,7 @@ impl ConversationHandle for BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.agent_id,
             record,
+            event_batch_index: Arc::clone(&self.event_batch_index),
         }))
     }
 
@@ -1226,6 +1354,7 @@ impl ConversationHandle for BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.agent_id,
             record,
+            event_batch_index: Arc::clone(&self.event_batch_index),
         }))
     }
 
@@ -1324,11 +1453,7 @@ impl ConversationHandle for BasicConversationHandle {
             &mut record,
         )
         .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(conversation_dir.join("record.json"), &record)
-            .await?;
+        remember_appended_batch(&self.event_batch_index, &conversation_dir, &add_result);
 
         Ok(Arc::new(BasicTurnHandle {
             harness: self.harness.clone(),
@@ -1336,6 +1461,7 @@ impl ConversationHandle for BasicConversationHandle {
             conversation_dir,
             conversation_id: self.record.id,
             record: turn_record,
+            event_batch_index: Arc::clone(&self.event_batch_index),
             state: Mutex::new(BasicTurnState {
                 latest_event_id: Some(add_result.latest_event_id),
                 finished: false,
@@ -1350,7 +1476,7 @@ impl ConversationHandle for BasicConversationHandle {
                 thread_id: self.record.id,
             })
             .await?;
-        let events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
+        let events = load_events(&self.harness.inner.storage, &self.conversation_dir()).await?;
         let mut latest_event_id = None;
         let mut finished = false;
         for event in events
@@ -1374,6 +1500,7 @@ impl ConversationHandle for BasicConversationHandle {
             conversation_dir: self.conversation_dir(),
             conversation_id: self.record.id,
             record,
+            event_batch_index: Arc::clone(&self.event_batch_index),
             state: Mutex::new(BasicTurnState {
                 latest_event_id,
                 finished,
@@ -1388,7 +1515,7 @@ impl ConversationHandle for BasicConversationHandle {
                 thread_id: self.record.id,
             })
             .await?;
-        let mut events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
+        let mut events = load_events(&self.harness.inner.storage, &self.conversation_dir()).await?;
         if let Some(query) = query {
             if let Some(session_id) = query.session_id {
                 events.retain(|event| event.session_id == Some(session_id));
@@ -1437,7 +1564,8 @@ impl ConversationHandle for BasicConversationHandle {
         let existing = match after_exclusive {
             Bound::Unbounded => Vec::new(),
             _ => {
-                let events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
+                let events =
+                    load_events(&self.harness.inner.storage, &self.conversation_dir()).await?;
                 events
                     .into_iter()
                     .filter(|event| matches_bound(event.id, &after_exclusive))
@@ -1466,8 +1594,46 @@ impl ConversationHandle for BasicConversationHandle {
                 thread_id: self.record.id,
             })
             .await?;
+        let cached_keys = self
+            .event_batch_index
+            .lock()
+            .expect("event batch index poisoned")
+            .as_ref()
+            .map(|index| index.keys_containing(id));
+        if let Some(keys) = &cached_keys
+            && let Some(event) =
+                read_event_from_batches(&self.harness.inner.storage, keys.clone(), id).await?
+        {
+            return Ok(Some(event));
+        }
+
         let path = self.events_dir().join(format!("{id}.json"));
-        self.harness.inner.storage.get_json_if_exists(&path).await
+        if let Some(event) = self.harness.inner.storage.get_json_if_exists(&path).await? {
+            return Ok(Some(event));
+        }
+
+        // A miss may be a batch appended by another handle or process.
+        let event_keys = self
+            .harness
+            .inner
+            .storage
+            .list_keys(self.events_dir())
+            .await?;
+        let index = EventBatchIndex::from_keys(&event_keys);
+        let checked = cached_keys
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let new_keys = index
+            .keys_containing(id)
+            .into_iter()
+            .filter(|key| !checked.contains(key))
+            .collect();
+        *self
+            .event_batch_index
+            .lock()
+            .expect("event batch index poisoned") = Some(index);
+        read_event_from_batches(&self.harness.inner.storage, new_keys, id).await
     }
 
     async fn add_events(&self, request: AddEventsRequest) -> Result<AddEventsResult> {
@@ -1520,7 +1686,7 @@ impl ConversationHandle for BasicConversationHandle {
             }
             None => derive_unique_slug("fork", &existing),
         };
-        let mut events = load_events(&self.harness.inner.storage, &self.events_dir()).await?;
+        let mut events = load_events(&self.harness.inner.storage, &self.conversation_dir()).await?;
         if let Some(limit) = request.up_to_inclusive {
             events.retain(|event| event.id <= limit);
         }
@@ -1599,6 +1765,7 @@ impl ConversationHandle for BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.agent_id,
             record: fork_record,
+            event_batch_index: Arc::new(Mutex::new(Some(EventBatchIndex::default()))),
         }))
     }
 
@@ -1629,11 +1796,6 @@ impl ConversationHandle for BasicConversationHandle {
             &mut record,
         )
         .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(conversation_dir.join("record.json"), &record)
-            .await?;
         Ok(artifact_version)
     }
 
@@ -1716,11 +1878,7 @@ impl BasicConversationHandle {
     }
 
     async fn load_record(&self) -> Result<ConversationRecord> {
-        self.harness
-            .inner
-            .storage
-            .get_json(self.conversation_dir().join("record.json"))
-            .await
+        load_conversation_record(&self.harness.inner.storage, &self.conversation_dir()).await
     }
 
     async fn append_events_internal(
@@ -1744,11 +1902,7 @@ impl BasicConversationHandle {
             &mut record,
         )
         .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(conversation_dir.join("record.json"), &record)
-            .await?;
+        remember_appended_batch(&self.event_batch_index, &conversation_dir, &add_result);
         Ok(add_result)
     }
 }
@@ -1759,6 +1913,7 @@ struct BasicTurnHandle {
     conversation_dir: PathBuf,
     conversation_id: ConversationId,
     record: TurnRecord,
+    event_batch_index: Arc<Mutex<Option<EventBatchIndex>>>,
     state: Mutex<BasicTurnState>,
 }
 
@@ -1789,12 +1944,8 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let mut record = self
-            .harness
-            .inner
-            .storage
-            .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
-            .await?;
+        let mut record =
+            load_conversation_record(&self.harness.inner.storage, &self.conversation_dir).await?;
         let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
@@ -1807,11 +1958,7 @@ impl TurnHandle for BasicTurnHandle {
             &mut record,
         )
         .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.conversation_dir.join("record.json"), &record)
-            .await?;
+        remember_appended_batch(&self.event_batch_index, &self.conversation_dir, &add_result);
         self.state
             .lock()
             .expect("turn state poisoned")
@@ -1821,12 +1968,8 @@ impl TurnHandle for BasicTurnHandle {
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
         let _guard = self.harness.inner.write_lock.lock().await;
-        let mut record = self
-            .harness
-            .inner
-            .storage
-            .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
-            .await?;
+        let mut record =
+            load_conversation_record(&self.harness.inner.storage, &self.conversation_dir).await?;
         let expected_head = record.latest_event_id;
         let artifact_version = write_artifact_version(
             &self.harness.inner,
@@ -1849,11 +1992,6 @@ impl TurnHandle for BasicTurnHandle {
             &mut record,
         )
         .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.conversation_dir.join("record.json"), &record)
-            .await?;
         self.state
             .lock()
             .expect("turn state poisoned")
@@ -1887,12 +2025,8 @@ impl TurnHandle for BasicTurnHandle {
                 .await?;
             return Ok(event_id);
         }
-        let mut record = self
-            .harness
-            .inner
-            .storage
-            .get_json::<ConversationRecord>(self.conversation_dir.join("record.json"))
-            .await?;
+        let mut record =
+            load_conversation_record(&self.harness.inner.storage, &self.conversation_dir).await?;
         let expected_head = record.latest_event_id;
         let add_result = append_events_to_conversation(
             &self.harness.inner,
@@ -1905,11 +2039,6 @@ impl TurnHandle for BasicTurnHandle {
             &mut record,
         )
         .await?;
-        self.harness
-            .inner
-            .storage
-            .put_json(self.conversation_dir.join("record.json"), &record)
-            .await?;
         let latest = add_result.latest_event_id;
         {
             let mut state = self.state.lock().expect("turn state poisoned");
@@ -1967,8 +2096,7 @@ async fn append_events_to_conversation(
             turn_id,
         )?;
     }
-    let mut event_ids = Vec::new();
-    let mut latest_event_id = None;
+    let mut events = Vec::with_capacity(data.len());
     for data in data {
         let id = Uuid7::now();
         let event = Event {
@@ -1979,20 +2107,37 @@ async fn append_events_to_conversation(
             created_at: id.timestamp().expect("uuid7 timestamp"),
             data,
         };
+        events.push(event);
+    }
+    let first_event_id = events.first().expect("at least one event").id;
+    let latest_event_id = events.last().expect("at least one event").id;
+    if events.len() == 1 {
         inner
             .storage
             .put_json(
                 conversation_dir
                     .join("events")
-                    .join(format!("{}.json", event.id)),
-                &event,
+                    .join(format!("{latest_event_id}.json")),
+                &events[0],
             )
             .await?;
-        notify_subscribers(inner, conversation_id, event.clone());
-        latest_event_id = Some(event.id);
-        event_ids.push(event.id);
+    } else {
+        // One object put commits the whole batch. The filename bounds let
+        // get_event skip unrelated batches without a separate index write.
+        let batch = StoredEventBatch { events };
+        inner
+            .storage
+            .put_json(
+                event_batch_path(conversation_dir, first_event_id, latest_event_id),
+                &batch,
+            )
+            .await?;
+        events = batch.events;
     }
-    let latest_event_id = latest_event_id.expect("at least one event");
+    let event_ids = events.iter().map(|event| event.id).collect();
+    for event in events {
+        notify_subscribers(inner, conversation_id, event);
+    }
     record.latest_event_id = Some(latest_event_id);
     Ok(AddEventsResult {
         event_ids,
@@ -2076,12 +2221,99 @@ fn matches_bound(event_id: EventId, bound: &Bound<EventId>) -> bool {
     }
 }
 
-async fn load_events(storage: &BasicObjectStore, events_dir: &Path) -> Result<Vec<Event>> {
-    let mut events = storage
-        .list_json_matching_suffix::<Event>(events_dir, ".json")
-        .await?;
+async fn read_event_from_batches(
+    storage: &BasicObjectStore,
+    keys: Vec<String>,
+    id: EventId,
+) -> Result<Option<Event>> {
+    let matching_events = stream::iter(keys)
+        .map(|key| async move {
+            storage
+                .get_json_if_exists::<StoredEventBatch>(Path::new(&key))
+                .await
+        })
+        .buffered(16)
+        .try_filter_map(|batch| async move {
+            Ok(batch.and_then(|batch| batch.events.into_iter().find(|event| event.id == id)))
+        });
+    futures::pin_mut!(matching_events);
+    matching_events.try_next().await
+}
+
+async fn load_events(storage: &BasicObjectStore, conversation_dir: &Path) -> Result<Vec<Event>> {
+    let keys = storage
+        .list_keys(conversation_dir.join("events"))
+        .await?
+        .into_iter()
+        .filter(|key| event_id_from_key(key).is_some());
+    let mut events = stream::iter(keys)
+        .map(|key| async move {
+            if is_event_batch_key(&key) {
+                Ok::<_, anyhow::Error>(
+                    storage
+                        .get_json_if_exists::<StoredEventBatch>(Path::new(&key))
+                        .await?
+                        .map(|batch| batch.events)
+                        .unwrap_or_default(),
+                )
+            } else {
+                Ok(storage
+                    .get_json_if_exists::<Event>(Path::new(&key))
+                    .await?
+                    .into_iter()
+                    .collect())
+            }
+        })
+        .buffered(16)
+        .try_collect::<Vec<Vec<Event>>>()
+        .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     events.sort_by_key(|event| event.id);
     Ok(events)
+}
+
+async fn load_conversation_record(
+    storage: &BasicObjectStore,
+    conversation_dir: &Path,
+) -> Result<ConversationRecord> {
+    let mut record = storage
+        .get_json::<ConversationRecord>(conversation_dir.join("record.json"))
+        .await?;
+    // Event objects are authoritative. record.json also stores mutable thread
+    // metadata, but its cached head need not be rewritten after every append.
+    record.latest_event_id = latest_committed_event_id(storage, conversation_dir).await?;
+    Ok(record)
+}
+
+async fn latest_committed_event_id(
+    storage: &BasicObjectStore,
+    conversation_dir: &Path,
+) -> Result<Option<EventId>> {
+    let keys = storage.list_keys(conversation_dir.join("events")).await?;
+    Ok(latest_event_id_from_keys(&keys))
+}
+
+fn latest_event_id_from_keys(keys: &[String]) -> Option<EventId> {
+    keys.iter().filter_map(|key| event_id_from_key(key)).max()
+}
+
+fn event_id_from_key(key: &str) -> Option<EventId> {
+    if let Some((_, last)) = event_batch_range_from_key(key) {
+        return Some(last);
+    }
+    key.rsplit('/').next()?.strip_suffix(".json")?.parse().ok()
+}
+
+fn event_batch_range_from_key(key: &str) -> Option<(EventId, EventId)> {
+    let range = key.rsplit('/').next()?.strip_suffix(".batch.json")?;
+    let (first, last) = range.split_once('_')?;
+    Some((first.parse().ok()?, last.parse().ok()?))
+}
+
+fn is_event_batch_key(key: &str) -> bool {
+    key.ends_with(".batch.json")
 }
 
 async fn load_artifact_versions(
