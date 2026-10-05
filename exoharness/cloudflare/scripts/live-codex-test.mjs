@@ -142,7 +142,7 @@ try {
     "four tests did not pass",
   );
   checks.push(
-    "session-end checkpoint restores workspace and native Codex history after sandbox destruction; resumed usage is reported and follow-up changes pass four tests",
+    "explicit snapshot restores workspace and native Codex history after sandbox destruction; resumed usage is reported and follow-up changes pass four tests",
   );
   for (const check of checks) console.log(`PASS ${check}`);
 } finally {

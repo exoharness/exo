@@ -16,6 +16,7 @@ function run(command, args) {
 mkdirSync(output, { recursive: true });
 run("cargo", [
   "build",
+  "--locked",
   "-p",
   "exo-worker-runtime",
   "--release",

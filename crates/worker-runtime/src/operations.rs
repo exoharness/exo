@@ -15,7 +15,6 @@ pub(crate) enum Operation {
     },
     Progress {
         thread_id: ThreadId,
-        turn: exoharness::TurnRecord,
         event: executor::TypeScriptStreamEvent,
     },
     Http {
@@ -38,7 +37,7 @@ pub(crate) enum Operation {
     },
     HasUnfinishedTurns,
     Recover,
-    Events {
+    Watch {
         agent_id: AgentId,
         thread_id: ThreadId,
         after: Option<exoharness::EventId>,
@@ -51,8 +50,6 @@ pub(crate) enum Output {
     Http(crate::http::Response),
     Harness(executor::typescript_runtime::RuntimeResponsePayload),
     Exo(Box<exoharness::protocol::Response>),
-    // JSON/SSE byte fields must be arrays; host process I/O stays Uint8Array.
-    Json(serde_json::Value),
     Policy(std::collections::HashMap<String, String>),
     Headers(Vec<(String, String)>),
     Bool(bool),
@@ -64,6 +61,8 @@ pub(crate) async fn run(
     execution: Arc<crate::execution::WorkerExecutor>,
     host: Arc<Host>,
     updates: Arc<tokio::sync::Mutex<()>>,
+    progress: tokio::sync::broadcast::Sender<exoharness::Event>,
+    id: u32,
     operation: Operation,
 ) -> Result<Output> {
     let state = runtime.exoharness_handle();
@@ -71,53 +70,39 @@ pub(crate) async fn run(
         Operation::Request { request } => Ok(Output::Exo(Box::new(
             crate::http::request(&runtime, request).await?,
         ))),
-        Operation::Progress {
-            thread_id,
-            turn,
-            event,
-        } => {
-            let progress = if let executor::ExecutionStreamEvent::Chunk(chunk) =
-                executor::to_execution_stream_event(event)
-            {
-                let id = exoharness::Uuid7::now();
-                Some(exoharness::Event {
-                    id,
-                    thread_id,
-                    session_id: Some(turn.session_id),
-                    turn_id: Some(turn.id),
-                    created_at: id.timestamp().expect("uuid7 timestamp"),
-                    data: exoharness::EventData::LinguaStreamChunk { chunk },
-                })
-            } else {
-                None
-            };
-            Ok(Output::Json(serde_json::to_value(progress)?))
+        Operation::Progress { thread_id, event } => {
+            execution.emit_stream(thread_id, event)?;
+            Ok(Output::Unit(()))
         }
         Operation::Http { request } => Ok(Output::Http(
-            crate::http::handle(&runtime, &host, &updates, request).await,
+            crate::http::handle(&runtime, &host, &updates, &progress, request).await,
         )),
-        Operation::Events {
+        Operation::Watch {
             agent_id,
             thread_id,
             after,
         } => {
+            use futures::StreamExt;
             let service = executor::managed_agents::service::Service {
                 runtime: &runtime,
                 agent_id: None,
                 definition_updates: &updates,
             };
-            let path = executor::managed_agents::service::ThreadPath {
-                agent_id,
-                thread_id,
-            };
-            let query = exo_managed_agents::http::protocol::EventsQuery {
+            let agent = service.agent(agent_id).await?;
+            let thread = service.thread(agent.as_ref(), thread_id).await?;
+            let mut events = executor::managed_agents::service::watch_events(
+                thread.as_ref(),
+                progress.subscribe(),
                 after,
-                limit: Some(1000),
-                ..Default::default()
-            };
-            Ok(Output::Json(serde_json::to_value(
-                executor::managed_agents::service::wait_events(&service, &path, query).await?,
-            )?))
+            )
+            .await?;
+            while let Some(event) = events.next().await {
+                host.watch_events
+                    .lock()
+                    .expect("Worker watches poisoned")
+                    .push((id, serde_json::to_value(event?)?));
+            }
+            Ok(Output::Unit(()))
         }
         Operation::SandboxPolicy { request } => {
             let _guard = updates.lock().await;

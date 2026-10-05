@@ -254,7 +254,7 @@ impl ToolRuntime for ExoToolRuntime {
 }
 
 use crate::ShellToolArguments;
-use crate::shell_tool::read_shell_process;
+use crate::shell_tool::{execute_shell_tool, read_shell_process};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -869,29 +869,6 @@ fn parse_snapshot_id(value: &str) -> Result<SnapshotId> {
         .map_err(|error| anyhow::anyhow!("invalid snapshotId {value}: {error}"))
 }
 
-async fn execute_shell_tool(
-    conversation: &dyn ConversationHandle,
-    agent_config: &AgentConfig,
-    config: &ConversationConfig,
-    request: &ToolRequest,
-) -> Result<ToolResult> {
-    let args =
-        serde_json::from_value::<ShellToolArguments>(Value::Object(request.arguments.clone()))?;
-    let program = config
-        .shell_program
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let sandbox_id = ensure_shell_sandbox(conversation, agent_config, config).await?;
-    let process = conversation
-        .run_in_sandbox(RunInSandboxRequest {
-            id: sandbox_id,
-            command: vec![program, "-lc".to_string(), args.command],
-            env: Default::default(),
-        })
-        .await?;
-    read_shell_process(process).await
-}
-
 async fn execute_exo_shell_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
@@ -920,20 +897,6 @@ async fn execute_exo_shell_tool(
         })
         .await?;
     read_shell_process(process).await
-}
-
-pub(crate) async fn ensure_shell_sandbox(
-    conversation: &dyn ConversationHandle,
-    agent_config: &AgentConfig,
-    config: &ConversationConfig,
-) -> Result<String> {
-    ensure_conversation_sandbox(
-        conversation,
-        agent_config,
-        config,
-        config.shell_program.as_deref(),
-    )
-    .await
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ use futures::{Stream, future::BoxFuture, task::waker};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use execution::{WorkerExecutor, WorkerModel, WorkerTools, WorkerTracer};
+use execution::{WorkerExecutor, WorkerModel, WorkerTools};
 use host::{Host, HostCall, HostStorage};
 
 #[derive(Serialize)]
@@ -35,6 +35,7 @@ struct Progress {
     completed: Vec<Completion>,
     pending: bool,
     events: Vec<executor::typescript_runtime::RuntimeEvent>,
+    watch_events: Vec<(u32, serde_json::Value)>,
 }
 
 /// Runs the existing LocalProvider inside a Worker. JavaScript supplies I/O;
@@ -45,6 +46,7 @@ pub struct WorkerRuntime {
     execution: Arc<WorkerExecutor>,
     mutations: Arc<tokio::sync::Mutex<()>>,
     host: Arc<Host>,
+    progress: tokio::sync::broadcast::Sender<exoharness::Event>,
     running: FuturesUnordered<BoxFuture<'static, ()>>,
     completed: Arc<Mutex<Vec<Completion>>>,
     next_operation: u32,
@@ -92,7 +94,7 @@ impl WorkerRuntime {
         });
         let runtime = Runtime::with_tracer(
             LocalProvider::with_host(state, execution.clone(), host.clone()),
-            Arc::new(WorkerTracer),
+            Arc::new(executor::execution_tracing::NoopExecutionTracer),
         );
         runtime.begin_recovery_scan();
         Ok(Self {
@@ -100,6 +102,7 @@ impl WorkerRuntime {
             execution,
             mutations: Arc::default(),
             host,
+            progress: tokio::sync::broadcast::channel(1024).0,
             running: FuturesUnordered::new(),
             completed: Arc::default(),
             next_operation: 0,
@@ -120,11 +123,12 @@ impl WorkerRuntime {
         let execution = self.execution.clone();
         let updates = self.mutations.clone();
         let completed = self.completed.clone();
+        let progress = self.progress.clone();
         let (cancel, registration) = AbortHandle::new_pair();
         self.cancellations.insert(id, cancel);
         self.running.push(Box::pin(async move {
             let result = Abortable::new(
-                operations::run(runtime, execution, host, updates, operation),
+                operations::run(runtime, execution, host, updates, progress, id, operation),
                 registration,
             )
             .await
@@ -194,6 +198,13 @@ impl WorkerRuntime {
             completed,
             pending: !self.running.is_empty(),
             events: std::mem::take(&mut *self.host.events.lock().expect("Worker events poisoned")),
+            watch_events: std::mem::take(
+                &mut *self
+                    .host
+                    .watch_events
+                    .lock()
+                    .expect("Worker watches poisoned"),
+            ),
         }
         .serialize(
             &serde_wasm_bindgen::Serializer::json_compatible().serialize_bytes_as_arrays(false),

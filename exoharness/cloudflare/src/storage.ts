@@ -29,7 +29,7 @@ export class Storage {
   ): Promise<void> {
     const previous = await this.kv.get<Entry>(prefix + key);
     let entry: Entry = { bytes };
-    if (blob && bytes.byteLength > 64 * 1024) {
+    if (blob) {
       const path = `${this.namespace}/${crypto.randomUUID()}`;
       await this.blobs.put(path, bytes);
       entry = { blob: path };

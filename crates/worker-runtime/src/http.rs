@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use executor::{Runtime, managed_agents::service as api, runtime_host::RuntimeHost};
-use futures::StreamExt;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::host::Host;
@@ -46,9 +45,10 @@ pub(crate) async fn handle(
     runtime: &Runtime,
     host: &Arc<Host>,
     updates: &tokio::sync::Mutex<()>,
+    progress: &tokio::sync::broadcast::Sender<exoharness::Event>,
     request: Request,
 ) -> Response {
-    match route(runtime, host, updates, &request).await {
+    match route(runtime, host, updates, progress, &request).await {
         Ok(response) => response,
         Err(error) => {
             #[derive(Serialize)]
@@ -79,6 +79,7 @@ async fn route(
     runtime: &Runtime,
     host: &Arc<Host>,
     updates: &tokio::sync::Mutex<()>,
+    progress: &tokio::sync::broadcast::Sender<exoharness::Event>,
     r: &Request,
 ) -> Result<Response> {
     let service = api::Service {
@@ -89,22 +90,11 @@ async fn route(
     let path = r.path.iter().map(String::as_str).collect::<Vec<_>>();
     let method = r.method.as_str();
     if path == ["request"] && method == "POST" {
-        let exoharness::protocol::ClientMessage::Request { id, request } = body(r)?;
-        let result = self::request(runtime, request).await;
-        return json(match result {
-            Ok(response) => exoharness::protocol::ServerMessage::Response {
-                id,
-                ok: true,
-                response: Some(response),
-                error: None,
-            },
-            Err(error) => exoharness::protocol::ServerMessage::Response {
-                id,
-                ok: false,
-                response: None,
-                error: Some(error.to_string()),
-            },
-        });
+        return json(
+            exoharness::server::ExoHarnessServer::new(runtime.exoharness_handle())
+                .handle_message(body(r)?)
+                .await,
+        );
     }
     match (method, path.as_slice()) {
         ("GET", ["environment"]) => return json(api::list_environments(&service).await?),
@@ -224,9 +214,11 @@ async fn route(
                     let prepared =
                         api::prepare_turn(runtime, agent.as_ref(), conversation.as_ref(), body(r)?)
                             .await?;
+                    // WorkerModel only supports non-streaming responses; the
+                    // TypeScript harness supplies its own model stream.
                     let streaming =
                         prepared.config.harness == executor::AgentHarnessKind::TypeScript;
-                    let (result, mut stream) = api::submit_turn(
+                    let (result, stream) = api::submit_turn(
                         runtime,
                         agent.clone(),
                         conversation.clone(),
@@ -234,12 +226,10 @@ async fn route(
                         streaming,
                     )
                     .await?;
+                    let turn = result.turn.clone();
+                    let progress = progress.clone();
                     host.spawn(Box::pin(async move {
-                        while let Some(event) = stream.next().await {
-                            if let Err(error) = event {
-                                tracing::warn!(%error, "Worker turn failed");
-                            }
-                        }
+                        api::forward_progress(stream, thread.thread_id, turn, progress).await;
                     }));
                     let mut response = json(result)?;
                     response.status = 202;

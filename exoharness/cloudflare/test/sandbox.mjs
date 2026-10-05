@@ -207,3 +207,43 @@ test("production process invocation stays alive; checkpoint finishes before new 
   await next;
   assert.equal(began, true);
 });
+
+test("overlapping acquire, activity and snapshot share one container start", async () => {
+  const f = fixture();
+  await f.sandbox.acquire(identity, "", "/workspace", {}, null, 300_000);
+  f.container.running = false;
+  await Promise.all([
+    f.sandbox.acquire(identity, "", "/workspace", {}, null, 300_000),
+    f.sandbox.beginActivity(identity, "turn"),
+    f.sandbox.snapshot(identity),
+  ]);
+  assert.equal(f.calls.filter((call) => call[0] === "start").length, 2);
+});
+
+test("a command timeout kills the process and preserves the warm container", async () => {
+  const f = fixture();
+  await f.sandbox.acquire(identity, "", "/workspace", {}, null, 300_000);
+  let finish;
+  f.container.exec = async () => ({
+    output: () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    kill: (signal) => {
+      f.calls.push(`kill:${signal}`);
+      finish({
+        exitCode: 137,
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+      });
+    },
+  });
+  const result = await f.sandbox.exec(identity, {
+    command: ["sleep", "10"],
+    timeoutMs: 1,
+  });
+  assert.equal(result.exitCode, 137);
+  assert(f.calls.includes("kill:9"));
+  assert(!f.calls.includes("destroy"));
+  assert(f.container.running);
+});

@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use executor::conversation_sandbox::ensure_conversation_sandbox;
-use executor::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
+use executor::execution_tracing::TurnExecutionTrace;
 use executor::managed_agents::{
     HarnessModules, TypeScriptHarnessPreset, agent_config_with_modules,
 };
@@ -111,21 +111,7 @@ impl ToolRuntime for WorkerTools {
         request: &ToolRequest,
     ) -> Result<ToolResult> {
         ensure!(request.function_name == "shell", "unsupported Worker tool");
-        let args: executor::ShellToolArguments =
-            serde_json::from_value(serde_json::to_value(&request.arguments)?)?;
-        let program = config
-            .shell_program
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-        let sandbox_id = ensure_conversation_sandbox(thread, agent_config, config, None).await?;
-        let process = thread
-            .run_in_sandbox(exoharness::RunInSandboxRequest {
-                id: sandbox_id,
-                command: vec![program.clone(), "-lc".into(), args.command],
-                env: Default::default(),
-            })
-            .await?;
-        executor::shell_tool::read_shell_process(process).await
+        executor::shell_tool::execute_shell_tool(thread, agent_config, config, request).await
     }
 }
 
@@ -269,6 +255,29 @@ impl HarnessExecutor for WorkerExecutor {
 }
 
 impl WorkerExecutor {
+    pub fn emit_stream(
+        &self,
+        thread: exoharness::ThreadId,
+        event: executor::TypeScriptStreamEvent,
+    ) -> Result<()> {
+        let harnesses = self.harnesses.lock().expect("Worker harnesses poisoned");
+        let harness = harnesses
+            .get(&thread)
+            .ok_or_else(|| anyhow::anyhow!("TypeScript harness is not active"))?;
+        let turn = harness.turn.lock().expect("Worker turn poisoned");
+        let turn = turn
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("TypeScript turn is not active"))?;
+        if let Some(stream) = &turn.stream
+            && stream
+                .send(Ok(executor::to_execution_stream_event(event)))
+                .is_err()
+        {
+            tracing::trace!("turn stream closed before progress arrived");
+        }
+        Ok(())
+    }
+
     pub async fn request_runtime(
         &self,
         thread: exoharness::ThreadId,
@@ -389,25 +398,5 @@ impl WorkerExecutor {
         }
         result?;
         Ok(())
-    }
-}
-
-pub(crate) struct WorkerTracer;
-#[async_trait]
-impl ExecutionTracer for WorkerTracer {
-    async fn flush(&self) -> Result<()> {
-        Ok(())
-    }
-    async fn start_turn(
-        &self,
-        _config: Option<&executor::BraintrustTracingConfig>,
-        _agent: &exoharness::AgentRecord,
-        _thread: &exoharness::ConversationRecord,
-        _agent_config: &AgentConfig,
-        _session: exoharness::SessionId,
-        _turn: exoharness::TurnId,
-        _streamed: bool,
-    ) -> Option<Box<dyn TurnExecutionTrace>> {
-        None
     }
 }

@@ -4,7 +4,6 @@ use anyhow::anyhow;
 #[cfg(feature = "basic-backend")]
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 
-#[cfg(feature = "basic-backend")]
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::protocol::{ConversationHandleInfo, Request, Response, SnapshotScope};
 use crate::vault::{VaultContext, require_vault};
@@ -61,6 +60,24 @@ impl ExoHarnessServer {
             } => Ok(self
                 .require_turn(agent_id, thread_id, session_id, turn_id)
                 .await?),
+        }
+    }
+
+    pub async fn handle_message(&self, message: ClientMessage) -> ServerMessage {
+        let ClientMessage::Request { id, request } = message;
+        match self.handle_request(request).await {
+            Ok(response) => ServerMessage::Response {
+                id,
+                ok: true,
+                response: Some(response),
+                error: None,
+            },
+            Err(error) => ServerMessage::Response {
+                id,
+                ok: false,
+                response: None,
+                error: Some(error.to_string()),
+            },
         }
     }
 
@@ -545,21 +562,7 @@ impl ExoHarnessServer {
 
         while let Some(line) = lines.next_line().await? {
             let message: ClientMessage = serde_json::from_str(&line)?;
-            let ClientMessage::Request { id, request } = message;
-            let response = match self.handle_request(request).await {
-                Ok(response) => ServerMessage::Response {
-                    id,
-                    ok: true,
-                    response: Some(response),
-                    error: None,
-                },
-                Err(error) => ServerMessage::Response {
-                    id,
-                    ok: false,
-                    response: None,
-                    error: Some(error.to_string()),
-                },
-            };
+            let response = self.handle_message(message).await;
             let encoded = serde_json::to_vec(&response)?;
             writer.write_all(&encoded).await?;
             writer.write_all(b"\n").await?;

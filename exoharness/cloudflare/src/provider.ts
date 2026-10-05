@@ -1,9 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 import type {
-  RawEvent,
-  RawGetEventsResult,
-} from "../../typescript/harness/client";
-import type {
   Env,
   SandboxIdentity,
   SandboxPolicy,
@@ -14,7 +10,6 @@ import { RuntimeIO } from "./runtime-io";
 
 export class ExoProvider extends DurableObject<Env> {
   private readonly runtime: Runtime;
-  private readonly progress = new Map<string, Set<(event: RawEvent) => void>>();
   private readonly recovered: Promise<unknown>;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -26,9 +21,7 @@ export class ExoProvider extends DurableObject<Env> {
       (promise) => ctx.waitUntil(promise),
       (event) => io.harnessProcesses.handleEvent(event),
     );
-    io = new RuntimeIO(ctx, env, this.runtime, (threadId, event) => {
-      for (const send of this.progress.get(threadId) ?? []) send(event);
-    });
+    io = new RuntimeIO(ctx, env, this.runtime);
     this.recovered = this.runtime.call({ type: "recover" });
     ctx.waitUntil(this.recovered);
   }
@@ -167,40 +160,22 @@ export class ExoProvider extends DurableObject<Env> {
           if (!abort.signal.aborted)
             controller.enqueue(encoder.encode(": heartbeat\n\n"));
         }, 10_000);
-        const emit = (event: RawEvent) => {
-          if (!abort.signal.aborted)
-            controller.enqueue(
-              encoder.encode(
-                `event: exo_event\ndata: ${JSON.stringify(event)}\n\n`,
-              ),
-            );
-        };
-        const listeners = this.progress.get(threadId) ?? new Set();
-        this.progress.set(threadId, listeners);
-        listeners.add(emit);
         const send = async () => {
           try {
-            while (!abort.signal.aborted) {
-              const page = await this.runtime.call<RawGetEventsResult>(
-                {
-                  type: "events",
-                  agent_id: agentId,
-                  thread_id: threadId,
-                  after,
-                },
-                abort.signal,
-              );
-              for (const event of page.events as RawEvent[]) {
-                abort.signal.throwIfAborted();
-                emit(event);
-                after = event.id;
-              }
-            }
+            await this.runtime.call(
+              { type: "watch", agent_id: agentId, thread_id: threadId, after },
+              abort.signal,
+              (event) =>
+                controller.enqueue(
+                  encoder.encode(
+                    `event: exo_event\ndata: ${JSON.stringify(event)}\n\n`,
+                  ),
+                ),
+            );
+            if (!abort.signal.aborted) controller.close();
           } catch (error) {
             if (!abort.signal.aborted) controller.error(error);
           } finally {
-            listeners.delete(emit);
-            if (!listeners.size) this.progress.delete(threadId);
             clearInterval(timer);
             request.signal.removeEventListener("abort", cancel);
           }

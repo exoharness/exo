@@ -5,6 +5,7 @@ import type {
   RawExoRequest,
   RawExoResponse,
   RawRuntimeEvent,
+  RawEvent,
 } from "../../typescript/harness/client";
 
 initSync({ module: runtimeWasm });
@@ -15,6 +16,7 @@ interface Progress {
   completed: { id: number; result: unknown; error: string | null }[];
   pending: boolean;
   events: RawRuntimeEvent[];
+  watch_events: [number, RawEvent][];
 }
 
 /** Owns the portable Rust runtime; JavaScript supplies asynchronous host I/O. */
@@ -22,7 +24,11 @@ export class Runtime {
   private readonly wasm: WorkerRuntime;
   private readonly operations = new Map<
     number,
-    { resolve(value: unknown): void; reject(error: Error): void }
+    {
+      resolve(value: unknown): void;
+      reject(error: Error): void;
+      emit?: (event: RawEvent) => void;
+    }
   >();
   private readonly calls = new Map<number, AbortController>();
   private idle?: { promise: Promise<void>; resolve(): void };
@@ -39,11 +45,16 @@ export class Runtime {
     this.wasm = new WorkerRuntime(masterKey);
   }
 
-  call<T>(operation: unknown, signal?: AbortSignal): Promise<T> {
+  call<T>(
+    operation: unknown,
+    signal?: AbortSignal,
+    emit?: (event: RawEvent) => void,
+  ): Promise<T> {
     signal?.throwIfAborted();
     const id = this.wasm.submit(operation);
     const result = new Promise<T>((resolve, reject) => {
       this.operations.set(id, {
+        emit,
         resolve: (value) => resolve(value as T),
         reject,
       });
@@ -74,6 +85,8 @@ export class Runtime {
   private pump(): void {
     const progress = this.wasm.poll() as Progress;
     for (const id of progress.cancelled) this.calls.get(id)?.abort();
+    for (const [id, event] of progress.watch_events)
+      this.operations.get(id)?.emit?.(event);
     for (const completion of progress.completed) {
       const operation = this.operations.get(completion.id);
       if (!operation) continue;

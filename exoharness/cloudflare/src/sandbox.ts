@@ -173,7 +173,7 @@ export class ExoSandbox extends DurableObject<Env> {
       await this.ctx.storage.put("cwd", cwd);
       await this.ctx.storage.put("environment", environment);
       await this.ctx.storage.put("image", reference);
-      await this.start(identity);
+      await this.readyContainer(identity);
       return name;
     } finally {
       this.activeExecs--;
@@ -205,9 +205,7 @@ export class ExoSandbox extends DurableObject<Env> {
     this.activities.add(id);
     // A checkpoint may take longer than blockConcurrencyWhile's time limit.
     // New work waits for that checkpoint before restarting the sandbox.
-    await this.stopping;
-    await this.ctx.storage.deleteAlarm();
-    await (await this.start(identity)).setInactivityTimeout(660_000);
+    await (await this.readyContainer(identity)).setInactivityTimeout(660_000);
   }
 
   async endActivity(id: string): Promise<void> {
@@ -307,27 +305,15 @@ export class ExoSandbox extends DurableObject<Env> {
     identity: SandboxIdentity,
     request: ExecRequest,
   ): Promise<ExecResult> {
-    if (
-      !Array.isArray(request.command) ||
-      !request.command.length ||
-      request.command.some(
-        (part) => typeof part !== "string" || part.includes("\0"),
-      )
-    )
-      throw new Error("command must be an argv array");
-    const timeoutMs = request.timeoutMs ?? 60_000;
-    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000)
-      throw new Error("timeout must be between 1 and 120000 ms");
     const container = await this.readyContainer(identity);
     const options = await this.execOptions(request);
     const process = await container.exec(request.command, {
       ...options,
     });
-    // Abort destroys the whole instance, including descendants, before returning
-    // an ambiguous result. We never retry the command automatically.
-    const timer = setTimeout(() => {
-      this.ctx.waitUntil(container.destroy());
-    }, timeoutMs);
+    const timer =
+      request.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => process.kill(9), request.timeoutMs);
     try {
       const output = await process.output();
       const decoder = new TextDecoder();
@@ -337,7 +323,7 @@ export class ExoSandbox extends DurableObject<Env> {
         exitCode: output.exitCode,
       };
     } finally {
-      clearTimeout(timer);
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -403,9 +389,7 @@ export class ExoSandbox extends DurableObject<Env> {
   async snapshot(identity: SandboxIdentity): Promise<ContainerSnapshot> {
     this.activeExecs++;
     try {
-      await this.stopping;
-      await this.ctx.storage.deleteAlarm();
-      const container = await this.start(identity);
+      const container = await this.readyContainer(identity);
       const snapshot = await container.snapshotContainer();
       await this.ctx.storage.put("snapshot", snapshot);
       return snapshot;

@@ -77,10 +77,6 @@ export class RuntimeIO {
     private readonly ctx: DurableObjectState,
     private readonly env: Env,
     private readonly runtime: Runtime,
-    private readonly emitProgress: (
-      threadId: string,
-      event: import("../../typescript/harness/client").RawEvent,
-    ) => void,
   ) {
     this.storage = new Storage(ctx.storage, env.ARTIFACTS, ctx.id.toString());
   }
@@ -279,20 +275,11 @@ export class RuntimeIO {
         ),
       startSandboxProcess: (request) =>
         this.harnessProcesses.start(request, client.requestRuntime),
-      emitStream: async (event) => {
-        const progress = await this.runtime.call<
-          import("../../typescript/harness/client").RawEvent | null
-        >(
-          {
-            type: "progress",
-            thread_id: threadId,
-            turn: payload.turn.record,
-            event,
-          },
+      emitStream: (event) =>
+        this.runtime.call(
+          { type: "progress", thread_id: threadId, event },
           signal,
-        );
-        if (progress) this.emitProgress(threadId, progress);
-      },
+        ),
     };
     const context = createTurnContext(client, payload);
     signal.throwIfAborted();

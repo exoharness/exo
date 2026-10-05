@@ -38,6 +38,8 @@ pub(crate) struct Host {
     pub tasks: Mutex<Vec<BoxFuture<'static, ()>>>,
     pub awake: AtomicBool,
     pub events: Mutex<Vec<RuntimeEvent>>,
+    // JSON/SSE byte fields are arrays; process I/O uses Uint8Array separately.
+    pub watch_events: Mutex<Vec<(u32, serde_json::Value)>>,
 }
 
 impl Host {
