@@ -26,6 +26,7 @@ const AGENT_PORT: u32 = 10_052;
 const READY_HOST_PORT: u32 = 10_053;
 const GUEST_UID: u32 = 10_001;
 const GUEST_GID: u32 = 10_001;
+static ALLOW_GUEST_ROOT: AtomicBool = AtomicBool::new(false);
 const MAX_CONNECTIONS: usize = 32;
 const MAX_PROCESSES: usize = 128;
 const MAX_RECV_EVENTS: usize = 64;
@@ -689,6 +690,11 @@ fn set_command_user() -> std::io::Result<()> {
     if unsafe { libc::setresuid(GUEST_UID, GUEST_UID, GUEST_UID) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
+    if !ALLOW_GUEST_ROOT.load(Ordering::Relaxed)
+        && unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
     Ok(())
 }
 
@@ -996,7 +1002,9 @@ fn signal_ready_to_host() -> Result<(), String> {
 fn initialize_guest() -> Result<(), String> {
     mount_pseudo_filesystems()?;
     let command_line = fs::read_to_string("/proc/cmdline").map_err(|error| error.to_string())?;
-    setup_root_overlay()?;
+    let allow_guest_root = guest_root_allowed(&command_line)?;
+    ALLOW_GUEST_ROOT.store(allow_guest_root, Ordering::Relaxed);
+    setup_root_overlay(allow_guest_root)?;
     configure_hostname()?;
     configure_network(&command_line)?;
     let workspace = command_line_value(&command_line, "exo_workdir")
@@ -1035,7 +1043,15 @@ fn mount_resources(
     Ok(())
 }
 
-fn setup_root_overlay() -> Result<(), String> {
+fn guest_root_allowed(command_line: &str) -> Result<bool, String> {
+    match command_line_value(command_line, "exo_allow_guest_root").as_deref() {
+        None | Some("0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(value) => Err(format!("invalid exo_allow_guest_root value: {value}")),
+    }
+}
+
+fn setup_root_overlay(allow_guest_root: bool) -> Result<(), String> {
     // The immutable OCI filesystem is shared by every VM. A separate sparse
     // ext4 disk holds only this VM's changes, matching the lower/upper layout
     // used by Hypeman instead of copying the full base image per launch.
@@ -1045,20 +1061,15 @@ fn setup_root_overlay() -> Result<(), String> {
     for path in ["/mnt/lower", "/mnt/upper", "/mnt/newroot"] {
         fs::create_dir_all(path).map_err(|error| error.to_string())?;
     }
+    let flags = libc::MS_NODEV | if allow_guest_root { 0 } else { libc::MS_NOSUID };
     mount_filesystem(
         Some("/dev/vda"),
         "/mnt/lower",
         Some("ext4"),
-        libc::MS_RDONLY | libc::MS_NODEV,
+        libc::MS_RDONLY | flags,
         None,
     )?;
-    mount_filesystem(
-        Some("/dev/vdb"),
-        "/mnt/upper",
-        Some("ext4"),
-        libc::MS_NODEV,
-        None,
-    )?;
+    mount_filesystem(Some("/dev/vdb"), "/mnt/upper", Some("ext4"), flags, None)?;
     for path in ["/mnt/upper/upper", "/mnt/upper/work"] {
         fs::create_dir_all(path).map_err(|error| error.to_string())?;
     }
@@ -1066,7 +1077,7 @@ fn setup_root_overlay() -> Result<(), String> {
         Some("overlay"),
         "/mnt/newroot",
         Some("overlay"),
-        libc::MS_NODEV,
+        flags,
         Some("lowerdir=/mnt/lower,upperdir=/mnt/upper/upper,workdir=/mnt/upper/work"),
     )?;
     for path in ["proc", "sys", "dev"] {
@@ -1537,6 +1548,15 @@ mod tests {
             command_line_value(command_line, "exo_guest_ip").as_deref(),
             Some("10.0.0.2")
         );
+    }
+
+    #[test]
+    fn guest_root_requires_explicit_boot_permission() {
+        assert!(!guest_root_allowed("root=/dev/vda").unwrap());
+        assert!(!guest_root_allowed("exo_allow_guest_root=0").unwrap());
+        assert!(guest_root_allowed("exo_allow_guest_root=1").unwrap());
+        assert!(!guest_root_allowed("unrelated_exo_allow_guest_root=1").unwrap());
+        assert!(guest_root_allowed("exo_allow_guest_root=true").is_err());
     }
 
     #[test]
