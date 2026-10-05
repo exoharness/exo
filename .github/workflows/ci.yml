@@ -109,6 +109,7 @@ jobs:
       - run: cargo check --locked -p exoharness --no-default-features --features store
       - run: cargo check --locked -p exoharness --no-default-features --features store --target wasm32-unknown-unknown
       - run: cargo check --locked -p executor --no-default-features --target wasm32-unknown-unknown
+      - run: cargo check --locked -p exo-worker-runtime --target wasm32-unknown-unknown
 
   # Both supported VM backends run the same real CLI + mocked model test.
   # Hosted macOS ARM runners lack nested virtualization; macOS still runs the

@@ -2834,6 +2834,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "exo-worker-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cost",
+ "executor",
+ "exo-managed-agents",
+ "exoharness",
+ "futures",
+ "http 1.4.0",
+ "lingua",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_bytes",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+ "tracing",
+ "url",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "exoharness"
 version = "0.1.0"
 dependencies = [
