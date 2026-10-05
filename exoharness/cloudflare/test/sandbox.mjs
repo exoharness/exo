@@ -3,6 +3,16 @@ import { readFile } from "node:fs/promises";
 import ts from "typescript";
 import { test } from "node:test";
 
+const codexPackage = JSON.parse(
+  await readFile(new URL("../src/codex-package.json", import.meta.url), "utf8"),
+);
+const codexVersion = (
+  await readFile(
+    new URL("../../containers/codex-sandbox/version", import.meta.url),
+    "utf8",
+  )
+).trim();
+
 // Exercise the production adapter with the platform container API replaced.
 // The fixture does not implement turn, idle or checkpoint behavior itself.
 let source = ts.transpileModule(
@@ -24,7 +34,7 @@ class RpcStub { constructor(target) { target[Symbol.dispose] = () => {}; return 
 );
 source = source.replace(
   'import codexPackage from "./codex-package.json";',
-  `const codexPackage = ${await readFile(new URL("../src/codex-package.json", import.meta.url), "utf8")};`,
+  `const codexPackage = ${JSON.stringify(codexPackage)};`,
 );
 const { ExoSandbox } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
@@ -76,7 +86,17 @@ function fixture() {
       calls.push(["start", options]);
       container.running = true;
     },
-    exec: async () => process,
+    exec: async (command) => {
+      if (command[0] !== "sh") return process;
+      calls.push("codex-ready");
+      return {
+        output: async () => ({
+          exitCode: 0,
+          stderr: new Uint8Array(),
+          stdout: new TextEncoder().encode(`codex-cli ${codexPackage.version}`),
+        }),
+      };
+    },
     setInactivityTimeout: async (value) => calls.push(["timeout", value]),
     snapshotContainer: async () => {
       calls.push("snapshot");
@@ -116,10 +136,23 @@ function fixture() {
 
 test("production sandbox stays warm between turns and checkpoints on idle", async () => {
   const f = fixture();
-  await f.sandbox.beginTurn(identity, "first");
-  await f.sandbox.endTurn("first");
-  await f.sandbox.beginTurn(identity, "second");
-  await f.sandbox.endTurn("second");
+  await f.sandbox.acquire(
+    identity,
+    "/workspace",
+    {},
+    null,
+    300_000,
+    codexVersion,
+  );
+  await f.sandbox.beginActivity(identity, "first");
+  await f.sandbox.beginActivity(identity, "overlapping");
+  await f.sandbox.endActivity("first");
+  await f.storage.setAlarm(Date.now() - 1);
+  await f.sandbox.alarm();
+  assert(!f.calls.includes("snapshot"));
+  await f.sandbox.endActivity("overlapping");
+  await f.sandbox.beginActivity(identity, "second");
+  await f.sandbox.endActivity("second");
   assert.equal(
     f.calls.filter((call) => Array.isArray(call) && call[0] === "start").length,
     1,
@@ -129,9 +162,9 @@ test("production sandbox stays warm between turns and checkpoints on idle", asyn
   await f.sandbox.alarm();
   assert.deepEqual(
     f.calls.filter((call) => typeof call === "string"),
-    ["snapshot", "destroy"],
+    ["codex-ready", "snapshot", "destroy"],
   );
-  await f.sandbox.beginTurn(identity, "third");
+  await f.sandbox.beginActivity(identity, "third");
   assert.deepEqual(
     f.calls
       .filter((call) => Array.isArray(call) && call[0] === "start")
@@ -142,7 +175,7 @@ test("production sandbox stays warm between turns and checkpoints on idle", asyn
 
 test("production process invocation stays alive; checkpoint finishes before new work", async () => {
   const f = fixture();
-  await f.sandbox.beginTurn(identity, "first");
+  await f.sandbox.beginActivity(identity, "first");
   let ready;
   const started = new Promise((resolve) => {
     ready = resolve;
@@ -158,7 +191,7 @@ test("production process invocation stays alive; checkpoint finishes before new 
       finished = true;
     });
   await started;
-  await f.sandbox.endTurn("first");
+  await f.sandbox.endActivity("first");
   assert.equal(finished, false);
   await f.storage.setAlarm(Date.now() - 1);
   let release;
@@ -171,7 +204,7 @@ test("production process invocation stays alive; checkpoint finishes before new 
   await invocation;
   assert(f.calls.includes("kill:15"));
   let began = false;
-  const next = f.sandbox.beginTurn(identity, "second").then(() => {
+  const next = f.sandbox.beginActivity(identity, "second").then(() => {
     began = true;
   });
   await new Promise((resolve) => setImmediate(resolve));

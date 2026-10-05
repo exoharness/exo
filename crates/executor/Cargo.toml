@@ -47,6 +47,7 @@ cost = { path = "../cost" }
 exo-mcp = { path = "../mcp", optional = true }
 exo-managed-agents = { path = "../managed-agents", default-features = false }
 exoharness = { path = "../exoharness" }
+encoding_rs = "0.8.35"
 futures.workspace = true
 lingua.workspace = true
 reqwest = { workspace = true, optional = true }

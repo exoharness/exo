@@ -1,6 +1,5 @@
 use crate::{TypeScriptStreamEvent, to_execution_stream_event};
 use std::collections::HashMap;
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -9,15 +8,8 @@ use std::time::Duration;
 use anyhow::{Context as AnyhowContext, anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{
-    AddEventsRequest, AgentHandle, AgentId, CancelSandboxProcessRequest,
-    CloseSandboxProcessInputRequest, ConversationHandle, ConversationId, EventData, EventKind,
-    EventQuery, EventQueryDirection, ExoHarness, GetSandboxProcessEventsResult, Result, SandboxId,
-    SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle,
-    SandboxProcessMode, SandboxProcessStatus, SandboxProcessStdin, StartSandboxProcessRequest,
-    ToolRequest, ToolResult, TurnHandle, WriteSandboxProcessInputRequest,
-    protocol::{
-        ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
-    },
+    AgentHandle, ConversationHandle, ExoHarness, Result, TurnHandle,
+    protocol::{Request as ExoRequest, Response as ExoResponse},
     server::ExoHarnessServer,
 };
 use futures::{StreamExt, stream::FuturesUnordered};
@@ -29,9 +21,19 @@ use tokio::task::JoinHandle;
 
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
-use crate::harness_tool::ensure_shell_sandbox;
 use crate::shared::try_send_stream_event;
+#[cfg(test)]
+use crate::typescript_runtime::latest_sandbox_process_event_cursor_from_fetch;
+use crate::typescript_runtime::{
+    RequestContext, RuntimeEvent, RuntimeRequest, RuntimeResponsePayload, TypeScriptInitPayload,
+    TypeScriptRuntime,
+};
 use crate::{AgentConfig, ConversationConfig, SendRequest, ToolRuntime};
+#[cfg(test)]
+use exoharness::{
+    EventData, EventQuery, GetSandboxProcessEventsResult, SandboxProcessEvent,
+    SandboxProcessStatus, ToolRequest,
+};
 
 pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
@@ -214,6 +216,7 @@ where
             self.env.as_ref(),
             module_path,
             thread,
+            self.tools.clone(),
         )?));
         runners.insert(key.to_string(), Arc::clone(&runner));
         Ok(runner)
@@ -227,86 +230,17 @@ where
             runners.remove(module_path);
         }
     }
-
-    async fn execute_runtime_request(
-        &self,
-        agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
-        agent_config: &AgentConfig,
-        conversation_config: &ConversationConfig,
-        turn: Arc<dyn TurnHandle>,
-        request: RuntimeRequest,
-        stream_mode: ExecutorStreamMode<'_>,
-    ) -> Result<RuntimeResponsePayload> {
-        if let RuntimeRequest::ExecuteTool { request } | RuntimeRequest::AuthorizeTool { request } =
-            &request
-        {
-            crate::permissions::authorize(
-                conversation,
-                turn.as_ref(),
-                self.tools
-                    .permission_policy(&conversation_config.permissions, &request.function_name),
-                None,
-                None,
-                false,
-                request,
-                stream_mode,
-            )
-            .await?;
-        }
-        match request {
-            RuntimeRequest::AuthorizeTool { .. } => Ok(RuntimeResponsePayload::ToolResult {
-                result: serde_json::Value::Null,
-            }),
-            RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
-                result: self
-                    .tools
-                    .execute(
-                        agent,
-                        conversation,
-                        Some(turn.as_ref()),
-                        agent_config,
-                        conversation_config,
-                        &request,
-                    )
-                    .await?,
-            }),
-            RuntimeRequest::StartSandboxProcess { .. }
-            | RuntimeRequest::WriteSandboxProcessStdin { .. }
-            | RuntimeRequest::CloseSandboxProcessStdin { .. }
-            | RuntimeRequest::CloseSandboxProcess { .. } => {
-                bail!("sandbox process requests are handled by the TypeScript runner")
-            }
-        }
-    }
 }
 
 const RUNNER_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 struct TypeScriptRunnerProcess {
-    thread: Arc<dyn ConversationHandle>,
     child: Child,
     host_tx: mpsc::UnboundedSender<HostToGuestMessage>,
     lines: Lines<BufReader<ChildStdout>>,
     stderr_task: Option<JoinHandle<std::io::Result<String>>>,
     _writer_task: JoinHandle<anyhow::Result<()>>,
-    next_sandbox_process_id: u64,
-    sandbox_processes: HashMap<u64, RunningSandboxProcess>,
-}
-
-struct RunningSandboxProcess {
-    sandbox_id: SandboxId,
-    process_id: SandboxProcessId,
-    event_task: JoinHandle<()>,
-}
-
-const TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT: &str = "typescript_sandbox_process_reuse";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TypeScriptSandboxProcessReuseEvent {
-    reuse_key: String,
-    sandbox_id: SandboxId,
-    process_id: SandboxProcessId,
+    runtime: Arc<TypeScriptRuntime>,
 }
 
 struct TypeScriptTurn<'a> {
@@ -324,21 +258,9 @@ struct TypeScriptTurn<'a> {
 impl TypeScriptRunnerProcess {
     async fn shutdown(&mut self) -> Result<()> {
         let child_result = self.child.kill().await;
-        let processes = std::mem::take(&mut self.sandbox_processes);
-        let results = futures::future::join_all(processes.into_values().map(|process| {
-            process.event_task.abort();
-            self.thread
-                .cancel_sandbox_process(CancelSandboxProcessRequest {
-                    sandbox_id: process.sandbox_id,
-                    process_id: process.process_id,
-                    signal: None,
-                })
-        }))
-        .await;
+        let process_result = self.runtime.shutdown().await;
         child_result?;
-        for result in results {
-            result?;
-        }
+        process_result?;
         Ok(())
     }
 
@@ -347,6 +269,7 @@ impl TypeScriptRunnerProcess {
         env: &HashMap<String, String>,
         module_path: &str,
         thread: Arc<dyn ConversationHandle>,
+        tools: Arc<dyn ToolRuntime>,
     ) -> Result<Self> {
         let runner_path = workspace_root
             .join("exoharness")
@@ -406,15 +329,22 @@ impl TypeScriptRunnerProcess {
             Ok(())
         });
 
+        let events = host_tx.clone();
+        let runtime = Arc::new(TypeScriptRuntime::new(
+            thread.clone(),
+            tools,
+            Arc::new(crate::TokioRuntimeHost),
+            Arc::new(move |event| {
+                send_host_message(&events, HostToGuestMessage::RuntimeEvent { event })
+            }),
+        ));
         Ok(Self {
             child,
-            thread,
             host_tx,
             lines: BufReader::new(stdout).lines(),
             stderr_task: Some(stderr_task),
             _writer_task: writer_task,
-            next_sandbox_process_id: 1,
-            sandbox_processes: HashMap::new(),
+            runtime,
         })
     }
 
@@ -439,30 +369,26 @@ impl TypeScriptRunnerProcess {
         } = turn;
         let conversation = conversation_arc.as_ref();
         let exoharness_server = ExoHarnessServer::new(Arc::clone(&executor.root));
-        let conversation_info = ConversationHandleInfo {
-            agent_id: agent.record().id,
-            record: conversation.record().clone(),
-        };
-        let turn_info = TurnHandleInfo {
-            conversation: conversation_info.clone(),
-            record: turn.record().clone(),
-        };
+        let init = self
+            .runtime
+            .init(
+                &RequestContext {
+                    agent,
+                    conversation,
+                    turn: turn.as_ref(),
+                    agent_config,
+                    conversation_config,
+                    stream: stream_mode,
+                },
+                prepared,
+                recovering,
+                turn_trace.and_then(TurnExecutionTrace::export_parent),
+            )
+            .await?;
         send_host_message(
             &self.host_tx,
             HostToGuestMessage::Init {
-                payload: Box::new(TypeScriptInitPayload {
-                    agent: agent.record().clone(),
-                    conversation: conversation_info,
-                    turn: turn_info,
-                    agent_config: agent_config.clone(),
-                    conversation_config: conversation_config.clone(),
-                    request: prepared.clone(),
-                    streaming: matches!(stream_mode, ExecutorStreamMode::Enabled(_)),
-                    recovering,
-                    tools: executor.tools.definitions(),
-                    mcp_servers: executor.tools.mcp_servers(conversation).await?,
-                    braintrust_parent: turn_trace.and_then(TurnExecutionTrace::export_parent),
-                }),
+                payload: Box::new(init),
             },
         )?;
 
@@ -492,33 +418,15 @@ impl TypeScriptRunnerProcess {
                     match message {
                         GuestToHostMessage::RuntimeRequest { id, request } => {
                             let request_kind = request.kind();
-                            if matches!(request, RuntimeRequest::ExecuteTool { .. } | RuntimeRequest::AuthorizeTool { .. }) {
-                                let turn = Arc::clone(&turn);
-                                tool_requests.push(async move {
-                                    let response = executor.execute_runtime_request(
-                                        agent,
-                                        conversation,
-                                        agent_config,
-                                        conversation_config,
-                                        turn,
-                                        request,
-                                        stream_mode,
-                                    ).await;
-                                    runtime_response(id, request_kind, response)
-                                });
-                            } else {
-                                let response = self.execute_runtime_request(
-                                    executor,
-                                    agent,
-                                    conversation,
-                                    agent_config,
-                                    conversation_config,
-                                    Arc::clone(&turn),
-                                    request,
-                                    stream_mode,
-                                ).await;
-                                send_host_message(&self.host_tx, runtime_response(id, request_kind, response))?;
-                            }
+                            let runtime = self.runtime.clone();
+                            let turn = turn.clone();
+                            tool_requests.push(async move {
+                                let response = runtime.handle_request(Some(RequestContext {
+                                    agent, conversation, turn: turn.as_ref(), agent_config,
+                                    conversation_config, stream: stream_mode,
+                                }), request).await;
+                                runtime_response(id, request_kind, response)
+                            });
                         }
                         GuestToHostMessage::ExoRequest { id, request } => {
                             let request_kind = request.kind();
@@ -578,194 +486,6 @@ impl TypeScriptRunnerProcess {
         }
     }
 
-    async fn execute_runtime_request<T>(
-        &mut self,
-        executor: &TypeScriptExecutor<T>,
-        agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
-        agent_config: &AgentConfig,
-        conversation_config: &ConversationConfig,
-        turn: Arc<dyn TurnHandle>,
-        request: RuntimeRequest,
-        stream_mode: ExecutorStreamMode<'_>,
-    ) -> Result<RuntimeResponsePayload>
-    where
-        T: ToolRuntime + 'static,
-    {
-        match request {
-            request @ (RuntimeRequest::ExecuteTool { .. }
-            | RuntimeRequest::AuthorizeTool { .. }) => {
-                executor
-                    .execute_runtime_request(
-                        agent,
-                        conversation,
-                        agent_config,
-                        conversation_config,
-                        Arc::clone(&turn),
-                        request,
-                        stream_mode,
-                    )
-                    .await
-            }
-            RuntimeRequest::StartSandboxProcess {
-                command,
-                env,
-                reuse_key,
-            } => {
-                self.start_sandbox_process(
-                    executor,
-                    agent,
-                    conversation,
-                    agent_config,
-                    conversation_config,
-                    command,
-                    env,
-                    reuse_key,
-                )
-                .await
-            }
-            RuntimeRequest::WriteSandboxProcessStdin { process_id, data } => {
-                let process = self
-                    .sandbox_processes
-                    .get(&process_id)
-                    .ok_or_else(|| anyhow!("sandbox process is not active: {process_id}"))?;
-                conversation
-                    .write_sandbox_process_input(WriteSandboxProcessInputRequest {
-                        sandbox_id: process.sandbox_id.clone(),
-                        process_id: process.process_id.clone(),
-                        data: data.into_bytes(),
-                    })
-                    .await?;
-                Ok(RuntimeResponsePayload::Unit)
-            }
-            RuntimeRequest::CloseSandboxProcessStdin { process_id } => {
-                let process = self
-                    .sandbox_processes
-                    .get(&process_id)
-                    .ok_or_else(|| anyhow!("sandbox process is not active: {process_id}"))?;
-                conversation
-                    .close_sandbox_process_input(CloseSandboxProcessInputRequest {
-                        sandbox_id: process.sandbox_id.clone(),
-                        process_id: process.process_id.clone(),
-                    })
-                    .await?;
-                Ok(RuntimeResponsePayload::Unit)
-            }
-            RuntimeRequest::CloseSandboxProcess { process_id } => {
-                if let Some(process) = self.sandbox_processes.remove(&process_id) {
-                    process.event_task.abort();
-                    conversation
-                        .cancel_sandbox_process(CancelSandboxProcessRequest {
-                            sandbox_id: process.sandbox_id,
-                            process_id: process.process_id,
-                            signal: None,
-                        })
-                        .await?;
-                    send_host_message(
-                        &self.host_tx,
-                        HostToGuestMessage::RuntimeEvent {
-                            event: RuntimeEvent::Exit {
-                                process_id,
-                                exit_code: None,
-                            },
-                        },
-                    )?;
-                }
-                Ok(RuntimeResponsePayload::Unit)
-            }
-        }
-    }
-
-    async fn start_sandbox_process<T>(
-        &mut self,
-        executor: &TypeScriptExecutor<T>,
-        agent: &dyn AgentHandle,
-        conversation: &dyn ConversationHandle,
-        agent_config: &AgentConfig,
-        conversation_config: &ConversationConfig,
-        command: Vec<String>,
-        env: HashMap<String, String>,
-        reuse_key: Option<String>,
-    ) -> Result<RuntimeResponsePayload>
-    where
-        T: ToolRuntime + 'static,
-    {
-        let sandbox_id =
-            ensure_shell_sandbox(conversation, agent_config, conversation_config).await?;
-        let reusable_process = match reuse_key.as_deref() {
-            Some(reuse_key) => {
-                reusable_sandbox_process(conversation, reuse_key, &sandbox_id).await?
-            }
-            None => None,
-        };
-        let (sandbox_process_id, reused, cursor) = match reusable_process {
-            Some(process) => process,
-            None => {
-                let process = conversation
-                    .start_sandbox_process(StartSandboxProcessRequest {
-                        sandbox_id: sandbox_id.clone(),
-                        name: None,
-                        command,
-                        env,
-                        cwd: None,
-                        mode: SandboxProcessMode::Exec,
-                        stdin: SandboxProcessStdin::Open,
-                        output: Default::default(),
-                        lifecycle: SandboxProcessLifecycle::Attached,
-                    })
-                    .await?;
-                if let Some(reuse_key) = reuse_key {
-                    conversation
-                        .add_events(AddEventsRequest {
-                            session_id: None,
-                            turn_id: None,
-                            data: vec![EventData::Custom {
-                                event_type: TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT.to_string(),
-                                payload: serde_json::to_value(
-                                    TypeScriptSandboxProcessReuseEvent {
-                                        reuse_key,
-                                        sandbox_id: process.sandbox_id.clone(),
-                                        process_id: process.id.clone(),
-                                    },
-                                )?,
-                            }],
-                        })
-                        .await?;
-                }
-                (process.id, false, None)
-            }
-        };
-        let process_id = self.next_sandbox_process_id;
-        self.next_sandbox_process_id += 1;
-        let process_conversation = executor
-            .conversation_handle(agent.record().id, conversation.record().id)
-            .await?;
-        let event_task = spawn_sandbox_process_event_task(
-            self.host_tx.clone(),
-            process_conversation,
-            process_id,
-            sandbox_id.clone(),
-            sandbox_process_id.clone(),
-            cursor,
-        );
-
-        self.sandbox_processes.insert(
-            process_id,
-            RunningSandboxProcess {
-                sandbox_id: sandbox_id.clone(),
-                process_id: sandbox_process_id.clone(),
-                event_task,
-            },
-        );
-
-        Ok(RuntimeResponsePayload::SandboxProcessStarted {
-            process_id,
-            sandbox_id,
-            sandbox_process_id,
-            reused,
-        })
-    }
-
     /// Handles a guest line that failed to decode into a `GuestToHostMessage`.
     ///
     /// If the line is recognizably a request with an `id`, we reply with an
@@ -811,131 +531,6 @@ impl TypeScriptRunnerProcess {
             Ok(Err(error)) => format!("failed to read TypeScript harness stderr: {error}"),
             Err(error) => format!("TypeScript harness stderr task panicked: {error}"),
         }
-    }
-}
-
-async fn reusable_sandbox_process(
-    conversation: &dyn ConversationHandle,
-    reuse_key: &str,
-    desired_sandbox_id: &SandboxId,
-) -> Result<Option<(SandboxProcessId, bool, Option<u64>)>> {
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Desc),
-            limit: Some(100),
-            session_id: None,
-            turn_id: None,
-            types: Some(vec![EventKind::custom(
-                TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT,
-            )]),
-        }))
-        .await?
-        .events;
-
-    for event in events {
-        let EventData::Custom {
-            event_type,
-            payload,
-        } = event.data
-        else {
-            continue;
-        };
-        if event_type != TYPESCRIPT_SANDBOX_PROCESS_REUSE_EVENT {
-            continue;
-        }
-        let candidate: TypeScriptSandboxProcessReuseEvent = serde_json::from_value(payload)?;
-        if candidate.reuse_key != reuse_key || candidate.sandbox_id != *desired_sandbox_id {
-            continue;
-        }
-        let status = latest_sandbox_process_event_cursor(
-            conversation,
-            candidate.sandbox_id.clone(),
-            candidate.process_id.clone(),
-        )
-        .await;
-        let Ok(status) = status else {
-            continue;
-        };
-        if status.status.is_running() {
-            return Ok(Some((candidate.process_id, true, status.cursor)));
-        }
-    }
-
-    Ok(None)
-}
-
-async fn latest_sandbox_process_event_cursor(
-    conversation: &dyn ConversationHandle,
-    sandbox_id: SandboxId,
-    process_id: SandboxProcessId,
-) -> Result<GetLatestSandboxProcessCursorResult> {
-    latest_sandbox_process_event_cursor_from_fetch(|after| {
-        let sandbox_id = sandbox_id.clone();
-        let process_id = process_id.clone();
-        async move {
-            conversation
-                .get_sandbox_process_events(SandboxProcessEventQuery {
-                    sandbox_id,
-                    process_id,
-                    after,
-                    limit: Some(1000),
-                    follow: Some(false),
-                })
-                .await
-        }
-    })
-    .await
-}
-
-async fn latest_sandbox_process_event_cursor_from_fetch<F, Fut>(
-    mut fetch_page: F,
-) -> Result<GetLatestSandboxProcessCursorResult>
-where
-    F: FnMut(Option<u64>) -> Fut,
-    Fut: Future<Output = Result<GetSandboxProcessEventsResult>>,
-{
-    let mut after = None;
-    loop {
-        let previous_after = after;
-        let page = fetch_page(after).await?;
-        let event_count = page.events.len();
-        after = page.cursor.or(after);
-        if !page.status.is_running() || event_count < 1000 {
-            return Ok(GetLatestSandboxProcessCursorResult {
-                cursor: after,
-                status: page.status,
-            });
-        }
-        if after == previous_after {
-            bail!("sandbox process event pagination did not advance");
-        }
-    }
-}
-
-struct GetLatestSandboxProcessCursorResult {
-    cursor: Option<u64>,
-    status: SandboxProcessStatus,
-}
-
-impl<T> TypeScriptExecutor<T>
-where
-    T: ToolRuntime + 'static,
-{
-    async fn conversation_handle(
-        &self,
-        agent_id: AgentId,
-        conversation_id: ConversationId,
-    ) -> Result<Arc<dyn ConversationHandle>> {
-        let agent = self
-            .root
-            .get_agent(&agent_id)
-            .await?
-            .ok_or_else(|| anyhow!("agent disappeared while running TypeScript harness"))?;
-        agent
-            .get_conversation(&conversation_id)
-            .await?
-            .ok_or_else(|| anyhow!("conversation disappeared while running TypeScript harness"))
     }
 }
 
@@ -1060,227 +655,6 @@ enum GuestToHostMessage {
         message: String,
         stack: Option<String>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TypeScriptInitPayload {
-    mcp_servers: Vec<crate::NativeMcpServer>,
-    tools: Vec<crate::ToolDefinition>,
-    agent: exoharness::AgentRecord,
-    conversation: ConversationHandleInfo,
-    turn: TurnHandleInfo,
-    agent_config: AgentConfig,
-    conversation_config: ConversationConfig,
-    request: SendRequest,
-    streaming: bool,
-    recovering: bool,
-    braintrust_parent: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum RuntimeRequest {
-    AuthorizeTool {
-        request: ToolRequest,
-    },
-    ExecuteTool {
-        request: ToolRequest,
-    },
-    StartSandboxProcess {
-        command: Vec<String>,
-        env: HashMap<String, String>,
-        reuse_key: Option<String>,
-    },
-    WriteSandboxProcessStdin {
-        process_id: u64,
-        data: String,
-    },
-    CloseSandboxProcessStdin {
-        process_id: u64,
-    },
-    CloseSandboxProcess {
-        process_id: u64,
-    },
-}
-
-impl RuntimeRequest {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::AuthorizeTool { .. } => "authorize_tool",
-            Self::ExecuteTool { .. } => "execute_tool",
-            Self::StartSandboxProcess { .. } => "start_sandbox_process",
-            Self::WriteSandboxProcessStdin { .. } => "write_sandbox_process_stdin",
-            Self::CloseSandboxProcessStdin { .. } => "close_sandbox_process_stdin",
-            Self::CloseSandboxProcess { .. } => "close_sandbox_process",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum RuntimeResponsePayload {
-    ToolResult {
-        result: ToolResult,
-    },
-    SandboxProcessStarted {
-        process_id: u64,
-        sandbox_id: SandboxId,
-        sandbox_process_id: SandboxProcessId,
-        reused: bool,
-    },
-    Unit,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum SandboxProcessStream {
-    Stdout,
-    Stderr,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum RuntimeEvent {
-    #[serde(rename = "sandbox_process_output")]
-    Output {
-        process_id: u64,
-        stream: SandboxProcessStream,
-        data: String,
-    },
-    #[serde(rename = "sandbox_process_exit")]
-    Exit {
-        process_id: u64,
-        exit_code: Option<i32>,
-    },
-    #[serde(rename = "sandbox_process_error")]
-    Error { process_id: u64, message: String },
-}
-
-fn spawn_sandbox_process_event_task(
-    sender: mpsc::UnboundedSender<HostToGuestMessage>,
-    conversation: Arc<dyn ConversationHandle>,
-    process_id: u64,
-    sandbox_id: SandboxId,
-    sandbox_process_id: SandboxProcessId,
-    mut cursor: Option<u64>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let result = conversation
-                .get_sandbox_process_events(SandboxProcessEventQuery {
-                    sandbox_id: sandbox_id.clone(),
-                    process_id: sandbox_process_id.clone(),
-                    after: cursor,
-                    limit: Some(100),
-                    follow: Some(true),
-                })
-                .await;
-
-            let result = match result {
-                Ok(result) => result,
-                Err(error) => {
-                    if send_host_message(
-                        &sender,
-                        HostToGuestMessage::RuntimeEvent {
-                            event: RuntimeEvent::Error {
-                                process_id,
-                                message: error.to_string(),
-                            },
-                        },
-                    )
-                    .is_err()
-                    {
-                        return;
-                    }
-                    return;
-                }
-            };
-
-            let mut emitted_terminal = false;
-            for event in result.events {
-                cursor = Some(event.cursor());
-                let runtime_event = sandbox_process_event_to_runtime_event(process_id, event);
-                emitted_terminal |= matches!(
-                    runtime_event,
-                    RuntimeEvent::Exit { .. } | RuntimeEvent::Error { .. }
-                );
-                if send_host_message(
-                    &sender,
-                    HostToGuestMessage::RuntimeEvent {
-                        event: runtime_event,
-                    },
-                )
-                .is_err()
-                {
-                    return;
-                }
-            }
-            if emitted_terminal {
-                return;
-            }
-
-            if !result.status.is_running() {
-                let runtime_event = match result.status {
-                    exoharness::SandboxProcessStatus::Running => continue,
-                    exoharness::SandboxProcessStatus::Exited { exit_code } => RuntimeEvent::Exit {
-                        process_id,
-                        exit_code: Some(exit_code),
-                    },
-                    exoharness::SandboxProcessStatus::Failed { message } => RuntimeEvent::Error {
-                        process_id,
-                        message,
-                    },
-                    exoharness::SandboxProcessStatus::Cancelled => RuntimeEvent::Exit {
-                        process_id,
-                        exit_code: None,
-                    },
-                };
-                if send_host_message(
-                    &sender,
-                    HostToGuestMessage::RuntimeEvent {
-                        event: runtime_event,
-                    },
-                )
-                .is_err()
-                {
-                    return;
-                }
-                return;
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-}
-
-fn sandbox_process_event_to_runtime_event(
-    process_id: u64,
-    event: SandboxProcessEvent,
-) -> RuntimeEvent {
-    match event {
-        SandboxProcessEvent::Stdout { data, .. } => RuntimeEvent::Output {
-            process_id,
-            stream: SandboxProcessStream::Stdout,
-            data: String::from_utf8_lossy(&data).into_owned(),
-        },
-        SandboxProcessEvent::Stderr { data, .. } => RuntimeEvent::Output {
-            process_id,
-            stream: SandboxProcessStream::Stderr,
-            data: String::from_utf8_lossy(&data).into_owned(),
-        },
-        SandboxProcessEvent::Exit { exit_code, .. } => RuntimeEvent::Exit {
-            process_id,
-            exit_code: Some(exit_code),
-        },
-        SandboxProcessEvent::Error { message, .. } => RuntimeEvent::Error {
-            process_id,
-            message,
-        },
-        SandboxProcessEvent::Cancelled { .. } => RuntimeEvent::Exit {
-            process_id,
-            exit_code: None,
-        },
-    }
 }
 
 fn send_host_message(
@@ -1565,6 +939,11 @@ export default {
             r#"
 export default {
   async runTurn(context) {
+    const process = await context.startSandboxProcess({command: ["/bin/sh", "-lc", "printf 'ready 🧪'"]});
+    const {value} = await process.stdout.getReader().read();
+    if (value !== "ready 🧪") throw new Error(`lost process output: ${value}`);
+    await process.wait();
+
     await context.exoharness.current.turn.addEvents([
       { type: "tool_requested", tool_call_id: "call", response_id: null,
         request: { function_name: "shell", arguments: { command: "pwd" } } },

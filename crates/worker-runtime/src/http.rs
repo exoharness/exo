@@ -224,12 +224,14 @@ async fn route(
                     let prepared =
                         api::prepare_turn(runtime, agent.as_ref(), conversation.as_ref(), body(r)?)
                             .await?;
+                    let streaming =
+                        prepared.config.harness == executor::AgentHarnessKind::TypeScript;
                     let (result, mut stream) = api::submit_turn(
                         runtime,
                         agent.clone(),
                         conversation.clone(),
                         prepared,
-                        false,
+                        streaming,
                     )
                     .await?;
                     host.spawn(Box::pin(async move {

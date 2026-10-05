@@ -567,6 +567,17 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         spawn_pending_sandbox_process(self.harness, pending).await
     }
 
+    pub(super) async fn sandbox_activity(&self, id: SandboxId) -> Result<crate::SandboxActivity> {
+        self.harness.check(self.owner).await?;
+        self.ensure_full_sandbox_scope("sandbox_activity")?;
+        let sandbox = self.load_sandbox(&id).await?;
+        anyhow::ensure!(sandbox.running, "sandbox is not running: {id}");
+        self.active_sandbox_handle(&id, &sandbox)
+            .await?
+            .activity()
+            .await
+    }
+
     pub(super) async fn write_sandbox_process_input(
         &self,
         request: WriteSandboxProcessInputRequest,
@@ -982,7 +993,6 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         Ok(sandbox)
     }
 
-    #[cfg(feature = "basic-backend")]
     pub(super) async fn active_sandbox_handle(
         &self,
         id: &SandboxId,

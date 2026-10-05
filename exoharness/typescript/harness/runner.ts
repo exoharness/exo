@@ -12,14 +12,13 @@ import {
   type RawTypeScriptInitPayload,
   type RawRuntimeRequest,
   type RawRuntimeResponsePayload,
-  type RawRuntimeEvent,
   type RawExoRequest,
   type RawExoResponse,
   type RawTypeScriptStreamEvent,
   type HostToGuestMessage,
   type GuestToHostMessage,
 } from "./client";
-import { SandboxProcessHandle } from "./sandbox-process";
+import { SandboxProcessClient } from "./sandbox-process";
 
 class ProtocolClient {
   private nextRequestId = 1;
@@ -34,7 +33,7 @@ class ProtocolClient {
   private readonly initWaiters: Array<{
     resolve: (payload: RawTypeScriptInitPayload | null) => void;
   }> = [];
-  private readonly sandboxProcesses = new Map<number, SandboxProcessHandle>();
+  private readonly sandboxProcesses = new SandboxProcessClient();
   private closed = false;
 
   constructor() {
@@ -97,14 +96,6 @@ class ProtocolClient {
   }
 
   async requestExo(request: RawExoRequest): Promise<RawExoResponse> {
-    if (
-      request.type === "write_sandbox_process_input" &&
-      request.request.data instanceof Uint8Array
-    )
-      request = {
-        ...request,
-        request: { ...request.request, data: Array.from(request.request.data) },
-      };
     const id = this.nextRequestId;
     this.nextRequestId += 1;
     const response = new Promise<RawExoResponse>((resolve, reject) => {
@@ -136,66 +127,9 @@ class ProtocolClient {
   async startSandboxProcess(
     request: SandboxProcessStartRequest,
   ): Promise<SandboxProcess> {
-    const payload = await this.requestRuntime({
-      type: "start_sandbox_process",
-      command: request.command,
-      env: request.env ?? {},
-      reuse_key: request.reuseKey ?? null,
-    });
-    if (payload.type !== "sandbox_process_started") {
-      throw new Error(
-        `expected sandbox_process_started payload, got ${payload.type}`,
-      );
-    }
-    const process = new SandboxProcessHandle(
-      {
-        writeStdin: (data) =>
-          this.writeSandboxProcessStdin(payload.process_id, data),
-        closeStdin: () => this.closeSandboxProcessStdin(payload.process_id),
-        close: () => this.closeSandboxProcess(payload.process_id),
-      },
-      {
-        sandboxId: payload.sandbox_id ?? undefined,
-        sandboxProcessId: payload.sandbox_process_id ?? undefined,
-        reused: payload.reused === true,
-      },
+    return this.sandboxProcesses.start(request, (request) =>
+      this.requestRuntime(request),
     );
-    this.sandboxProcesses.set(payload.process_id, process);
-    return process;
-  }
-
-  async writeSandboxProcessStdin(
-    processId: number,
-    data: string,
-  ): Promise<void> {
-    const payload = await this.requestRuntime({
-      type: "write_sandbox_process_stdin",
-      process_id: processId,
-      data,
-    });
-    if (payload.type !== "unit") {
-      throw new Error(`expected unit payload, got ${payload.type}`);
-    }
-  }
-
-  async closeSandboxProcessStdin(processId: number): Promise<void> {
-    const payload = await this.requestRuntime({
-      type: "close_sandbox_process_stdin",
-      process_id: processId,
-    });
-    if (payload.type !== "unit") {
-      throw new Error(`expected unit payload, got ${payload.type}`);
-    }
-  }
-
-  async closeSandboxProcess(processId: number): Promise<void> {
-    const payload = await this.requestRuntime({
-      type: "close_sandbox_process",
-      process_id: processId,
-    });
-    if (payload.type !== "unit") {
-      throw new Error(`expected unit payload, got ${payload.type}`);
-    }
   }
 
   async done(): Promise<void> {
@@ -270,7 +204,7 @@ class ProtocolClient {
         return;
       }
       case "runtime_event":
-        this.handleRuntimeEvent(message.event);
+        this.sandboxProcesses.handleEvent(message.event);
         return;
     }
   }
@@ -293,20 +227,6 @@ class ProtocolClient {
     while (this.initWaiters.length > 0) {
       const waiter = this.initWaiters.shift();
       waiter?.resolve(null);
-    }
-  }
-
-  private handleRuntimeEvent(event: RawRuntimeEvent): void {
-    const process = this.sandboxProcesses.get(event.process_id);
-    if (!process) {
-      return;
-    }
-    process.handleEvent(event);
-    if (
-      event.type === "sandbox_process_exit" ||
-      event.type === "sandbox_process_error"
-    ) {
-      this.sandboxProcesses.delete(event.process_id);
     }
   }
 }

@@ -34,6 +34,7 @@ struct Progress {
     cancelled: Vec<u32>,
     completed: Vec<Completion>,
     pending: bool,
+    events: Vec<executor::typescript_runtime::RuntimeEvent>,
 }
 
 /// Runs the existing LocalProvider inside a Worker. JavaScript supplies I/O;
@@ -41,6 +42,7 @@ struct Progress {
 #[wasm_bindgen]
 pub struct WorkerRuntime {
     runtime: Runtime,
+    execution: Arc<WorkerExecutor>,
     mutations: Arc<tokio::sync::Mutex<()>>,
     host: Arc<Host>,
     running: FuturesUnordered<BoxFuture<'static, ()>>,
@@ -63,20 +65,25 @@ impl WorkerRuntime {
             *byte = u8::from_str_radix(&master_key[i * 2..i * 2 + 2], 16).map_err(js_error)?;
         }
         let host = Arc::new(Host::default());
+        let backends = vec![exoharness::SandboxBackendRegistration::from_backend(
+            exoharness::SandboxProvider::from_static("cloudflare"),
+            Arc::new(sandbox::CloudflareBackend(host.clone())),
+        )];
+        let sandbox_default = backends[0].provider();
         let state = Arc::new(
             exoharness::BasicExoHarness::hosted(
                 Arc::new(HostStorage(host.clone())),
                 key,
-                vec![exoharness::SandboxBackendRegistration::from_backend(
-                    exoharness::SandboxProvider::from_static("cloudflare"),
-                    Arc::new(sandbox::CloudflareBackend(host.clone())),
-                )],
+                backends,
                 host.clone(),
             )
             .map_err(js_error)?,
         );
         let execution = Arc::new(WorkerExecutor {
             host: host.clone(),
+            state: state.clone(),
+            sandbox_default,
+            harnesses: Mutex::default(),
             basic: BasicExecutor::with_pricing(
                 Arc::new(WorkerModel(host.clone())),
                 Arc::new(WorkerTools),
@@ -84,12 +91,13 @@ impl WorkerRuntime {
             ),
         });
         let runtime = Runtime::with_tracer(
-            LocalProvider::with_host(state, execution, host.clone()),
+            LocalProvider::with_host(state, execution.clone(), host.clone()),
             Arc::new(WorkerTracer),
         );
         runtime.begin_recovery_scan();
         Ok(Self {
             runtime,
+            execution,
             mutations: Arc::default(),
             host,
             running: FuturesUnordered::new(),
@@ -109,13 +117,14 @@ impl WorkerRuntime {
             .ok_or_else(|| JsValue::from_str("Worker operation id overflow"))?;
         let runtime = self.runtime.clone();
         let host = self.host.clone();
+        let execution = self.execution.clone();
         let updates = self.mutations.clone();
         let completed = self.completed.clone();
         let (cancel, registration) = AbortHandle::new_pair();
         self.cancellations.insert(id, cancel);
         self.running.push(Box::pin(async move {
             let result = Abortable::new(
-                operations::run(runtime, host, updates, operation),
+                operations::run(runtime, execution, host, updates, operation),
                 registration,
             )
             .await
@@ -184,6 +193,7 @@ impl WorkerRuntime {
             cancelled,
             completed,
             pending: !self.running.is_empty(),
+            events: std::mem::take(&mut *self.host.events.lock().expect("Worker events poisoned")),
         }
         .serialize(
             &serde_wasm_bindgen::Serializer::json_compatible().serialize_bytes_as_arrays(false),

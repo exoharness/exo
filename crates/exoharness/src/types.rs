@@ -72,8 +72,30 @@ pub trait SnapshotHandle: Send + Sync {
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()>;
 }
 
+/// Keeps a sandbox available until this guard is dropped.
+#[must_use = "dropping the guard releases sandbox activity"]
+pub struct SandboxActivity {
+    _guard: Box<dyn Send + Sync>,
+}
+
+impl SandboxActivity {
+    pub fn new(guard: impl Send + Sync + 'static) -> Self {
+        Self {
+            _guard: Box::new(guard),
+        }
+    }
+
+    pub fn noop() -> Self {
+        Self::new(())
+    }
+}
+
 #[async_trait]
 pub trait SandboxHandle: SnapshotHandle {
+    /// Hold backend activity until the returned guard is dropped.
+    async fn sandbox_activity(&self, _id: SandboxId) -> Result<SandboxActivity> {
+        Ok(SandboxActivity::noop())
+    }
     async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>>;
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId>;
     async fn fork_sandbox(&self, request: ForkSandboxRequest) -> Result<SandboxId>;

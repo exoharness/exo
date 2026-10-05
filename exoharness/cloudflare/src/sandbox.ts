@@ -106,23 +106,6 @@ export class CloudflareSandbox {
     private readonly waitUntil: (promise: Promise<unknown>) => void,
   ) {}
 
-  async runTurn<T>(turnId: string, run: () => Promise<T>): Promise<T> {
-    await this.stub.beginTurn(this.identity, turnId);
-    try {
-      return await run();
-    } finally {
-      await this.stub.endTurn(turnId);
-      // Pending operations keep a Durable Object alive for at most 15 minutes
-      // from their start. Refresh both sides' keepalive after each turn so a
-      // long conversation can still use the full idle window.
-      this.waitUntil(this.stub.waitForProcesses());
-    }
-  }
-
-  async prepareCodex(version: string): Promise<void> {
-    await this.stub.prepareCodex(this.identity, version);
-  }
-
   async openProcess(request: SandboxProcessStartRequest & { cwd?: string }) {
     const ready = new Promise<RpcStub<CloudflareProcess>>((resolve, reject) => {
       const running = this.stub.runProcess(
@@ -141,7 +124,6 @@ export class CloudflareSandbox {
         process.stderr,
         process.sandboxProcessId,
       ]);
-      let closing: Promise<void> | undefined;
       let waiting: Promise<number> | undefined;
       let disposed = false;
       const dispose = () => {
@@ -158,15 +140,12 @@ export class CloudflareSandbox {
         stderr,
         writeStdin: (data: Uint8Array) => process.writeStdin(data),
         closeStdin: () => process.closeStdin(),
-        close: () => {
-          closing ??= (async () => {
-            try {
-              if (!disposed) await process.close();
-            } finally {
-              dispose();
-            }
-          })();
-          return closing;
+        close: async () => {
+          try {
+            if (!disposed) await process.close();
+          } finally {
+            dispose();
+          }
         },
         wait: () => {
           waiting ??= process.wait().finally(dispose);
@@ -188,7 +167,9 @@ export class ExoSandbox extends DurableObject<Env> {
   private starting?: Promise<Container>;
   private installing?: Promise<void>;
   private stopping?: Promise<void>;
-  private activeTurn: string | null = null;
+  // Leases live only in this invocation's object instance. Eviction loses them;
+  // the shared runtime's recovery scan handles an interrupted turn.
+  private readonly activities = new Set<string>();
   private activeExecs = 0;
   private readonly processes = new Set<CloudflareProcess>();
   private idleMs = idleTimeoutMs;
@@ -199,18 +180,25 @@ export class ExoSandbox extends DurableObject<Env> {
     environment: Record<string, string>,
     snapshot: { id: string } | null,
     idleMs: number,
+    codexVersion: string,
   ): Promise<void> {
-    await this.stopping;
-    if (snapshot) {
-      await this.stop();
-      await this.ctx.storage.put("snapshot", snapshot);
+    this.activeExecs++;
+    try {
+      await this.stopping;
+      if (snapshot) {
+        await this.stop();
+        await this.ctx.storage.put("snapshot", snapshot);
+      }
+      this.idleMs = idleMs;
+      await this.ctx.storage.put("idleMs", idleMs);
+      await this.ctx.storage.put("cwd", cwd);
+      await this.ctx.storage.put("environment", environment);
+      await this.start(identity);
+      await this.prepareCodex(identity, codexVersion);
+    } finally {
+      this.activeExecs--;
+      await this.scheduleIdle();
     }
-    this.idleMs = idleMs;
-    await this.ctx.storage.put("idleMs", idleMs);
-    await this.ctx.storage.put("cwd", cwd);
-    await this.ctx.storage.put("environment", environment);
-    await this.start(identity);
-    await this.scheduleIdle();
   }
 
   async info(
@@ -233,19 +221,18 @@ export class ExoSandbox extends DurableObject<Env> {
     await this.ctx.storage.deleteAll();
   }
 
-  async beginTurn(identity: SandboxIdentity, turnId: string): Promise<void> {
-    this.activeTurn = turnId;
+  async beginActivity(identity: SandboxIdentity, id: string): Promise<void> {
+    this.activities.add(id);
     // A checkpoint may take longer than blockConcurrencyWhile's time limit.
     // New work waits for that checkpoint before restarting the sandbox.
     await this.stopping;
     await this.ctx.storage.deleteAlarm();
-    await this.start(identity);
+    await (await this.start(identity)).setInactivityTimeout(660_000);
   }
 
-  async endTurn(turnId: string): Promise<void> {
-    if (this.activeTurn !== turnId) return;
-    this.activeTurn = null;
-    await this.scheduleIdle();
+  async endActivity(id: string): Promise<void> {
+    if (this.activities.delete(id) && this.activities.size === 0)
+      await this.scheduleIdle();
   }
 
   private async scheduleIdle(): Promise<void> {
@@ -259,7 +246,7 @@ export class ExoSandbox extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const scheduled = await this.ctx.storage.getAlarm();
     if (
-      this.activeTurn !== null ||
+      this.activities.size > 0 ||
       this.activeExecs > 0 ||
       (scheduled !== null && scheduled > Date.now())
     )
@@ -306,7 +293,7 @@ export class ExoSandbox extends DurableObject<Env> {
         );
     }
     await container.setInactivityTimeout(
-      this.activeTurn === null ? this.idleMs + 60_000 : 660_000,
+      this.activities.size === 0 ? this.idleMs + 60_000 : 660_000,
     );
     return container;
   }
@@ -329,7 +316,7 @@ export class ExoSandbox extends DurableObject<Env> {
       return await this.execCommand(identity, request);
     } finally {
       this.activeExecs--;
-      if (this.activeTurn === null && this.activeExecs === 0)
+      if (this.activities.size === 0 && this.activeExecs === 0)
         await this.scheduleIdle();
     }
   }
@@ -493,13 +480,13 @@ export class ExoSandbox extends DurableObject<Env> {
       return snapshot;
     } finally {
       this.activeExecs--;
-      if (this.activeTurn === null && this.activeExecs === 0)
+      if (this.activities.size === 0 && this.activeExecs === 0)
         await this.scheduleIdle();
     }
   }
 
   async stop(): Promise<void> {
-    this.activeTurn = null;
+    this.activities.clear();
     this.stopping ??= this.checkpointAndStop().finally(() => {
       this.stopping = undefined;
     });

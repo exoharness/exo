@@ -69,3 +69,4 @@ pub use exoharness::{
 };
 
 pub mod shell_tool;
+pub mod typescript_runtime;

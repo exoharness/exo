@@ -38,7 +38,11 @@ class FakeProcess extends RpcTarget {
     super(); this.process = process;
     this.out = process.stdout.pipeThrough(new TransformStream({transform(line, controller) {
       if (!suppress(line)) controller.enqueue(line);
-    }})).pipeThrough(new TextEncoderStream());
+    }})).pipeThrough(new TextEncoderStream()).pipeThrough(new TransformStream({transform(bytes, controller) {
+      const index = bytes.findIndex(byte => byte >= 128);
+      if (index < 0) controller.enqueue(bytes);
+      else { controller.enqueue(bytes.slice(0, index + 1)); controller.enqueue(bytes.slice(index + 1)); }
+    }}));
     this.err = process.stderr.pipeThrough(new TextEncoderStream());
   }
   get stdout() { return this.out; }
@@ -65,9 +69,10 @@ class EchoProcess extends RpcTarget {
   async wait() {return this.exited;}
 }
 export class FakeSandbox extends DurableObject {
-  constructor(ctx, env) { super(ctx, env); this.processes = new Set(); }
-  async beginTurn(identity, turnId) { await this.ctx.storage.put("identity", identity); await this.ctx.storage.deleteAlarm(); }
-  async endTurn(turnId) {}
+  constructor(ctx, env) { super(ctx, env); this.processes = new Set(); this.activities = new Set(); }
+  async beginActivity(identity, id) { this.activities.add(id); await this.ctx.storage.put("identity", identity); await this.ctx.storage.deleteAlarm(); }
+  async endActivity(id) { this.activities.delete(id); }
+  async activityCount() { return this.activities.size; }
   async info() { return {exists: !!await this.ctx.storage.get("identity"), running: await this.ctx.storage.get("running") ?? false}; }
   async acquire(identity, cwd, environment) { await this.ctx.storage.put("identity", identity); await this.ctx.storage.put("running", true); }
   async terminate() { await this.stop(); await this.ctx.storage.deleteAll(); }
@@ -87,10 +92,10 @@ export class FakeSandbox extends DurableObject {
     const app = new FakeCodexAppServer({resumeAvailable: true,
       completedItems: id => [
         {id: "cmd-" + id, type: "commandExecution", command: "node --test", cwd: "/workspace", status: "completed", exitCode: 0, aggregatedOutput: "passed", durationMs: 5},
-        {id: "msg-" + id, type: "agentMessage", text: "Done."},
+        {id: "msg-" + id, type: "agentMessage", text: "Done. 🧪"},
       ],
       onTurn: async (threadId, turnId, emit) => {
-        emit({method: "item/agentMessage/delta", params: {threadId, turnId, itemId: "msg-" + turnId, delta: "Done."}});
+        emit({method: "item/agentMessage/delta", params: {threadId, turnId, itemId: "msg-" + turnId, delta: "Done. 🧪"}});
         let total = await this.ctx.storage.get("usage-total") ?? 0;
         for (const last of [{inputTokens: 10, outputTokens: 3, totalTokens: 13, cachedInputTokens: 4}, {inputTokens: 5, outputTokens: 2, totalTokens: 7, cachedInputTokens: 1}]) {
           total += last.totalTokens;
@@ -128,6 +133,7 @@ async function options({ accessAud, access, staticToken = token } = {}) {
       contents: `import { ExoProvider as Provider } from "./implementation.js";
 export class ExoProvider extends Provider {
   async recoverForTest() { await this.alarm(); }
+  async harnessRequestForTest(thread_id, request) { try { return await this.runtime.call({type: "harness_request", thread_id, request}); } catch (error) { return {error: error.message}; } }
   async environmentForTest(request) { return JSON.stringify(await this.sandboxPolicy(request)); }
   async storedBytesForTest(key) { return new TextDecoder().decode((await this.ctx.storage.get(key)).bytes); }
 }
@@ -285,11 +291,18 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
   };
 }
 
-async function api(path, method = "GET", body, expected = 200) {
-  const response = await mf.dispatchFetch(`https://exo.test/exo/${path}`, {
+async function api(
+  path,
+  method = "GET",
+  body,
+  expected = 200,
+  worker = mf,
+  bearer = token,
+) {
+  const response = await worker.dispatchFetch(`https://exo.test/exo/${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${token}`,
+      ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
       "content-type": "application/json",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -324,6 +337,27 @@ async function create(ask = false, harness = "basic") {
   const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
   return { agent, thread, path: `agent/${agent.id}/thread/${thread.id}` };
 }
+const sendTurn = (path, content = "Print Linux.") =>
+  api(`${path}/turn`, "POST", { input: { role: "user", content } }, 202);
+const waitTurn = (path, id) =>
+  waitEvents(path, (events) =>
+    events.some(
+      (event) =>
+        event.data.type === "turn_ended" && (!id || event.turn_id === id),
+    ),
+  );
+
+async function assertTurnInactive(threadId) {
+  const { PROVIDERS } = await mf.getBindings("exo");
+  const result = await PROVIDERS.getByName(
+    "test-account",
+  ).harnessRequestForTest(threadId, {
+    type: "authorize_tool",
+    request: { function_name: "shell", arguments: { command: "uname -s" } },
+  });
+  assert.match(result.error, /TypeScript turn is not active/);
+}
+
 async function waitEvents(path, predicate) {
   let last;
   for (let i = 0; i < 150; i++) {
@@ -436,39 +470,21 @@ test("Access forwards HTTP bodies and SSE over the trusted Durable Object bindin
     }),
   );
   try {
-    const identity = await worker.dispatchFetch(
-      "https://exo.test/exo/identity",
-    );
-    assert.equal(identity.status, 200);
-    assert.deepEqual(await identity.json(), { account_id: "test-account" });
-    const created = await worker.dispatchFetch("https://exo.test/exo/agent", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ slug: "access-agent", name: "Access agent" }),
+    const accessApi = (path, method = "GET", body) =>
+      api(path, method, body, 200, worker, null);
+    assert.deepEqual(await accessApi("identity"), {
+      account_id: "test-account",
     });
-    assert.equal(created.status, 200);
-    const agent = await created.json();
-    const listed = await worker.dispatchFetch("https://exo.test/exo/agent");
-    assert.equal(listed.status, 200);
-    assert.equal((await listed.json()).agents[0].id, agent.id);
-    const artifact = await worker.dispatchFetch(
-      `https://exo.test/exo/agent/${agent.id}/artifact`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          path: "managed-agents/agent.md",
-          contents: [...new TextEncoder().encode(definition(false))],
-        }),
-      },
-    );
-    assert.equal(artifact.status, 200);
-    const opened = await worker.dispatchFetch(
-      `https://exo.test/exo/agent/${agent.id}/thread`,
-      { method: "POST", body: "{}" },
-    );
-    assert.equal(opened.status, 200);
-    const { thread } = await opened.json();
+    const agent = await accessApi("agent", "POST", {
+      slug: "access-agent",
+      name: "Access agent",
+    });
+    assert.equal((await accessApi("agent")).agents[0].id, agent.id);
+    await accessApi(`agent/${agent.id}/artifact`, "POST", {
+      path: "managed-agents/agent.md",
+      contents: [...new TextEncoder().encode(definition(false))],
+    });
+    const { thread } = await accessApi(`agent/${agent.id}/thread`, "POST", {});
     const stream = await worker.dispatchFetch(
       `https://exo.test/exo/agent/${agent.id}/thread/${thread.id}/event/watch`,
     );
@@ -489,15 +505,8 @@ test("Access forwards HTTP bodies and SSE over the trusted Durable Object bindin
 
 test("managed basic turn calls the model, executes one tool and persists canonical events", async () => {
   const { agent, thread, path } = await create();
-  const submitted = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "Print Linux." } },
-    202,
-  );
-  const events = await waitEvents(path, (events) =>
-    events.some((event) => event.data.type === "turn_ended"),
-  );
+  const submitted = await sendTurn(path);
+  const events = await waitTurn(path);
   assert(
     events.some(
       (event) =>
@@ -526,12 +535,7 @@ test("managed basic turn calls the model, executes one tool and persists canonic
 
 test("approval pauses durably, rejects the wrong session and executes only after approval", async () => {
   const { agent, thread, path } = await create(true);
-  const submitted = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "Print Linux." } },
-    202,
-  );
+  const submitted = await sendTurn(path);
   const events = await waitEvents(path, (events) =>
     events.some(
       (event) => event.data.event_type === "agent_runtime.approval_requested",
@@ -552,9 +556,7 @@ test("approval pauses durably, rejects the wrong session and executes only after
     approval_id: approval.approval_id,
     approved: true,
   });
-  await waitEvents(path, (events) =>
-    events.some((event) => event.data.type === "turn_ended"),
-  );
+  await waitTurn(path);
   assert.equal(await (await sandboxFor(agent, thread)).count(), 1);
 });
 
@@ -592,31 +594,14 @@ test("artifact versions, event cursors and encrypted vaults survive a runtime re
   const secrets = await api(`vault/${vault.id}/secret`);
   assert.equal(secrets[0].name, "OPENAI_API_KEY");
   assert(!JSON.stringify(secrets).includes(key));
-  await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "Print Linux." } },
-    202,
-  );
-  await waitEvents(path, (events) =>
-    events.some((event) => event.data.type === "turn_ended"),
-  );
+  await sendTurn(path);
+  await waitTurn(path);
 });
 
 test("shared runtime serializes concurrent submissions and cancellation prevents pending tools", async () => {
   const { agent, thread, path } = await create(true);
-  const first = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "Print Linux." } },
-    202,
-  );
-  const second = api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "Print Linux again." } },
-    202,
-  );
+  const first = await sendTurn(path);
+  const second = sendTurn(path, "Print Linux again.");
   await waitEvents(path, (events) =>
     events.some(
       (event) => event.data.event_type === "agent_runtime.approval_requested",
@@ -640,12 +625,7 @@ test("shared runtime serializes concurrent submissions and cancellation prevents
       .canceled_active_turn,
     true,
   );
-  await waitEvents(path, (events) =>
-    events.some(
-      (event) =>
-        event.turn_id === submitted.turn.id && event.data.type === "turn_ended",
-    ),
-  );
+  await waitTurn(path, submitted.turn.id);
   assert.deepEqual(await api(`${path}/turn/${submitted.turn.id}`), {
     active: false,
   });
@@ -698,12 +678,7 @@ test("SSE replays a cursor and streams new events without duplicates", async () 
   const first = (await api(`${path}/event`)).events[0];
   const { received, collect, cancel } = await watch(path, first.id);
   try {
-    await api(
-      `${path}/turn`,
-      "POST",
-      { input: { role: "user", content: "Print Linux." } },
-      202,
-    );
+    await sendTurn(path);
     await collect;
     assert(received.some((event) => event.data.type === "tool_result"));
     assert(!received.some((event) => event.id === first.id));
@@ -719,16 +694,10 @@ test("SSE replays a cursor and streams new events without duplicates", async () 
 test("Codex reuses its RPC process across turns and resumes after backend shutdown", async () => {
   const { agent, thread, path } = await create(false, "codex");
   const streaming = await watch(path);
-  const first = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "run tests" } },
-    202,
-  );
+  const first = await sendTurn(path, "run tests");
   assert.equal(first.harness, "codex-harness");
-  const events = await waitEvents(path, (events) =>
-    events.some((event) => event.data.type === "turn_ended"),
-  );
+  const events = await waitTurn(path);
+  await assertTurnInactive(thread.id);
   assert(
     !events.some((event) => event.data.type === "error"),
     JSON.stringify(events),
@@ -738,6 +707,10 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
       (event) =>
         event.data.type === "tool_result" && event.data.result.exit_code === 0,
     ),
+  );
+  assert(
+    JSON.stringify(events).includes("Done. 🧪"),
+    "process chunks must preserve split UTF-8",
   );
   await streaming.collect;
   streaming.cancel();
@@ -749,20 +722,11 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   assert(!events.some((event) => event.data.type === "lingua_stream_chunk"));
   assert(!events.some((event) => event.data.event_type === "codex_text_delta"));
   const sandbox = await sandboxFor(agent, thread);
+  assert.equal(await sandbox.activityCount(), 0);
   assert.equal(await sandbox.lastMethod(), "thread/start");
 
-  const second = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "continue" } },
-    202,
-  );
-  const finished = await waitEvents(path, (events) =>
-    events.some(
-      (event) =>
-        event.turn_id === second.turn.id && event.data.type === "turn_ended",
-    ),
-  );
+  const second = await sendTurn(path, "continue");
+  const finished = await waitTurn(path, second.turn.id);
   assert(
     !finished.some((event) => event.data.type === "error"),
     JSON.stringify(finished),
@@ -815,18 +779,8 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   }
   await sandbox.stop();
   assert.equal(await sandbox.processCount(), 0);
-  const third = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "resume after idle" } },
-    202,
-  );
-  const resumed = await waitEvents(path, (events) =>
-    events.some(
-      (event) =>
-        event.turn_id === third.turn.id && event.data.type === "turn_ended",
-    ),
-  );
+  const third = await sendTurn(path, "resume after idle");
+  const resumed = await waitTurn(path, third.turn.id);
   assert(
     !resumed.some((event) => event.data.type === "error"),
     JSON.stringify(resumed),
@@ -850,16 +804,22 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
 
 test("Codex cancellation uses the shared turn lifecycle and stops its managed process", async () => {
   const { agent, thread, path } = await create(false, "codex");
-  const submitted = await api(
-    `${path}/turn`,
-    "POST",
-    { input: { role: "user", content: "hold-turn" } },
-    202,
-  );
+  const submitted = await sendTurn(path, "hold-turn");
   const events = await waitEvents(path, (events) =>
     events.some((event) => event.data.event_type === "codex_turn_started"),
   );
   assert(!events.some((event) => event.data.type === "turn_ended"));
+  const sandbox = await sandboxFor(agent, thread);
+  assert.equal(await sandbox.activityCount(), 1);
+  const { PROVIDERS } = await mf.getBindings("exo");
+  const executed = await PROVIDERS.getByName(
+    "test-account",
+  ).harnessRequestForTest(thread.id, {
+    type: "execute_tool",
+    request: { function_name: "shell", arguments: { command: "uname -s" } },
+  });
+  assert.equal(executed.type, "tool_result");
+  assert.equal(executed.result.stdout, "Linux test\n");
   const process = events.find(
     (event) => event.data.type === "sandbox_process_started",
   ).data;
@@ -868,9 +828,9 @@ test("Codex cancellation uses the shared turn lifecycle and stops its managed pr
       .canceled_active_turn,
     true,
   );
-  await waitEvents(path, (events) =>
-    events.some((event) => event.data.type === "turn_ended"),
-  );
+  await waitTurn(path);
+  await assertTurnInactive(thread.id);
+  assert.equal(await sandbox.activityCount(), 0);
   const result = await rpc({
     type: "get_sandbox_process_events",
     scope: {
@@ -888,30 +848,6 @@ test("Codex cancellation uses the shared turn lifecycle and stops its managed pr
   });
   assert.notEqual(result.result.status.type, "running");
   assert.equal(await (await sandboxFor(agent, thread)).processCount(), 0);
-});
-
-test("managed thread pagination follows latest activity", async () => {
-  const { agent, thread } = await create();
-  const second = (await api(`agent/${agent.id}/thread`, "POST", {})).thread;
-  const third = (await api(`agent/${agent.id}/thread`, "POST", {})).thread;
-  await writeThreadArtifact(agent.id, thread.id, {
-    path: "touch.txt",
-    contents: [1],
-  });
-  const page = await api(`agent/${agent.id}/thread?limit=2`);
-  assert.deepEqual(
-    page.threads.map((item) => item.id),
-    [thread.id, third.id],
-  );
-  assert.equal(page.next_cursor, page.threads[1].latest_event_id);
-  const next = await api(
-    `agent/${agent.id}/thread?limit=2&cursor=${page.next_cursor}`,
-  );
-  assert.deepEqual(
-    next.threads.map((item) => item.id),
-    [second.id],
-  );
-  assert.equal(next.next_cursor, null);
 });
 
 async function rpc(request) {

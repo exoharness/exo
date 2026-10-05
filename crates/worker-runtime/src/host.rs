@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use executor::ModelRequest;
 use executor::runtime_host::RuntimeHost;
-use executor::{AgentConfig, ConversationConfig, ModelRequest, SendRequest};
-use exoharness::{AgentId, ThreadId, TurnRecord};
+use executor::typescript_runtime::{RuntimeEvent, TypeScriptInitPayload};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::task::ArcWake;
@@ -16,25 +16,10 @@ use wasm_bindgen::JsValue;
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum HostRequest {
-    Storage {
-        operation: StorageOperation,
-    },
-    Sandbox {
-        command: crate::sandbox::Command,
-    },
-    Model {
-        request: ModelRequest,
-    },
-    Harness {
-        sandbox_id: String,
-        agent_id: AgentId,
-        thread_id: ThreadId,
-        turn: TurnRecord,
-        agent_config: AgentConfig,
-        conversation_config: ConversationConfig,
-        request: SendRequest,
-        recovering: bool,
-    },
+    Storage { operation: StorageOperation },
+    Sandbox { command: crate::sandbox::Command },
+    Model { request: ModelRequest },
+    Harness { payload: TypeScriptInitPayload },
 }
 
 #[derive(Serialize)]
@@ -52,6 +37,7 @@ pub(crate) struct Host {
     replies: Mutex<HashMap<u32, oneshot::Sender<HostReply>>>,
     pub tasks: Mutex<Vec<BoxFuture<'static, ()>>>,
     pub awake: AtomicBool,
+    pub events: Mutex<Vec<RuntimeEvent>>,
 }
 
 impl Host {

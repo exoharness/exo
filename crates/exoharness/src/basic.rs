@@ -738,6 +738,9 @@ impl<T> SandboxHandle for T
 where
     T: BasicFullSandboxScope + Send + Sync,
 {
+    async fn sandbox_activity(&self, id: SandboxId) -> Result<crate::SandboxActivity> {
+        self.sandbox_handle().sandbox_activity(id).await
+    }
     async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>> {
         self.sandbox_handle().list_sandboxes().await
     }

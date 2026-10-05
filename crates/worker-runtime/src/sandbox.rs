@@ -15,6 +15,7 @@ use futures::future::BoxFuture;
 use futures::io::AsyncWrite;
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
+use wasm_bindgen::JsValue;
 
 use crate::host::{Host, HostRequest};
 
@@ -27,6 +28,14 @@ pub(crate) enum Command {
     Acquire {
         request: SandboxRequest,
         snapshot: Option<Snapshot>,
+    },
+    BeginActivity {
+        request: SandboxRequest,
+        id: String,
+    },
+    EndActivity {
+        request: SandboxRequest,
+        id: String,
     },
     Info {
         request: SandboxRequest,
@@ -44,27 +53,33 @@ pub(crate) enum Command {
         command: SandboxCommand,
     },
     Read {
-        process_id: String,
+        process: Process,
         stream: OutputStream,
     },
     Write {
-        process_id: String,
+        process: Process,
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     CloseInput {
-        process_id: String,
+        process: Process,
     },
     Wait {
-        process_id: String,
+        process: Process,
     },
     Close {
-        process_id: String,
+        process: Process,
     },
     Snapshot {
         request: SandboxRequest,
     },
 }
+// A host-owned RPC capability. Serde preserves its identity across wasm;
+// it is never persisted or serialized through the public JSON protocol.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct Process(#[serde(with = "serde_wasm_bindgen::preserve")] JsValue);
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum OutputStream {
@@ -190,6 +205,22 @@ impl ManagedSandboxHandle for CloudflareHandle {
     async fn command_environment(&self) -> Result<HashMap<String, String>> {
         Ok(HashMap::new())
     }
+    async fn activity(&self) -> Result<exoharness::SandboxActivity> {
+        let activity = CloudflareActivity {
+            host: self.host.clone(),
+            request: self.request.clone(),
+            id: exoharness::Uuid7::now().to_string(),
+        };
+        self.host
+            .call::<()>(HostRequest::Sandbox {
+                command: Command::BeginActivity {
+                    request: activity.request.clone(),
+                    id: activity.id.clone(),
+                },
+            })
+            .await?;
+        Ok(exoharness::SandboxActivity::new(activity))
+    }
     async fn is_running(&self) -> Result<Option<bool>> {
         let info: Info = self
             .host
@@ -212,7 +243,7 @@ impl ManagedSandboxHandle for CloudflareHandle {
             .await
     }
     async fn start_process(&self, command: &SandboxCommand) -> Result<SandboxProcessParts> {
-        let id: String = self
+        let process: Process = self
             .host
             .call(HostRequest::Sandbox {
                 command: Command::Start {
@@ -223,19 +254,19 @@ impl ManagedSandboxHandle for CloudflareHandle {
             .await?;
         let reader = |output| {
             let host = self.host.clone();
-            let id = id.clone();
+            let process = process.clone();
             Box::pin(
-                futures::stream::try_unfold((host, id), move |(host, id)| async move {
+                futures::stream::try_unfold((host, process), move |(host, process)| async move {
                     let bytes: Option<serde_bytes::ByteBuf> = host
                         .call(HostRequest::Sandbox {
                             command: Command::Read {
-                                process_id: id.clone(),
+                                process: process.clone(),
                                 stream: output,
                             },
                         })
                         .await
                         .map_err(std::io::Error::other)?;
-                    Ok(bytes.map(|bytes| (bytes.into_vec(), (host, id))))
+                    Ok(bytes.map(|bytes| (bytes.into_vec(), (host, process))))
                 })
                 .boxed()
                 .into_async_read(),
@@ -245,16 +276,16 @@ impl ManagedSandboxHandle for CloudflareHandle {
         let finished = Arc::new(AtomicBool::new(false));
         let guard = ProcessGuard {
             host: host.clone(),
-            id: id.clone(),
+            process: process.clone(),
             finished: finished.clone(),
         };
-        let wait_id = id.clone();
+        let waiting = process.clone();
         Ok(SandboxProcessParts {
             stdout: reader(OutputStream::Stdout),
             stderr: reader(OutputStream::Stderr),
             stdin: Box::pin(ProcessInput {
                 host: host.clone(),
-                id,
+                process,
                 pending: None,
                 closing: false,
                 finished,
@@ -263,9 +294,7 @@ impl ManagedSandboxHandle for CloudflareHandle {
                 let guard = guard;
                 let exit = host
                     .call(HostRequest::Sandbox {
-                        command: Command::Wait {
-                            process_id: wait_id,
-                        },
+                        command: Command::Wait { process: waiting },
                     })
                     .await;
                 if exit.is_ok() {
@@ -303,20 +332,39 @@ impl ManagedSandboxHandle for CloudflareHandle {
         })
     }
 }
+struct CloudflareActivity {
+    host: Arc<Host>,
+    request: SandboxRequest,
+    id: String,
+}
+impl Drop for CloudflareActivity {
+    fn drop(&mut self) {
+        let host = self.host.clone();
+        let command = Command::EndActivity {
+            request: self.request.clone(),
+            id: self.id.clone(),
+        };
+        self.host.spawn(Box::pin(async move {
+            if let Err(error) = host.call::<()>(HostRequest::Sandbox { command }).await {
+                tracing::warn!(%error, "failed to release sandbox activity");
+            }
+        }));
+    }
+}
 struct ProcessGuard {
     host: Arc<Host>,
-    id: String,
+    process: Process,
     finished: Arc<AtomicBool>,
 }
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         if !self.finished.swap(true, Ordering::AcqRel) {
             let host = self.host.clone();
-            let id = self.id.clone();
+            let process = self.process.clone();
             self.host.spawn(Box::pin(async move {
                 if let Err(error) = host
                     .call::<()>(HostRequest::Sandbox {
-                        command: Command::Close { process_id: id },
+                        command: Command::Close { process },
                     })
                     .await
                 {
@@ -328,7 +376,7 @@ impl Drop for ProcessGuard {
 }
 struct ProcessInput {
     host: Arc<Host>,
-    id: String,
+    process: Process,
     pending: Option<BoxFuture<'static, std::io::Result<usize>>>,
     closing: bool,
     finished: Arc<AtomicBool>,
@@ -337,11 +385,11 @@ impl Drop for ProcessInput {
     fn drop(&mut self) {
         if !self.closing && !self.finished.load(Ordering::Acquire) {
             let host = self.host.clone();
-            let id = self.id.clone();
+            let process = self.process.clone();
             self.host.spawn(Box::pin(async move {
                 if let Err(error) = host
                     .call::<()>(HostRequest::Sandbox {
-                        command: Command::CloseInput { process_id: id },
+                        command: Command::CloseInput { process },
                     })
                     .await
                 {
@@ -384,11 +432,11 @@ impl AsyncWrite for ProcessInput {
         if self.closing {
             return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
         }
-        let process_id = self.id.clone();
+        let process = self.process.clone();
         self.poll_command(
             cx,
             || Command::Write {
-                process_id,
+                process,
                 data: bytes.to_vec(),
             },
             bytes.len(),
@@ -408,7 +456,7 @@ impl AsyncWrite for ProcessInput {
             self.closing = true;
         }
         let command = Command::CloseInput {
-            process_id: self.id.clone(),
+            process: self.process.clone(),
         };
         self.poll_command(cx, || command, 0).map_ok(|_| ())
     }

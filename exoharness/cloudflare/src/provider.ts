@@ -24,6 +24,7 @@ export class ExoProvider extends DurableObject<Env> {
       env.VAULT_KEY,
       (request, signal) => io.handle(request, signal),
       (promise) => ctx.waitUntil(promise),
+      (event) => io.harnessProcesses.handleEvent(event),
     );
     io = new RuntimeIO(ctx, env, this.runtime, (threadId, event) => {
       for (const send of this.progress.get(threadId) ?? []) send(event);

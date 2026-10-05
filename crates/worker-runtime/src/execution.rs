@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
@@ -7,6 +8,9 @@ use executor::conversation_sandbox::ensure_conversation_sandbox;
 use executor::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
 use executor::managed_agents::{
     HarnessModules, TypeScriptHarnessPreset, agent_config_with_modules,
+};
+use executor::typescript_runtime::{
+    RequestContext, RuntimeRequest, RuntimeResponsePayload, TypeScriptRuntime,
 };
 use executor::{
     AgentConfig, AgentHarnessKind, BasicExecutor, ConversationConfig, ExecutorStreamMode,
@@ -17,7 +21,6 @@ use exo_managed_agents::AgentDefinition;
 use exoharness::{
     AgentHandle, ConversationHandle, SandboxProvider, ToolRequest, ToolResult, TurnHandle,
 };
-use serde::Deserialize;
 
 use crate::host::{Host, HostRequest};
 
@@ -39,7 +42,10 @@ impl HarnessModules for WorkerModules {
     }
 }
 
-pub(crate) fn worker_agent_config(definition: &AgentDefinition) -> Result<AgentConfig> {
+pub(crate) fn worker_agent_config(
+    definition: &AgentDefinition,
+    sandbox: SandboxProvider,
+) -> Result<AgentConfig> {
     let f = &definition.frontmatter;
     ensure!(
         matches!(f.harness.as_str(), "basic" | "codex"),
@@ -57,13 +63,7 @@ pub(crate) fn worker_agent_config(definition: &AgentDefinition) -> Result<AgentC
         f.config.braintrust.is_none(),
         "Braintrust tracing is not configured on this Worker"
     );
-    let config = agent_config_with_modules(
-        definition,
-        SandboxProvider::from_static("cloudflare"),
-        None,
-        None,
-        &WorkerModules,
-    )?;
+    let config = agent_config_with_modules(definition, sandbox, None, None, &WorkerModules)?;
     if f.harness == "codex" {
         ensure!(
             definition.permissions().permission_policy
@@ -131,9 +131,46 @@ impl ToolRuntime for WorkerTools {
 pub(crate) struct WorkerExecutor {
     pub host: Arc<Host>,
     pub basic: BasicExecutor<WorkerModel, WorkerTools>,
+    pub state: Arc<dyn exoharness::ExoHarness>,
+    pub sandbox_default: SandboxProvider,
+    pub harnesses: Mutex<HashMap<exoharness::ThreadId, Arc<WorkerHarness>>>,
 }
-#[derive(Deserialize)]
-pub(crate) struct UnitResponse {}
+
+pub(crate) struct WorkerHarness {
+    runtime: TypeScriptRuntime,
+    turn: Mutex<Option<Arc<WorkerTurn>>>,
+}
+
+struct WorkerTurn {
+    agent: Arc<dyn AgentHandle>,
+    thread: Arc<dyn ConversationHandle>,
+    turn: Arc<dyn TurnHandle>,
+    config: AgentConfig,
+    thread_config: ConversationConfig,
+    stream: Option<tokio::sync::mpsc::UnboundedSender<Result<executor::ExecutionStreamEvent>>>,
+}
+impl WorkerTurn {
+    fn context(&self) -> RequestContext<'_> {
+        RequestContext {
+            agent: self.agent.as_ref(),
+            conversation: self.thread.as_ref(),
+            turn: self.turn.as_ref(),
+            agent_config: &self.config,
+            conversation_config: &self.thread_config,
+            stream: self
+                .stream
+                .as_ref()
+                .map_or(ExecutorStreamMode::Disabled, ExecutorStreamMode::Enabled),
+        }
+    }
+}
+
+struct ActiveTurn<'a>(&'a WorkerHarness);
+impl Drop for ActiveTurn<'_> {
+    fn drop(&mut self) {
+        *self.0.turn.lock().expect("Worker turn poisoned") = None;
+    }
+}
 
 #[async_trait]
 impl HarnessExecutor for WorkerExecutor {
@@ -141,7 +178,7 @@ impl HarnessExecutor for WorkerExecutor {
         "worker"
     }
     fn agent_config(&self, definition: &AgentDefinition) -> Result<AgentConfig> {
-        worker_agent_config(definition)
+        worker_agent_config(definition, self.sandbox_default.clone())
     }
     fn can_resume_pending_approval(&self, config: &AgentConfig) -> bool {
         config.harness == AgentHarnessKind::Basic
@@ -156,7 +193,6 @@ impl HarnessExecutor for WorkerExecutor {
         config: &AgentConfig,
         thread_config: &ConversationConfig,
     ) -> Result<()> {
-        validate_conversation(thread_config)?;
         ensure_conversation_sandbox(thread, config, thread_config, None).await?;
         if config.harness == AgentHarnessKind::Basic {
             self.basic
@@ -170,10 +206,14 @@ impl HarnessExecutor for WorkerExecutor {
         thread: &dyn ConversationHandle,
         _config: &AgentConfig,
     ) -> Result<()> {
-        for sandbox in thread.list_sandboxes().await? {
-            if sandbox.running {
-                thread.stop_sandbox(sandbox.id).await?;
-            }
+        let harness = self
+            .harnesses
+            .lock()
+            .expect("Worker harnesses poisoned")
+            .get(&thread.record().id)
+            .cloned();
+        if let Some(harness) = harness {
+            harness.runtime.shutdown().await?;
         }
         Ok(())
     }
@@ -228,6 +268,25 @@ impl HarnessExecutor for WorkerExecutor {
 }
 
 impl WorkerExecutor {
+    pub async fn request_runtime(
+        &self,
+        thread: exoharness::ThreadId,
+        request: RuntimeRequest,
+    ) -> Result<RuntimeResponsePayload> {
+        let harness = self
+            .harnesses
+            .lock()
+            .expect("Worker harnesses poisoned")
+            .get(&thread)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("TypeScript harness is not active"))?;
+        let turn = harness.turn.lock().expect("Worker turn poisoned").clone();
+        harness
+            .runtime
+            .handle_request(turn.as_ref().map(|turn| turn.context()), request)
+            .await
+    }
+
     async fn run(
         &self,
         agent: &dyn AgentHandle,
@@ -240,7 +299,9 @@ impl WorkerExecutor {
         trace: Option<&dyn TurnExecutionTrace>,
         recovering: bool,
     ) -> Result<()> {
-        validate_conversation(thread_config)?;
+        let sandbox_id =
+            ensure_conversation_sandbox(thread.as_ref(), config, thread_config, None).await?;
+        let _activity = thread.sandbox_activity(sandbox_id).await?;
         if config.harness == AgentHarnessKind::Basic {
             if recovering {
                 return self
@@ -275,21 +336,57 @@ impl WorkerExecutor {
             config.harness == AgentHarnessKind::TypeScript,
             "harness is not supported by this Worker"
         );
-        let sandbox_id =
-            ensure_conversation_sandbox(thread.as_ref(), config, thread_config, None).await?;
-        let _response: UnitResponse = self
-            .host
-            .call(HostRequest::Harness {
-                sandbox_id,
-                agent_id: agent.record().id,
-                thread_id: thread.record().id,
-                turn: turn.record().clone(),
-                agent_config: config.clone(),
-                conversation_config: thread_config.clone(),
-                request: request.clone(),
-                recovering,
+        let harness = self
+            .harnesses
+            .lock()
+            .expect("Worker harnesses poisoned")
+            .entry(thread.record().id)
+            .or_insert_with(|| {
+                let host = self.host.clone();
+                Arc::new(WorkerHarness {
+                    runtime: TypeScriptRuntime::new(
+                        thread.clone(),
+                        Arc::new(WorkerTools),
+                        self.host.clone(),
+                        Arc::new(move |event| {
+                            host.events
+                                .lock()
+                                .expect("Worker events poisoned")
+                                .push(event);
+                            Ok(())
+                        }),
+                    ),
+                    turn: Mutex::default(),
+                })
             })
+            .clone();
+        let turn = Arc::new(WorkerTurn {
+            agent: self
+                .state
+                .get_agent(&agent.record().id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("agent not found"))?,
+            thread,
+            turn,
+            config: config.clone(),
+            thread_config: thread_config.clone(),
+            stream: match stream {
+                ExecutorStreamMode::Enabled(tx) => Some(tx.clone()),
+                ExecutorStreamMode::Disabled => None,
+            },
+        });
+        let payload = harness
+            .runtime
+            .init(&turn.context(), request, recovering, None)
             .await?;
+        *harness.turn.lock().expect("Worker turn poisoned") = Some(turn);
+        let active_turn = ActiveTurn(harness.as_ref());
+        let result = self.host.call::<()>(HostRequest::Harness { payload }).await;
+        drop(active_turn);
+        if result.is_err() {
+            harness.runtime.shutdown().await?;
+        }
+        result?;
         Ok(())
     }
 }
@@ -312,45 +409,4 @@ impl ExecutionTracer for WorkerTracer {
     ) -> Option<Box<dyn TurnExecutionTrace>> {
         None
     }
-}
-
-fn validate_conversation(config: &ConversationConfig) -> Result<()> {
-    ensure!(
-        config.resources.is_empty()
-            && config.resource_mounts.is_empty()
-            && config.mounts.is_empty()
-            && config.durable_file_systems.is_empty(),
-        "filesystem resources and mounts are not supported by this host"
-    );
-    ensure!(
-        config
-            .sandbox_image
-            .as_deref()
-            .is_none_or(|image| image == crate::sandbox::IMAGE)
-            && config
-                .sandbox_provider
-                .as_ref()
-                .is_none_or(|provider| provider.as_str() == "cloudflare"),
-        "this host uses the standard Cloudflare sandbox image"
-    );
-    if let Some(environment) = &config.environment {
-        let sandbox = &environment.config;
-        ensure!(
-            sandbox.provider.as_str() == "cloudflare"
-                && sandbox.image == crate::sandbox::IMAGE
-                && sandbox.resources.is_none()
-                && sandbox
-                    .file_system_mounts
-                    .as_ref()
-                    .is_none_or(Vec::is_empty)
-                && sandbox
-                    .durable_file_systems
-                    .as_ref()
-                    .is_none_or(Vec::is_empty)
-                && sandbox.tcp_ports.is_empty()
-                && sandbox.idle_seconds.is_none_or(|idle| idle > 0),
-            "this host supports standard-image environments with network policies; custom execution settings are not supported"
-        );
-    }
-    Ok(())
 }

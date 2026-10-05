@@ -1,5 +1,10 @@
-import type { SandboxProcess } from "./index";
-import type { RawSandboxProcessStream } from "./client";
+import type { SandboxProcess, SandboxProcessStartRequest } from "./index";
+import type {
+  RawSandboxProcessStream,
+  RawRuntimeRequest,
+  RawRuntimeResponsePayload,
+  RawRuntimeEvent,
+} from "./client";
 
 type ProcessEvent =
   | {
@@ -10,7 +15,7 @@ type ProcessEvent =
   | { type: "sandbox_process_exit"; exit_code?: number | null }
   | { type: "sandbox_process_error"; message: string };
 
-export class SandboxProcessHandle implements SandboxProcess {
+class SandboxProcessHandle implements SandboxProcess {
   readonly reused: boolean;
   readonly stdout: ReadableStream<string>;
   readonly stderr: ReadableStream<string>;
@@ -109,5 +114,93 @@ export class SandboxProcessHandle implements SandboxProcess {
     this.stdoutController?.error(error);
     this.stderrController?.error(error);
     this.rejectWait(error);
+  }
+}
+
+export class SandboxProcessClient {
+  private readonly sandboxProcesses = new Map<
+    number,
+    SandboxProcessHandle | RawRuntimeEvent[]
+  >();
+  private pendingStarts = 0;
+  async start(
+    request: SandboxProcessStartRequest,
+    requestRuntime: (
+      request: RawRuntimeRequest,
+    ) => Promise<RawRuntimeResponsePayload>,
+  ): Promise<SandboxProcess> {
+    this.pendingStarts++;
+    try {
+      const payload = await requestRuntime({
+        type: "start_sandbox_process",
+        command: request.command,
+        env: request.env ?? {},
+        reuse_key: request.reuseKey ?? null,
+      });
+      if (payload.type !== "sandbox_process_started") {
+        throw new Error(
+          `expected sandbox_process_started payload, got ${payload.type}`,
+        );
+      }
+      const unit = async (request: RawRuntimeRequest) => {
+        const response = await requestRuntime(request);
+        if (response.type !== "unit")
+          throw new Error(`expected unit payload, got ${response.type}`);
+      };
+      const process = new SandboxProcessHandle(
+        {
+          writeStdin: (data) =>
+            unit({
+              type: "write_sandbox_process_stdin",
+              process_id: payload.process_id,
+              data,
+            }),
+          closeStdin: () =>
+            unit({
+              type: "close_sandbox_process_stdin",
+              process_id: payload.process_id,
+            }),
+          close: () =>
+            unit({
+              type: "close_sandbox_process",
+              process_id: payload.process_id,
+            }),
+        },
+        {
+          sandboxId: payload.sandbox_id ?? undefined,
+          sandboxProcessId: payload.sandbox_process_id ?? undefined,
+          reused: payload.reused === true,
+        },
+      );
+      const queued = this.sandboxProcesses.get(payload.process_id);
+      this.sandboxProcesses.set(payload.process_id, process);
+      if (Array.isArray(queued))
+        for (const event of queued) this.handleEvent(event);
+      return process;
+    } finally {
+      this.pendingStarts--;
+      if (this.pendingStarts === 0)
+        for (const [id, value] of this.sandboxProcesses)
+          if (Array.isArray(value)) this.sandboxProcesses.delete(id);
+    }
+  }
+
+  handleEvent(event: RawRuntimeEvent): void {
+    const process = this.sandboxProcesses.get(event.process_id);
+    if (!process || Array.isArray(process)) {
+      if (this.pendingStarts > 0) {
+        const queued = process ?? [];
+        queued.push(event);
+        this.sandboxProcesses.set(event.process_id, queued);
+      }
+      return;
+    }
+    process.handleEvent(event);
+    if (
+      event.type === "sandbox_process_exit" ||
+      event.type === "sandbox_process_error"
+    ) {
+      this.sandboxProcesses.delete(event.process_id);
+    }
   }
 }

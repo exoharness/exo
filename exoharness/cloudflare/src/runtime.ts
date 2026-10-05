@@ -4,6 +4,7 @@ import type { HostRequest } from "./runtime-io";
 import type {
   RawExoRequest,
   RawExoResponse,
+  RawRuntimeEvent,
 } from "../../typescript/harness/client";
 
 initSync({ module: runtimeWasm });
@@ -13,6 +14,7 @@ interface Progress {
   cancelled: number[];
   completed: { id: number; result: unknown; error: string | null }[];
   pending: boolean;
+  events: RawRuntimeEvent[];
 }
 
 /** Owns the portable Rust runtime; JavaScript supplies asynchronous host I/O. */
@@ -32,6 +34,7 @@ export class Runtime {
       signal: AbortSignal,
     ) => Promise<unknown>,
     private readonly waitUntil: (promise: Promise<unknown>) => void,
+    private readonly emitRuntimeEvent: (event: RawRuntimeEvent) => void,
   ) {
     this.wasm = new WorkerRuntime(masterKey);
   }
@@ -79,6 +82,7 @@ export class Runtime {
         operation.reject(new Error(completion.error));
       else operation.resolve(completion.result);
     }
+    for (const event of progress.events) this.emitRuntimeEvent(event);
     if (progress.pending && !this.idle) {
       let resolve!: () => void;
       const promise = new Promise<void>((done) => {

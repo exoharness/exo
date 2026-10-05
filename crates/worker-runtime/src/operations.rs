@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use executor::Runtime;
 use exoharness::{AgentId, ThreadId};
 use serde::{Deserialize, Serialize};
@@ -32,11 +32,9 @@ pub(crate) enum Operation {
         method: String,
         headers: Vec<(String, String)>,
     },
-    AuthorizeTool {
-        agent_id: AgentId,
+    HarnessRequest {
         thread_id: ThreadId,
-        turn: exoharness::TurnRecord,
-        request: exoharness::ToolRequest,
+        request: executor::typescript_runtime::RuntimeRequest,
     },
     HasUnfinishedTurns,
     Recover,
@@ -51,6 +49,7 @@ pub(crate) enum Operation {
 #[serde(untagged)]
 pub(crate) enum Output {
     Http(crate::http::Response),
+    Harness(executor::typescript_runtime::RuntimeResponsePayload),
     Exo(Box<exoharness::protocol::Response>),
     Progress(Box<Option<exoharness::Event>>),
     Events(exoharness::GetEventsResult),
@@ -62,6 +61,7 @@ pub(crate) enum Output {
 
 pub(crate) async fn run(
     runtime: Runtime,
+    execution: Arc<crate::execution::WorkerExecutor>,
     host: Arc<Host>,
     updates: Arc<tokio::sync::Mutex<()>>,
     operation: Operation,
@@ -148,35 +148,9 @@ pub(crate) async fn run(
                 .await?,
             ))
         }
-        Operation::AuthorizeTool {
-            agent_id,
-            thread_id,
-            turn,
-            request,
-        } => {
-            let agent = state
-                .get_agent(&agent_id)
-                .await?
-                .context("agent not found")?;
-            let thread = agent
-                .get_thread(&thread_id)
-                .await?
-                .context("thread not found")?;
-            let config = executor::load_conversation_config(thread.as_ref()).await?;
-            let turn = thread.turn_handle(turn).await?;
-            executor::permissions::authorize(
-                thread.as_ref(),
-                turn.as_ref(),
-                config.permissions.for_tool(&request.function_name),
-                None,
-                None,
-                false,
-                &request,
-                executor::ExecutorStreamMode::Disabled,
-            )
-            .await?;
-            Ok(Output::Exo(Box::new(exoharness::protocol::Response::Unit)))
-        }
+        Operation::HarnessRequest { thread_id, request } => Ok(Output::Harness(
+            execution.request_runtime(thread_id, request).await?,
+        )),
         Operation::HasUnfinishedTurns => {
             for agent in state.list_agents().await? {
                 if !agent

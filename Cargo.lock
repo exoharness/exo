@@ -2699,6 +2699,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cost",
+ "encoding_rs",
  "exo-managed-agents",
  "exo-mcp",
  "exoharness",

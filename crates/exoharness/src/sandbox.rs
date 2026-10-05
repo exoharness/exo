@@ -234,6 +234,12 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
+    /// Keep this sandbox available during a turn. Backends whose lifecycle
+    /// already covers turn activity do not need a separate guard.
+    async fn activity(&self) -> Result<crate::SandboxActivity> {
+        Ok(crate::SandboxActivity::noop())
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput>;
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;
