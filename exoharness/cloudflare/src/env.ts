@@ -1,5 +1,7 @@
 import type { ExoProvider } from "./provider";
 import type { ExoSandbox } from "./sandbox";
+import type { JsonObject } from "../../typescript/harness/index";
+import type { RawResourceScope } from "../../typescript/harness/client";
 
 export interface Env {
   PROVIDERS: DurableObjectNamespace<ExoProvider>;
@@ -15,12 +17,20 @@ export interface Env {
 export interface SandboxIdentity {
   agentId: string;
   threadId: string;
+  sandboxId: string;
+}
+export interface SandboxRequest {
+  sandbox_id: string;
+  scope: RawResourceScope;
+  spec: { image: string; default_workdir: string; policy: JsonObject };
+  lifecycle: { idle_ttl: { secs: number; nanos: number } | null };
 }
 export type SandboxPolicy = Record<string, string>;
 export interface ExecRequest {
   command: string[];
   env?: Record<string, string>;
   timeoutMs?: number;
+  cwd?: string;
 }
 export interface ExecResult {
   stdout: string;

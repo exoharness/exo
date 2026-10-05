@@ -7,7 +7,13 @@ rust-version.workspace = true
 
 [features]
 default = ["client"]
-client = ["exo-mcp/client", "exoharness/http-client", "dep:reqwest", "dep:tokio", "dep:tokio-util"]
+client = [
+  "exo-mcp/client",
+  "exoharness/http-client",
+  "dep:reqwest",
+  "dep:tokio",
+  "dep:tokio-util",
+]
 
 [dependencies]
 futures.workspace = true

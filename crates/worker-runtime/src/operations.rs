@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use executor::Runtime;
 use exoharness::{AgentId, ThreadId};
-use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::host::Host;
@@ -11,16 +10,21 @@ use crate::host::Host;
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
+    Progress {
+        thread_id: ThreadId,
+        turn: exoharness::TurnRecord,
+        event: executor::TypeScriptStreamEvent,
+    },
     Http {
         request: crate::http::Request,
     },
     SandboxPolicy {
-        agent_id: AgentId,
-        thread_id: ThreadId,
+        request: exoharness::SandboxRequest,
     },
     ProxyHeaders {
         agent_id: AgentId,
         thread_id: ThreadId,
+        sandbox_id: String,
         url: String,
         method: String,
         headers: Vec<(String, String)>,
@@ -38,9 +42,6 @@ pub(crate) enum Operation {
         thread_id: ThreadId,
         after: Option<exoharness::EventId>,
     },
-    State {
-        request: exoharness::protocol::Request,
-    },
 }
 
 pub(crate) async fn run(
@@ -51,6 +52,28 @@ pub(crate) async fn run(
 ) -> Result<String> {
     let state = runtime.exoharness_handle();
     match operation {
+        Operation::Progress {
+            thread_id,
+            turn,
+            event,
+        } => {
+            let progress = if let executor::ExecutionStreamEvent::Chunk(chunk) =
+                executor::to_execution_stream_event(event)
+            {
+                let id = exoharness::Uuid7::now();
+                Some(exoharness::Event {
+                    id,
+                    thread_id,
+                    session_id: Some(turn.session_id),
+                    turn_id: Some(turn.id),
+                    created_at: id.timestamp().expect("uuid7 timestamp"),
+                    data: exoharness::EventData::LinguaStreamChunk { chunk },
+                })
+            } else {
+                None
+            };
+            Ok(serde_json::to_string(&progress)?)
+        }
         Operation::Http { request } => Ok(serde_json::to_string(
             &crate::http::handle(&runtime, &host, &updates, request).await,
         )?),
@@ -59,53 +82,34 @@ pub(crate) async fn run(
             thread_id,
             after,
         } => {
-            let agent = state
-                .get_agent(&agent_id)
-                .await?
-                .context("agent not found")?;
-            let thread = agent
-                .get_thread(&thread_id)
-                .await?
-                .context("thread not found")?;
-            let mut events = thread
-                .watch_events(
-                    after
-                        .map(std::ops::Bound::Excluded)
-                        .unwrap_or(std::ops::Bound::Unbounded),
-                )
-                .await?;
-            let mut page = thread
-                .get_events(Some(exoharness::EventQuery {
-                    cursor: after,
-                    limit: Some(1000),
-                    ..Default::default()
-                }))
-                .await?;
-            if page.events.is_empty() {
-                page.events
-                    .push(events.next().await.context("event stream closed")??);
-                page.cursor = page.events.last().map(|event| event.id);
-            }
-            Ok(serde_json::to_string(&page)?)
+            let service = executor::managed_agents::service::Service {
+                runtime: &runtime,
+                agent_id: None,
+                definition_updates: &updates,
+            };
+            let path = executor::managed_agents::service::ThreadPath {
+                agent_id,
+                thread_id,
+            };
+            let query = exo_managed_agents::http::protocol::EventsQuery {
+                after,
+                limit: Some(1000),
+                ..Default::default()
+            };
+            Ok(serde_json::to_string(
+                &executor::managed_agents::service::wait_events(&service, &path, query).await?,
+            )?)
         }
-        Operation::State { request } => {
-            let response = exoharness::server::ExoHarnessServer::new(state)
-                .handle_request(request)
-                .await?;
-            Ok(serde_json::to_string(&response)?)
-        }
-        Operation::SandboxPolicy {
-            agent_id,
-            thread_id,
-        } => {
+        Operation::SandboxPolicy { request } => {
             let _guard = updates.lock().await;
             Ok(serde_json::to_string(
-                &crate::policy::environment(&runtime, &host, agent_id, thread_id).await?,
+                &crate::policy::environment(&runtime, &host, request).await?,
             )?)
         }
         Operation::ProxyHeaders {
             agent_id,
             thread_id,
+            sandbox_id,
             url,
             method,
             headers,
@@ -113,7 +117,14 @@ pub(crate) async fn run(
             let _guard = updates.lock().await;
             Ok(serde_json::to_string(
                 &crate::policy::proxy_headers(
-                    &runtime, &host, agent_id, thread_id, &url, &method, headers,
+                    &runtime,
+                    &host,
+                    agent_id,
+                    thread_id,
+                    &sandbox_id,
+                    &url,
+                    &method,
+                    headers,
                 )
                 .await?,
             )?)
@@ -145,7 +156,9 @@ pub(crate) async fn run(
                 executor::ExecutorStreamMode::Disabled,
             )
             .await?;
-            Ok("{\"type\":\"unit\"}".into())
+            Ok(serde_json::to_string(
+                &exoharness::protocol::Response::Unit,
+            )?)
         }
         Operation::HasUnfinishedTurns => {
             for agent in state.list_agents().await? {
@@ -159,14 +172,14 @@ pub(crate) async fn run(
                     .conversations
                     .is_empty()
                 {
-                    return Ok("true".into());
+                    return Ok(serde_json::to_string(&true)?);
                 }
             }
-            Ok("false".into())
+            Ok(serde_json::to_string(&false)?)
         }
         Operation::Recover => {
             runtime.recover_unfinished_turns().await?;
-            Ok("{}".into())
+            Ok(serde_json::to_string(&())?)
         }
     }
 }

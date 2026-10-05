@@ -21,7 +21,7 @@ use exoharness::{
 use futures::StreamExt;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::{ExecutionStreamEvent, Runtime, harness::HarnessTurnKey};
+use crate::{ExecutionStreamEvent, Runtime};
 
 // Thread creation can include a large environment definition. Bytes buffers the request.
 const OPTIONAL_JSON_BODY_LIMIT: usize = 256 * 1024 * 1024;
@@ -305,12 +305,12 @@ async fn authorize(
         .app_data::<web::Data<Arc<RuntimeHttpService>>>()
         .ok_or_else(|| ErrorInternalServerError("runtime service not configured"))?;
     if let Some(token) = &service.bearer_token
-        && !crate::http_auth::bearer_token_matches(
-            token,
-            req.headers()
-                .get(AUTHORIZATION)
-                .and_then(|value| value.to_str().ok()),
-        )
+        && req
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            != Some(token.as_str())
     {
         return Err(ErrorUnauthorized("runtime bearer token required"));
     }
@@ -670,11 +670,7 @@ async fn submit_turn(
     let body = body.into_inner();
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let crate::managed_agents::service::PreparedTurn {
-        request,
-        config,
-        harness,
-    } = crate::managed_agents::service::prepare_turn(
+    let prepared = crate::managed_agents::service::prepare_turn(
         &service.runtime,
         agent.as_ref(),
         thread.as_ref(),
@@ -686,16 +682,15 @@ async fn submit_turn(
     let progress = service.progress.clone();
     let (receipt, received) = oneshot::channel();
     tokio::spawn(async move {
-        let admitted = runtime
-            .start_turn(
-                Arc::clone(&agent),
-                Arc::clone(&thread),
-                request,
-                true,
-                Some(config),
-            )
-            .await;
-        let (turn, mut events) = match admitted {
+        let admitted = crate::managed_agents::service::submit_turn(
+            &runtime,
+            agent,
+            thread.clone(),
+            prepared,
+            true,
+        )
+        .await;
+        let (result, mut events) = match admitted {
             Ok(admitted) => admitted,
             Err(error) => {
                 if receipt.send(Err(error)).is_err() {
@@ -704,12 +699,7 @@ async fn submit_turn(
                 return;
             }
         };
-        let result = SubmitTurnResult {
-            agent: agent.record().clone(),
-            thread: thread.record().clone(),
-            turn: turn.clone(),
-            harness,
-        };
+        let turn = result.turn.clone();
         if receipt.send(Ok(result)).is_err() {
             tracing::debug!(turn_id = %turn.id, "turn requester disconnected after admission");
         }
@@ -770,14 +760,10 @@ async fn cancel_turn(
     } else {
         service.runtime.clone()
     };
-    let canceled_active_turn = runtime
-        .cancel_turn(HarnessTurnKey::new(path.thread_id, path.turn_id))
+    crate::managed_agents::service::cancel_turn(&runtime, path.thread_id, path.turn_id)
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(CancelTurnResult {
-        canceled_active_turn,
-        finished_event_id: None,
-    }))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn approval_response(
@@ -878,6 +864,13 @@ fn progress_stream(receiver: broadcast::Receiver<Event>, thread_id: ThreadId) ->
     ))
 }
 
+fn request_error(error: anyhow::Error) -> Error {
+    let status =
+        actix_web::http::StatusCode::from_u16(crate::managed_agents::service::error_status(&error))
+            .expect("valid request status");
+    actix_web::error::InternalError::new(error, status).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,11 +915,4 @@ mod tests {
         assert!(progress.next().await.is_none());
         Ok(())
     }
-}
-
-fn request_error(error: anyhow::Error) -> Error {
-    let status =
-        actix_web::http::StatusCode::from_u16(crate::managed_agents::service::error_status(&error))
-            .expect("valid request status");
-    actix_web::error::InternalError::new(error, status).into()
 }

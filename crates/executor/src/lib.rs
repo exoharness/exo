@@ -14,7 +14,6 @@ mod harness_events;
 mod harness_executor;
 mod harness_helpers;
 mod harness_types;
-pub mod http_auth;
 pub mod managed_agents;
 mod mcp_types;
 mod message_history;
@@ -32,7 +31,7 @@ pub use executor_types::{
     ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
     ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult,
     ShellToolArguments, ShellToolResult, ToolDefinition, ToolRuntime, TypeScriptHarnessConfig,
-    effective_sandbox_scope,
+    TypeScriptStreamEvent, effective_sandbox_scope, to_execution_stream_event,
 };
 pub use exo_managed_agents::{BraintrustProject, BraintrustTracingConfig};
 
@@ -67,3 +66,5 @@ pub use exoharness::{
     Secret, SecretMetadata, SessionId, SnapshotId, StartSandboxRequest, ToolRequest, TurnId,
     UsageRecord, Uuid7,
 };
+
+pub mod shell_tool;

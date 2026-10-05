@@ -19,7 +19,7 @@ source = source.replace(
   `
 class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }
 class RpcTarget {}
-class RpcStub { constructor(target) { return target; } }
+class RpcStub { constructor(target) { target[Symbol.dispose] = () => {}; return target; } }
 `,
 );
 source = source.replace(
@@ -29,7 +29,7 @@ source = source.replace(
 const { ExoSandbox } = await import(
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
 );
-const identity = { agentId: "agent", threadId: "thread" };
+const identity = { agentId: "agent", threadId: "thread", sandboxId: "sandbox" };
 
 function fixture() {
   const data = new Map();

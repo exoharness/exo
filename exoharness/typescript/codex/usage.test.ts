@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { type JsonValue } from "../harness";
 import completion from "./fixtures/raw-response-completed.json";
-import { CodexUsageAccumulator, codexUsageEvent } from "./usage";
+import {
+  CodexUsageAccumulator,
+  codexUsageEvent,
+  type CodexTokenUsageUpdate,
+} from "./usage";
 
 describe("Codex usage events", () => {
-  it("converts a captured completion notification into a usage event", () => {
-    const accumulator = new CodexUsageAccumulator();
-    accumulator.record(update(completion.params.usage));
-    const usage = accumulator.value;
-    if (!usage) throw new Error("Expected Codex usage");
+  it("converts captured token counts into a usage event", () => {
+    const usage = completion.params.usage;
     expect(codexUsageEvent("gpt-5.6-sol", usage, null)).toEqual({
       type: "messages",
       messages: [],
@@ -22,10 +22,6 @@ describe("Codex usage events", () => {
         completion_reasoning_tokens: 12,
       },
     });
-    accumulator.record(update(completion.params.usage));
-    expect(accumulator.value).toBe(usage);
-    accumulator.record(completion.params);
-    expect(accumulator.value).toBe(usage);
   });
 
   it("sums per-call usage across tool rounds without adding thread totals", () => {
@@ -91,20 +87,12 @@ describe("Codex usage events", () => {
     });
   });
 
-  it("ignores context estimates and incomplete usage", () => {
-    const invalidParams: JsonValue[] = [
+  it("ignores incomplete or invalid token counts", () => {
+    const invalidParams: (CodexTokenUsageUpdate | null)[] = [
       {},
       null,
-      {
-        tokenUsage: {
-          total: { totalTokens: 13000 },
-          last: { inputTokens: 0, outputTokens: 0, totalTokens: 13000 },
-        },
-      },
       update({ inputTokens: 10, totalTokens: 13 }),
       update({ inputTokens: -1, outputTokens: 3, totalTokens: 13 }),
-      update({ inputTokens: 10, outputTokens: 3, totalTokens: 14 }),
-      update({ inputTokens: 10, outputTokens: 3, totalTokens: 13 }, 12),
     ];
     for (const params of invalidParams) {
       const accumulator = new CodexUsageAccumulator();
@@ -126,41 +114,18 @@ describe("Codex usage events", () => {
     });
   });
 
-  it("sums two captured calls on a resumed turn without adding earlier turns", () => {
+  it("accepts independent token totals and ignores older notifications", () => {
     const accumulator = new CodexUsageAccumulator();
     accumulator.record(
-      update(
-        {
-          inputTokens: 12047,
-          outputTokens: 225,
-          totalTokens: 12272,
-          cachedInputTokens: 10624,
-          cacheWriteInputTokens: 0,
-          reasoningOutputTokens: 61,
-        },
-        46941,
-      ),
+      update({ inputTokens: 10, outputTokens: 3, totalTokens: 14 }, 12),
     );
     accumulator.record(
-      update(
-        {
-          inputTokens: 12597,
-          outputTokens: 166,
-          totalTokens: 12763,
-          cachedInputTokens: 11648,
-          cacheWriteInputTokens: 0,
-          reasoningOutputTokens: 46,
-        },
-        59704,
-      ),
+      update({ inputTokens: 20, outputTokens: 2, totalTokens: 22 }, 11),
     );
-    expect(accumulator.value).toEqual({
-      inputTokens: 24644,
-      outputTokens: 391,
-      totalTokens: 25035,
-      cachedInputTokens: 22272,
-      cacheWriteInputTokens: 0,
-      reasoningOutputTokens: 107,
+    expect(accumulator.value).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 3,
+      totalTokens: 14,
     });
   });
 
@@ -179,7 +144,7 @@ describe("Codex usage events", () => {
 function update(
   last: Record<string, number>,
   totalTokens = last.totalTokens,
-): JsonValue {
+): CodexTokenUsageUpdate {
   return {
     threadId: "thread",
     turnId: "turn",

@@ -25,7 +25,7 @@ mod http_tests;
 mod local_volume;
 pub mod protocol;
 pub mod resources;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 mod sandbox;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sandbox_process;
@@ -49,7 +49,7 @@ pub use error::*;
 pub use http::*;
 #[cfg(feature = "http-client")]
 pub use http_client::{AccessTokenProvider, HttpClient, HttpResponseError};
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 pub use sandbox::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use sandbox_process::with_process_management;
@@ -62,3 +62,5 @@ pub use storage::Storage;
 
 #[cfg(feature = "store")]
 pub mod egress_credentials;
+
+pub mod runtime_host;

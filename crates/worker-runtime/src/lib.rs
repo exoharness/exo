@@ -5,6 +5,7 @@ mod host;
 mod http;
 mod operations;
 mod policy;
+mod sandbox;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -19,7 +20,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use execution::{WorkerExecutor, WorkerModel, WorkerTools, WorkerTracer};
-use host::{Host, HostCall, HostReply, HostStorage, SandboxTransport};
+use host::{Host, HostCall, HostReply, HostStorage};
 
 #[derive(Serialize)]
 struct Completion {
@@ -40,7 +41,7 @@ struct Progress {
 #[wasm_bindgen]
 pub struct WorkerRuntime {
     runtime: Runtime,
-    definition_updates: Arc<tokio::sync::Mutex<()>>,
+    mutations: Arc<tokio::sync::Mutex<()>>,
     host: Arc<Host>,
     running: FuturesUnordered<BoxFuture<'static, ()>>,
     completed: Arc<Mutex<Vec<Completion>>>,
@@ -62,19 +63,23 @@ impl WorkerRuntime {
             *byte = u8::from_str_radix(&master_key[i * 2..i * 2 + 2], 16).map_err(js_error)?;
         }
         let host = Arc::new(Host::default());
-        let state = Arc::new(exoharness::BasicExoHarness::hosted(
-            Arc::new(HostStorage(host.clone())),
-            key,
-            Arc::new(SandboxTransport {
-                host: host.clone(),
-                endpoint: url::Url::parse("https://worker.internal/request").map_err(js_error)?,
-            }),
-        ));
+        let state = Arc::new(
+            exoharness::BasicExoHarness::hosted(
+                Arc::new(HostStorage(host.clone())),
+                key,
+                vec![exoharness::SandboxBackendRegistration::from_backend(
+                    exoharness::SandboxProvider::from_static("cloudflare"),
+                    Arc::new(sandbox::CloudflareBackend(host.clone())),
+                )],
+                host.clone(),
+            )
+            .map_err(js_error)?,
+        );
         let execution = Arc::new(WorkerExecutor {
             host: host.clone(),
             basic: BasicExecutor::with_pricing(
                 Arc::new(WorkerModel(host.clone())),
-                Arc::new(WorkerTools(host.clone())),
+                Arc::new(WorkerTools),
                 Arc::new(cost::PricingTable::empty()),
             ),
         });
@@ -85,7 +90,7 @@ impl WorkerRuntime {
         runtime.begin_recovery_scan();
         Ok(Self {
             runtime,
-            definition_updates: Arc::default(),
+            mutations: Arc::default(),
             host,
             running: FuturesUnordered::new(),
             completed: Arc::default(),
@@ -103,7 +108,7 @@ impl WorkerRuntime {
             .ok_or_else(|| JsValue::from_str("Worker operation id overflow"))?;
         let runtime = self.runtime.clone();
         let host = self.host.clone();
-        let updates = self.definition_updates.clone();
+        let updates = self.mutations.clone();
         let completed = self.completed.clone();
         let (cancel, registration) = AbortHandle::new_pair();
         self.cancellations.insert(id, cancel);

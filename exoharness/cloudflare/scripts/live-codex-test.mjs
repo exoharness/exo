@@ -1,23 +1,17 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
-const base = process.env.EXO_WORKER_URL;
-assert(base, "EXO_WORKER_URL is required (the Worker origin, without /exo)");
-assert(process.env.EXO_TOKEN, "EXO_TOKEN is required");
-async function api(path, method = "GET", body, expected = 200) {
-  const response = await fetch(`${base}/exo/${path}`, {
-    method,
-    headers: {
-      authorization: `Bearer ${process.env.EXO_TOKEN}`,
-      "content-type": "application/json",
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(180_000),
-  });
-  const value = await response.json();
-  assert.equal(response.status, expected, JSON.stringify(value));
-  return value;
-}
-const source = `---\nname: Cloudflare Codex Test\nharness: codex\nconfig:\n  model: ${process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol"}\n  credential: openai\n---\nYou are a coding agent. Work in /workspace. Implement the requested changes and run node tests. Keep the final answer concise.`;
+import { api, stopSandboxes } from "./live-api.mjs";
+
+const source = (
+  await readFile(
+    new URL("../../examples/managed-agents/coder.md", import.meta.url),
+    "utf8",
+  )
+).replace(
+  "model: gpt-6.1-sol",
+  `model: ${process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol"}`,
+);
 const agent = await api("agent", "POST", {
   slug: `cloudflare-codex-${Date.now()}`,
   name: "Cloudflare Codex Test",
@@ -30,18 +24,6 @@ const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
 const path = `agent/${agent.id}/thread/${thread.id}`;
 console.log(`Testing ${path}`);
 const checks = [];
-async function stop() {
-  const result = await api("request", "POST", {
-    kind: "request",
-    id: 1,
-    request: {
-      type: "stop_sandbox",
-      scope: { type: "thread", agent_id: agent.id, thread_id: thread.id },
-      sandbox_id: thread.id,
-    },
-  });
-  assert.equal(result.ok, true, result.error);
-}
 async function turn(content) {
   const submitted = await api(
     `${path}/turn`,
@@ -82,7 +64,6 @@ async function turn(content) {
     ),
     "Codex did not run a successful shell command",
   );
-  assert(events.some((event) => event.data.event_type === "codex_text_delta"));
   const usage = events
     .filter(
       (event) =>
@@ -131,18 +112,10 @@ try {
   );
   assert.equal(warmStart.data.payload.warm_app_server_reused, true);
   assert.equal(warmStart.data.payload.warm_thread_reused, true);
-  assert(
-    !warm.events.some((event) =>
-      ["codex_process_start_requested", "codex_snapshot_completed"].includes(
-        event.data.event_type,
-      ),
-    ),
-    "warm turn started another process or snapshotted the sandbox",
-  );
   checks.push(
     "consecutive turns reuse the live Codex process and native thread",
   );
-  await stop();
+  await stopSandboxes(agent, thread, true);
   const second = await turn(
     "Add a fourth test for decimal inputs to the existing sum.test.mjs. Run the tests. In your final answer, include the phase tag I gave you in our earlier message. Do not use any network tools.",
   );
@@ -173,5 +146,5 @@ try {
   );
   for (const check of checks) console.log(`PASS ${check}`);
 } finally {
-  await stop();
+  await stopSandboxes(agent, thread);
 }

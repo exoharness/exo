@@ -60,8 +60,8 @@ export class CloudflareProcess extends RpcTarget {
   get sandboxProcessId(): string {
     return String(this.process.pid);
   }
-  async writeStdin(data: string): Promise<void> {
-    await this.writer.write(new TextEncoder().encode(data));
+  async writeStdin(data: Uint8Array): Promise<void> {
+    await this.writer.write(data);
   }
   async closeStdin(): Promise<void> {
     if (!this.inputClosed) {
@@ -75,16 +75,20 @@ export class CloudflareProcess extends RpcTarget {
     await this.closing;
   }
   private async terminate(): Promise<void> {
-    await this.closeStdin();
-    if (this.exited) return;
-    this.process.kill(15);
-    const timer = setTimeout(() => {
-      if (!this.exited) this.process.kill(9);
-    }, 5000);
     try {
-      await this.process.exitCode;
+      await this.closeStdin();
     } finally {
-      clearTimeout(timer);
+      if (!this.exited) {
+        this.process.kill(15);
+        const timer = setTimeout(() => {
+          if (!this.exited) this.process.kill(9);
+        }, 5000);
+        try {
+          await this.process.exitCode;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
     }
   }
   async wait(): Promise<number> {
@@ -125,6 +129,16 @@ export class CloudflareSandbox {
   async startProcess(
     request: SandboxProcessStartRequest,
   ): Promise<SandboxProcess> {
+    const process = await this.openProcess(request);
+    return {
+      ...process,
+      stdout: process.stdout.pipeThrough(new TextDecoderStream()),
+      stderr: process.stderr.pipeThrough(new TextDecoderStream()),
+      writeStdin: (data) => process.writeStdin(new TextEncoder().encode(data)),
+    };
+  }
+
+  async openProcess(request: SandboxProcessStartRequest & { cwd?: string }) {
     const ready = new Promise<RpcStub<CloudflareProcess>>((resolve, reject) => {
       const running = this.stub.runProcess(
         this.identity,
@@ -142,22 +156,37 @@ export class CloudflareSandbox {
         process.stderr,
         process.sandboxProcessId,
       ]);
+      let closing: Promise<void> | undefined;
+      let waiting: Promise<number> | undefined;
+      let disposed = false;
+      const dispose = () => {
+        if (!disposed) {
+          disposed = true;
+          process[Symbol.dispose]();
+        }
+      };
       return {
-        sandboxId: this.identity.threadId,
+        sandboxId: this.identity.sandboxId,
         sandboxProcessId,
         reused: false,
-        stdout: stdout.pipeThrough(new TextDecoderStream()),
-        stderr: stderr.pipeThrough(new TextDecoderStream()),
-        writeStdin: (data) => process.writeStdin(data),
+        stdout,
+        stderr,
+        writeStdin: (data: Uint8Array) => process.writeStdin(data),
         closeStdin: () => process.closeStdin(),
-        close: async () => {
-          try {
-            await process.close();
-          } finally {
-            process[Symbol.dispose]();
-          }
+        close: () => {
+          closing ??= (async () => {
+            try {
+              if (!disposed) await process.close();
+            } finally {
+              dispose();
+            }
+          })();
+          return closing;
         },
-        wait: () => process.wait(),
+        wait: () => {
+          waiting ??= process.wait().finally(dispose);
+          return waiting;
+        },
       };
     } catch (error) {
       try {
@@ -177,6 +206,27 @@ export class ExoSandbox extends DurableObject<Env> {
   private activeTurn: string | null = null;
   private activeExecs = 0;
   private readonly processes = new Set<CloudflareProcess>();
+  private idleMs = idleTimeoutMs;
+
+  async acquire(
+    identity: SandboxIdentity,
+    cwd: string,
+    environment: Record<string, string>,
+    snapshot: { id: string } | null,
+    idleMs: number,
+  ): Promise<void> {
+    await this.stopping;
+    if (snapshot) {
+      await this.stop();
+      await this.ctx.storage.put("snapshot", snapshot);
+    }
+    this.idleMs = idleMs;
+    await this.ctx.storage.put("idleMs", idleMs);
+    await this.ctx.storage.put("cwd", cwd);
+    await this.ctx.storage.put("environment", environment);
+    await this.start(identity);
+    await this.scheduleIdle();
+  }
 
   async info(
     identity: SandboxIdentity,
@@ -185,7 +235,8 @@ export class ExoSandbox extends DurableObject<Env> {
     if (
       saved &&
       (saved.agentId !== identity.agentId ||
-        saved.threadId !== identity.threadId)
+        saved.threadId !== identity.threadId ||
+        saved.sandboxId !== identity.sandboxId)
     )
       throw new Error("sandbox identity mismatch");
     return { exists: !!saved, running: this.ctx.container?.running ?? false };
@@ -214,10 +265,10 @@ export class ExoSandbox extends DurableObject<Env> {
 
   private async scheduleIdle(): Promise<void> {
     if (!this.ctx.container?.running) return;
-    await this.ctx.storage.setAlarm(Date.now() + idleTimeoutMs);
+    await this.ctx.storage.setAlarm(Date.now() + this.idleMs);
     // The alarm checkpoints before the platform's inactivity shutdown. During
     // a turn, the runtime's ten-minute limit owns cancellation instead.
-    await this.ctx.container.setInactivityTimeout(idleTimeoutMs + 60_000);
+    await this.ctx.container.setInactivityTimeout(this.idleMs + 60_000);
   }
 
   async alarm(): Promise<void> {
@@ -232,11 +283,14 @@ export class ExoSandbox extends DurableObject<Env> {
   }
 
   private async start(identity: SandboxIdentity): Promise<Container> {
+    this.idleMs =
+      (await this.ctx.storage.get<number>("idleMs")) ?? idleTimeoutMs;
     const saved = await this.ctx.storage.get<SandboxIdentity>("identity");
     if (
       saved &&
       (saved.threadId !== identity.threadId ||
-        saved.agentId !== identity.agentId)
+        saved.agentId !== identity.agentId ||
+        saved.sandboxId !== identity.sandboxId)
     )
       throw new Error("sandbox identity mismatch");
     await this.ctx.storage.put("identity", identity);
@@ -258,7 +312,8 @@ export class ExoSandbox extends DurableObject<Env> {
           ? { ...options, containerSnapshot: { id: snapshot.id } }
           : { ...options, image: "cloudflare/debian-trixie" },
       );
-      const setup = await container.exec(["mkdir", "-p", "/workspace"]);
+      const cwd = await this.ctx.storage.get<string>("cwd");
+      const setup = await container.exec(["mkdir", "-p", cwd ?? "/workspace"]);
       const setupOutput = await setup.output();
       if (setupOutput.exitCode !== 0)
         throw new Error(
@@ -266,9 +321,18 @@ export class ExoSandbox extends DurableObject<Env> {
         );
     }
     await container.setInactivityTimeout(
-      this.activeTurn === null ? idleTimeoutMs + 60_000 : 660_000,
+      this.activeTurn === null ? this.idleMs + 60_000 : 660_000,
     );
     return container;
+  }
+
+  private async readyContainer(identity: SandboxIdentity): Promise<Container> {
+    await this.stopping;
+    await this.ctx.storage.deleteAlarm();
+    this.starting ??= this.start(identity).finally(() => {
+      this.starting = undefined;
+    });
+    return this.starting;
   }
 
   async exec(
@@ -277,8 +341,6 @@ export class ExoSandbox extends DurableObject<Env> {
   ): Promise<ExecResult> {
     this.activeExecs++;
     try {
-      await this.stopping;
-      await this.ctx.storage.deleteAlarm();
       return await this.execCommand(identity, request);
     } finally {
       this.activeExecs--;
@@ -302,27 +364,10 @@ export class ExoSandbox extends DurableObject<Env> {
     const timeoutMs = request.timeoutMs ?? 60_000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000)
       throw new Error("timeout must be between 1 and 120000 ms");
-    this.starting ??= this.start(identity).finally(() => {
-      this.starting = undefined;
-    });
-    const container = await this.starting;
-    const environment = await this.env.PROVIDERS.getByName(
-      this.env.ACCOUNT_ID,
-    ).sandboxPolicy(identity);
+    const container = await this.readyContainer(identity);
+    const options = await this.execOptions(request);
     const process = await container.exec(request.command, {
-      cwd: "/workspace",
-      env: {
-        HOME: "/home/exo",
-        CODEX_HOME: "/home/exo/.codex",
-        ...request.env,
-        ...environment,
-        NODE_EXTRA_CA_CERTS: ca,
-        REQUESTS_CA_BUNDLE: ca,
-        SSL_CERT_FILE: ca,
-        CURL_CA_BUNDLE: ca,
-        GIT_SSL_CAINFO: ca,
-      },
-      signal: AbortSignal.timeout(timeoutMs),
+      ...options,
     });
     // Abort destroys the whole instance, including descendants, before returning
     // an ambiguous result. We never retry the command automatically.
@@ -350,10 +395,7 @@ export class ExoSandbox extends DurableObject<Env> {
       throw new Error(
         "Codex package pin differs from the native harness version",
       );
-    this.starting ??= this.start(identity).finally(() => {
-      this.starting = undefined;
-    });
-    const container = await this.starting;
+    const container = await this.readyContainer(identity);
     this.installing ??= this.installCodex(container).finally(() => {
       this.installing = undefined;
     });
@@ -397,27 +439,11 @@ export class ExoSandbox extends DurableObject<Env> {
 
   private async startProcess(
     identity: SandboxIdentity,
-    request: SandboxProcessStartRequest,
+    request: SandboxProcessStartRequest & { cwd?: string },
   ): Promise<CloudflareProcess> {
-    this.starting ??= this.start(identity).finally(() => {
-      this.starting = undefined;
-    });
-    const container = await this.starting;
-    const environment = await this.env.PROVIDERS.getByName(
-      this.env.ACCOUNT_ID,
-    ).sandboxPolicy(identity);
+    const container = await this.readyContainer(identity);
     const process = await container.exec(request.command, {
-      cwd: "/workspace",
-      env: {
-        HOME: "/home/exo",
-        CODEX_HOME: "/home/exo/.codex",
-        ...request.env,
-        ...environment,
-        NODE_EXTRA_CA_CERTS: ca,
-        SSL_CERT_FILE: ca,
-        CURL_CA_BUNDLE: ca,
-        GIT_SSL_CAINFO: ca,
-      },
+      ...(await this.execOptions(request)),
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -425,9 +451,29 @@ export class ExoSandbox extends DurableObject<Env> {
     return new CloudflareProcess(process);
   }
 
+  private async execOptions(request: Pick<ExecRequest, "env" | "cwd">) {
+    return {
+      cwd:
+        request.cwd ??
+        (await this.ctx.storage.get<string>("cwd")) ??
+        "/workspace",
+      env: {
+        HOME: "/home/exo",
+        CODEX_HOME: "/home/exo/.codex",
+        ...request.env,
+        ...(await this.ctx.storage.get<Record<string, string>>("environment")),
+        NODE_EXTRA_CA_CERTS: ca,
+        REQUESTS_CA_BUNDLE: ca,
+        SSL_CERT_FILE: ca,
+        CURL_CA_BUNDLE: ca,
+        GIT_SSL_CAINFO: ca,
+      },
+    };
+  }
+
   async runProcess(
     identity: SandboxIdentity,
-    request: SandboxProcessStartRequest,
+    request: SandboxProcessStartRequest & { cwd?: string },
     ready: (process: RpcStub<CloudflareProcess>) => Promise<void>,
   ): Promise<void> {
     // Native exec handles belong to the invocation that created them. Keep it
@@ -435,8 +481,13 @@ export class ExoSandbox extends DurableObject<Env> {
     const process = await this.startProcess(identity, request);
     this.processes.add(process);
     try {
-      await ready(new RpcStub(process));
-      await process.wait();
+      const capability = new RpcStub(process);
+      try {
+        await ready(capability);
+        await process.wait();
+      } finally {
+        capability[Symbol.dispose]();
+      }
     } finally {
       this.processes.delete(process);
     }

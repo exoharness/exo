@@ -1,3 +1,4 @@
+use crate::{TypeScriptStreamEvent, to_execution_stream_event};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -13,14 +14,13 @@ use exoharness::{
     EventQuery, EventQueryDirection, ExoHarness, GetSandboxProcessEventsResult, Result, SandboxId,
     SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessId, SandboxProcessLifecycle,
     SandboxProcessMode, SandboxProcessStatus, SandboxProcessStdin, StartSandboxProcessRequest,
-    ToolArguments, ToolRequest, ToolResult, TurnHandle, WriteSandboxProcessInputRequest,
+    ToolRequest, ToolResult, TurnHandle, WriteSandboxProcessInputRequest,
     protocol::{
         ConversationHandleInfo, Request as ExoRequest, Response as ExoResponse, TurnHandleInfo,
     },
     server::ExoHarnessServer,
 };
 use futures::{StreamExt, stream::FuturesUnordered};
-use lingua::UniversalStreamChunk;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter, Lines};
 use tokio::process::{Child, ChildStdout, Command};
@@ -31,7 +31,7 @@ use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
 use crate::harness_tool::ensure_shell_sandbox;
 use crate::shared::try_send_stream_event;
-use crate::{AgentConfig, ConversationConfig, ExecutionStreamEvent, SendRequest, ToolRuntime};
+use crate::{AgentConfig, ConversationConfig, SendRequest, ToolRuntime};
 
 pub struct TypeScriptExecutor<T> {
     root: Arc<dyn ExoHarness>,
@@ -1156,53 +1156,6 @@ enum RuntimeEvent {
     Error { process_id: u64, message: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum TypeScriptStreamEvent {
-    FirstChunk {
-        ttft_ms: u64,
-    },
-    TextDelta {
-        text: String,
-    },
-    ToolCall {
-        tool_call_id: String,
-        tool_name: String,
-        arguments: ToolArguments,
-    },
-    ToolResult {
-        tool_call_id: String,
-        result: ToolResult,
-    },
-}
-
-fn to_execution_stream_event(event: TypeScriptStreamEvent) -> ExecutionStreamEvent {
-    match event {
-        TypeScriptStreamEvent::FirstChunk { ttft_ms } => ExecutionStreamEvent::FirstChunk {
-            ttft: Duration::from_millis(ttft_ms),
-        },
-        TypeScriptStreamEvent::TextDelta { text } => {
-            ExecutionStreamEvent::Chunk(UniversalStreamChunk::text_delta(0, &text))
-        }
-        TypeScriptStreamEvent::ToolCall {
-            tool_call_id,
-            tool_name,
-            arguments,
-        } => ExecutionStreamEvent::ToolCall {
-            tool_call_id,
-            tool_name,
-            arguments,
-        },
-        TypeScriptStreamEvent::ToolResult {
-            tool_call_id,
-            result,
-        } => ExecutionStreamEvent::ToolResult {
-            tool_call_id,
-            result,
-        },
-    }
-}
-
 fn spawn_sandbox_process_event_task(
     sender: mpsc::UnboundedSender<HostToGuestMessage>,
     conversation: Arc<dyn ConversationHandle>,
@@ -1365,6 +1318,7 @@ fn format_error_chain(error: &anyhow::Error, context: std::fmt::Arguments<'_>) -
 
 #[cfg(test)]
 mod tests {
+    use crate::ExecutionStreamEvent;
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
 

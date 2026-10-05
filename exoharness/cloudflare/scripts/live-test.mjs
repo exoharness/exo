@@ -1,23 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const base = process.env.EXO_WORKER_URL;
-assert(base, "EXO_WORKER_URL is required (the Worker origin, without /exo)");
-assert(process.env.EXO_TOKEN, "EXO_TOKEN is required");
-async function api(path, method = "GET", body, expected = 200) {
-  const response = await fetch(`${base}/exo/${path}`, {
-    method,
-    headers: {
-      authorization: `Bearer ${process.env.EXO_TOKEN}`,
-      "content-type": "application/json",
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(180_000),
-  });
-  const value = await response.json();
-  assert.equal(response.status, expected, JSON.stringify(value));
-  return value;
-}
+import { api, stopSandboxes } from "./live-api.mjs";
+
 const source = (
   await readFile(
     new URL("../../examples/managed-agents/assistant.md", import.meta.url),
@@ -82,14 +67,5 @@ try {
     "PASS basic model, native shell execution, canonical events and usage",
   );
 } finally {
-  const result = await api("request", "POST", {
-    kind: "request",
-    id: 1,
-    request: {
-      type: "stop_sandbox",
-      scope: { type: "thread", agent_id: agent.id, thread_id: thread.id },
-      sandbox_id: thread.id,
-    },
-  });
-  assert.equal(result.ok, true, result.error);
+  await stopSandboxes(agent, thread);
 }

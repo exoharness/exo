@@ -67,7 +67,7 @@ pub async fn create_thread(
     check_harness(agent.as_ref(), &config, body.harness.as_deref()).await?;
     let thread = runtime
         .open_managed_thread(
-            &agent,
+            agent,
             None,
             exoharness::NewThreadRequest {
                 environment: body.environment,
@@ -288,12 +288,12 @@ pub async fn scoped_vaults(
 pub async fn list_environments(
     service: &Service<'_>,
 ) -> Result<Vec<exoharness::EnvironmentDefinition>> {
-    Ok(service
+    service
         .runtime
         .exoharness_handle()
         .list_environments()
         .await
-        .map_err(bad_request)?)
+        .map_err(bad_request)
 }
 
 pub async fn put_environment(
@@ -312,19 +312,19 @@ pub async fn put_environment(
 
 pub async fn delete_environment(service: &Service<'_>, name: &str) -> Result<bool> {
     service.require_full_provider()?;
-    Ok(service
+    service
         .runtime
         .exoharness_handle()
-        .delete_environment(&name)
+        .delete_environment(name)
         .await
-        .map_err(bad_request)?)
+        .map_err(bad_request)
 }
 
 pub async fn list_vaults(
     service: &Service<'_>,
     path: &VaultPath,
 ) -> Result<Vec<exoharness::vault::VaultRecord>> {
-    Ok(scoped_vaults(&service, &path)
+    Ok(scoped_vaults(service, path)
         .await?
         .iter()
         .map(|vault| vault.record().clone())
@@ -378,8 +378,8 @@ pub async fn put_secret(
     body: exoharness::PutSecretRequest,
 ) -> Result<exoharness::SecretId> {
     exoharness::vault::require_portable_secret(&body.secret).map_err(bad_request)?;
-    let vault = writable_vault(&service, &path).await?;
-    Ok(vault.put_secret(body).await.map_err(bad_request)?)
+    let vault = writable_vault(service, path).await?;
+    vault.put_secret(body).await.map_err(bad_request)
 }
 
 pub async fn update_secret(
@@ -390,8 +390,8 @@ pub async fn update_secret(
     if let Some(secret) = &body.secret {
         exoharness::vault::require_portable_secret(secret).map_err(bad_request)?;
     }
-    let vault = writable_vault(&service, &path).await?;
-    Ok(vault
+    let vault = writable_vault(service, path).await?;
+    vault
         .update_secret(
             &path
                 .secret_id
@@ -399,11 +399,11 @@ pub async fn update_secret(
             body,
         )
         .await
-        .map_err(bad_request)?)
+        .map_err(bad_request)
 }
 
 pub async fn delete_secret(service: &Service<'_>, path: &VaultPath) -> Result<bool> {
-    let vault = writable_vault(&service, &path).await?;
+    let vault = writable_vault(service, path).await?;
     vault
         .delete_secret(
             &path
@@ -419,12 +419,12 @@ pub async fn list_secrets(
     service: &Service<'_>,
     path: &VaultPath,
 ) -> Result<Vec<exoharness::SecretMetadata>> {
-    let vault = scoped_vaults(&service, &path)
+    let vault = scoped_vaults(service, path)
         .await?
         .into_iter()
         .find(|vault| Some(vault.record().id) == path.vault_id)
         .ok_or_else(|| not_found("vault not available in this context"))?;
-    Ok(vault.list_secrets().await.map_err(bad_request)?)
+    vault.list_secrets().await.map_err(bad_request)
 }
 
 pub async fn create_agent(
@@ -462,24 +462,24 @@ pub async fn get_agent(
 
 pub async fn delete_agent(service: &Service<'_>, path: &AgentPath) -> Result<bool> {
     service.require_full_provider()?;
-    Ok(service
+    service
         .runtime
         .exoharness_handle()
         .delete_agent(&path.agent_id)
         .await
-        .map_err(bad_request)?)
+        .map_err(bad_request)
 }
 
 pub async fn list_artifacts(
     service: &Service<'_>,
     path: &AgentPath,
 ) -> Result<Vec<exoharness::ArtifactVersion>> {
-    Ok(service
+    service
         .agent(path.agent_id)
         .await?
         .list_artifacts()
         .await
-        .map_err(bad_request)?)
+        .map_err(bad_request)
 }
 
 pub async fn read_artifact(
@@ -487,12 +487,12 @@ pub async fn read_artifact(
     path: &AgentPath,
     query: exoharness::ReadArtifactRequest,
 ) -> Result<Option<exoharness::Artifact>> {
-    Ok(service
+    service
         .agent(path.agent_id)
         .await?
         .read_artifact(query)
         .await
-        .map_err(bad_request)?)
+        .map_err(bad_request)
 }
 
 pub async fn list_thread_artifacts(
@@ -501,7 +501,7 @@ pub async fn list_thread_artifacts(
 ) -> Result<Vec<exoharness::ArtifactVersion>> {
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    Ok(thread.list_artifacts().await.map_err(bad_request)?)
+    thread.list_artifacts().await.map_err(bad_request)
 }
 
 pub async fn read_thread_artifact(
@@ -511,7 +511,7 @@ pub async fn read_thread_artifact(
 ) -> Result<Option<exoharness::Artifact>> {
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    Ok(thread.read_artifact(query).await.map_err(bad_request)?)
+    thread.read_artifact(query).await.map_err(bad_request)
 }
 
 pub async fn write_artifact(
@@ -531,11 +531,11 @@ pub async fn write_artifact(
     )
     .map_err(bad_request)?;
     let _guard = service.definition_updates.lock().await;
-    Ok(service
+    service
         .runtime
         .update_managed_agent(&agent, &definition)
         .await
-        .map_err(bad_request)?)
+        .map_err(bad_request)
 }
 
 pub async fn get_thread(service: &Service<'_>, path: &ThreadPath) -> Result<ThreadResult> {
@@ -685,7 +685,6 @@ pub async fn events(
 ) -> Result<exoharness::GetEventsResult> {
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let query = query;
     let result = thread
         .get_events(Some(EventQuery {
             cursor: query.after,
@@ -704,4 +703,72 @@ pub async fn events(
         .await
         .map_err(bad_request)?;
     Ok(result)
+}
+
+/// Admit a turn; the transport owns draining or forwarding its progress stream.
+pub async fn submit_turn(
+    runtime: &Runtime,
+    agent: Arc<dyn AgentHandle>,
+    thread: Arc<dyn ThreadHandle>,
+    prepared: PreparedTurn,
+    streaming: bool,
+) -> Result<(SubmitTurnResult, crate::ExecutionStreamHandle)> {
+    let (turn, stream) = runtime
+        .start_turn(
+            agent.clone(),
+            thread.clone(),
+            prepared.request,
+            streaming,
+            Some(prepared.config),
+        )
+        .await?;
+    Ok((
+        SubmitTurnResult {
+            agent: agent.record().clone(),
+            thread: thread.record().clone(),
+            turn,
+            harness: prepared.harness,
+        },
+        stream,
+    ))
+}
+
+pub async fn cancel_turn(
+    runtime: &Runtime,
+    thread_id: ThreadId,
+    turn_id: TurnId,
+) -> Result<CancelTurnResult> {
+    Ok(CancelTurnResult {
+        canceled_active_turn: runtime
+            .cancel_turn(crate::harness::HarnessTurnKey::new(thread_id, turn_id))
+            .await?,
+        finished_event_id: None,
+    })
+}
+
+/// Register the watcher before loading history so an append cannot fall between them.
+pub async fn wait_events(
+    service: &Service<'_>,
+    path: &ThreadPath,
+    query: EventsQuery,
+) -> Result<exoharness::GetEventsResult> {
+    use futures::StreamExt;
+    let agent = service.agent(path.agent_id).await?;
+    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
+    let after = query.after;
+    let mut watcher = thread
+        .watch_events(std::ops::Bound::Excluded(
+            after.unwrap_or_else(|| exoharness::Uuid7(Default::default())),
+        ))
+        .await?;
+    let mut page = events(service, path, query).await?;
+    if page.events.is_empty() {
+        let event = watcher
+            .next()
+            .await
+            .ok_or_else(|| bad_request("event stream closed"))??;
+        page.cursor = Some(event.id);
+        page.events.push(event);
+    }
+    Ok(page)
 }

@@ -96,22 +96,15 @@ impl ModelClient for WorkerModel {
     }
 }
 
-pub(crate) struct WorkerTools(pub Arc<Host>);
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ExecOutput {
-    stdout: String,
-    stderr: String,
-    exit_code: i32,
-}
+pub(crate) struct WorkerTools;
 #[async_trait]
 impl ToolRuntime for WorkerTools {
     async fn execute(
         &self,
-        agent: &dyn AgentHandle,
+        _agent: &dyn AgentHandle,
         thread: &dyn ConversationHandle,
         _turn: Option<&dyn TurnHandle>,
-        _agent_config: &AgentConfig,
+        agent_config: &AgentConfig,
         config: &ConversationConfig,
         request: &ToolRequest,
     ) -> Result<ToolResult> {
@@ -122,19 +115,15 @@ impl ToolRuntime for WorkerTools {
             .shell_program
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-        let response: ExecOutput = self
-            .0
-            .call(HostRequest::Exec {
-                agent_id: agent.record().id,
-                thread_id: thread.record().id,
+        let sandbox_id = ensure_sandbox(thread, agent_config, config).await?;
+        let process = thread
+            .run_in_sandbox(exoharness::RunInSandboxRequest {
+                id: sandbox_id,
                 command: vec![program.clone(), "-lc".into(), args.command],
+                env: Default::default(),
             })
             .await?;
-        Ok(serde_json::to_value(executor::ShellToolResult {
-            stdout: response.stdout,
-            stderr: response.stderr,
-            exit_code: response.exit_code,
-        })?)
+        executor::shell_tool::read_shell_process(process).await
     }
 }
 
@@ -167,6 +156,7 @@ impl HarnessExecutor for WorkerExecutor {
         thread_config: &ConversationConfig,
     ) -> Result<()> {
         validate_conversation(thread_config)?;
+        ensure_sandbox(thread, config, thread_config).await?;
         if config.harness == AgentHarnessKind::Basic {
             self.basic
                 .prepare_conversation(agent, thread, config, thread_config)
@@ -179,12 +169,11 @@ impl HarnessExecutor for WorkerExecutor {
         thread: &dyn ConversationHandle,
         _config: &AgentConfig,
     ) -> Result<()> {
-        let _response: UnitResponse = self
-            .host
-            .call(HostRequest::StopSandbox {
-                thread_id: thread.record().id,
-            })
-            .await?;
+        for sandbox in thread.list_sandboxes().await? {
+            if sandbox.running {
+                thread.stop_sandbox(sandbox.id).await?;
+            }
+        }
         Ok(())
     }
     async fn execute_turn(
@@ -285,9 +274,11 @@ impl WorkerExecutor {
             config.harness == AgentHarnessKind::TypeScript,
             "harness is not supported by this Worker"
         );
+        let sandbox_id = ensure_sandbox(thread.as_ref(), config, thread_config).await?;
         let _response: UnitResponse = self
             .host
             .call(HostRequest::Harness {
+                sandbox_id,
                 agent_id: agent.record().id,
                 thread_id: thread.record().id,
                 turn: turn.record().clone(),
@@ -364,4 +355,27 @@ fn validate_conversation(config: &ConversationConfig) -> Result<()> {
         );
     }
     Ok(())
+}
+
+async fn ensure_sandbox(
+    thread: &dyn ConversationHandle,
+    agent: &AgentConfig,
+    config: &ConversationConfig,
+) -> Result<String> {
+    let policy = executor::sandbox_policy::sandbox_policy(thread, agent, config).await?;
+    thread
+        .create_sandbox(exoharness::CreateSandboxRequest {
+            name: Some("exo-runtime".into()),
+            provider: SandboxProvider::from_static("cloudflare"),
+            image: config.sandbox_image.clone().unwrap_or_default(),
+            resources: None,
+            default_workdir: Some("/workspace".into()),
+            file_system_mounts: None,
+            durable_file_systems: None,
+            policy,
+            enable_networking: Some(agent.sandbox.enable_networking),
+            idle_seconds: Some(300),
+            tcp_ports: Vec::new(),
+        })
+        .await
 }

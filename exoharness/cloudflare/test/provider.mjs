@@ -5,7 +5,25 @@ import { after, before, test } from "node:test";
 import { Miniflare } from "miniflare";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { fakeCodex } from "./fixtures/fake-codex.mjs";
+import ts from "typescript";
+const fakeCodex = ts
+  .transpileModule(
+    await readFile(
+      new URL(
+        "../../typescript/codex/fixtures/fake-app-server.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    {
+      compilerOptions: {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+      },
+    },
+  )
+  .outputText.replace("export class", "class")
+  .replace("export {};", "");
 
 const token = "test-operator-token";
 let mf;
@@ -15,11 +33,41 @@ let modelRequests = 0;
 
 const fakeSandbox = `import { DurableObject, RpcTarget, RpcStub } from "cloudflare:workers";
 ${fakeCodex}
+class FakeProcess extends RpcTarget {
+  constructor(process) {
+    super(); this.process = process;
+    this.out = process.stdout.pipeThrough(new TextEncoderStream());
+    this.err = process.stderr.pipeThrough(new TextEncoderStream());
+  }
+  get stdout() { return this.out; }
+  get stderr() { return this.err; }
+  get sandboxProcessId() { return "fixture-process"; }
+  async writeStdin(bytes) { await this.process.writeStdin(new TextDecoder().decode(bytes)); }
+  async closeStdin() { await this.process.closeStdin(); }
+  async close() { await this.process.close(); }
+  async wait() { return this.process.wait(); }
+}
+class EchoProcess extends RpcTarget {
+  constructor() {
+    super();
+    this.output = new ReadableStream({type: "bytes", start: c => {this.controller = c;}});
+    this.exited = new Promise(resolve => {this.exit = resolve;});
+    this.closed = false;
+  }
+  get stdout() {return this.output;}
+  get stderr() {return new ReadableStream({type: "bytes", start: c => c.close()});}
+  get sandboxProcessId() {return "echo-process";}
+  async writeStdin(bytes) {this.controller.enqueue(bytes);}
+  async closeStdin() {if (!this.closed) {this.closed = true; this.controller.close(); this.exit(0);}}
+  async close() {await this.closeStdin();}
+  async wait() {return this.exited;}
+}
 export class FakeSandbox extends DurableObject {
   constructor(ctx, env) { super(ctx, env); this.processes = new Set(); }
   async beginTurn(identity, turnId) { await this.ctx.storage.put("identity", identity); await this.ctx.storage.deleteAlarm(); }
-  async endTurn(turnId) { await this.ctx.storage.setAlarm(Date.now() + 300000); }
-  async info() { return {exists: !!await this.ctx.storage.get("identity"), running: this.processes.size > 0}; }
+  async endTurn(turnId) {}
+  async info() { return {exists: !!await this.ctx.storage.get("identity"), running: await this.ctx.storage.get("running") ?? false}; }
+  async acquire(identity, cwd, environment) { await this.ctx.storage.put("identity", identity); await this.ctx.storage.put("running", true); }
   async terminate() { await this.stop(); await this.ctx.storage.deleteAll(); }
   async exec(identity, request) {
     const count = (await this.ctx.storage.get("count") ?? 0) + 1;
@@ -27,24 +75,46 @@ export class FakeSandbox extends DurableObject {
     return {stdout: "Linux test\\n", stderr: "", exitCode: 0};
   }
   async count() { return await this.ctx.storage.get("count") ?? 0; }
-  async startProcess() { return new FakeCodexProcess(this.ctx.storage); }
+  async startProcess(request) {
+    if (request.command[0] === "cat") return new EchoProcess();
+    if (!request.command.join(" ").includes("codex")) {
+      await this.ctx.storage.put("count", (await this.count()) + 1);
+      return new FakeProcess({stdout: new ReadableStream({start(c) { c.enqueue("Linux test\\n"); c.close(); }}), stderr: new ReadableStream({start(c) {c.close();}}), writeStdin: async () => {}, closeStdin: async () => {}, close: async () => {}, wait: async () => 0});
+    }
+    const app = new FakeCodexAppServer({resumeAvailable: true,
+      completedItems: id => [
+        {id: "cmd-" + id, type: "commandExecution", command: "node --test", cwd: "/workspace", status: "completed", exitCode: 0, aggregatedOutput: "passed", durationMs: 5},
+        {id: "msg-" + id, type: "agentMessage", text: "Done."},
+      ],
+      onTurn: async (threadId, turnId, emit) => {
+        emit({method: "item/agentMessage/delta", params: {threadId, turnId, itemId: "msg-" + turnId, delta: "Done."}});
+        let total = await this.ctx.storage.get("usage-total") ?? 0;
+        for (const last of [{inputTokens: 10, outputTokens: 3, totalTokens: 13, cachedInputTokens: 4}, {inputTokens: 5, outputTokens: 2, totalTokens: 7, cachedInputTokens: 1}]) {
+          total += last.totalTokens;
+          const params = {threadId, turnId, tokenUsage: {last, total: {totalTokens: total}}};
+          emit({method: "thread/tokenUsage/updated", params});
+          emit({method: "thread/tokenUsage/updated", params});
+        }
+        await this.ctx.storage.put("usage-total", total);
+      },
+    });
+    const write = app.process.writeStdin;
+    app.process.writeStdin = async line => {const request = JSON.parse(line); if (["thread/start", "thread/resume"].includes(request.method)) await this.ctx.storage.put("last-method", request.method); await write(line);};
+    return new FakeProcess(app.process);
+  }
   async runProcess(identity, request, ready) {
-    const process = await this.startProcess(); this.processes.add(process);
-    try { await ready(new RpcStub(process)); await process.wait(); }
-    finally { this.processes.delete(process); }
+    const process = await this.startProcess(request); this.processes.add(process);
+    const capability = new RpcStub(process);
+    try { await ready(capability); await process.wait(); }
+    finally { capability[Symbol.dispose](); this.processes.delete(process); }
   }
   async prepareCodex() {}
   async waitForProcesses() { await Promise.all([...this.processes].map(p => p.wait())); }
-  async snapshot() {
-    await this.ctx.storage.put("snapshots", (await this.snapshotCount()) + 1);
-    return {id:"fixture-snapshot", size:1};
-  }
-  async snapshotCount() { return await this.ctx.storage.get("snapshots") ?? 0; }
+  async snapshot() { return {id: "fixture-snapshot", size: 1}; }
   async processCount() { return this.processes.size; }
   async lastMethod() { return await this.ctx.storage.get("last-method"); }
-  async stop() { await Promise.all([...this.processes].map(p => p.close())); await this.snapshot(); }
-  async alarm() { await this.stop(); }
-  async expireIdleForTest() { await this.alarm(); }
+  async stop() { await Promise.all([...this.processes].map(p => p.close())); await this.ctx.storage.put("running", false); }
+
 }
 export default { fetch() { return new Response("fixture"); } };`;
 
@@ -55,7 +125,7 @@ async function options({ accessAud, access, staticToken = token } = {}) {
       contents: `import { ExoProvider as Provider } from "./implementation.js";
 export class ExoProvider extends Provider {
   async recoverForTest() { await this.alarm(); }
-  async environmentForTest(identity) { return JSON.stringify(await this.sandboxPolicy(identity)); }
+  async environmentForTest(request) { return JSON.stringify(await this.sandboxPolicy(request)); }
   async storedBytesForTest(key) { return new TextDecoder().decode((await this.ctx.storage.get(key)).bytes); }
 }
 export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
@@ -278,24 +348,33 @@ after(async () => {
   if (persistence) await rm(persistence, { recursive: true, force: true });
 });
 
-test("bearer authentication protects every Exo route", async () => {
-  assert.equal(
-    (await mf.dispatchFetch("https://exo.test/exo/identity")).status,
-    401,
-  );
-  for (const authorization of [
-    "Bearer wrong-token",
-    "Basic test-operator-token",
-    "Bearer ",
-  ])
-    assert.equal(
-      (
-        await mf.dispatchFetch("https://exo.test/exo/identity", {
-          headers: { authorization },
-        })
-      ).status,
-      401,
-    );
+test("bearer authentication protects reads, mutations, SSE and RPC", async () => {
+  for (const [path, method] of [
+    ["identity", "GET"],
+    ["agent", "POST"],
+    ["vault", "POST"],
+    ["agent/a/thread/t/event/watch", "GET"],
+    ["agent/a/thread/t/turn", "POST"],
+    ["agent/a/thread/t/turn/u/cancel", "POST"],
+    ["request", "POST"],
+  ]) {
+    for (const authorization of [
+      undefined,
+      "Bearer wrong-token",
+      "Basic test-operator-token",
+      "Bearer ",
+    ]) {
+      assert.equal(
+        (
+          await mf.dispatchFetch(`https://exo.test/exo/${path}`, {
+            method,
+            headers: authorization ? { authorization } : {},
+          })
+        ).status,
+        401,
+      );
+    }
+  }
   assert.deepEqual(await api("identity"), { account_id: "test-account" });
 });
 
@@ -406,7 +485,7 @@ test("Access forwards HTTP bodies and SSE over the trusted Durable Object bindin
 });
 
 test("managed basic turn calls the model, executes one tool and persists canonical events", async () => {
-  const { thread, path } = await create();
+  const { agent, thread, path } = await create();
   const submitted = await api(
     `${path}/turn`,
     "POST",
@@ -436,15 +515,14 @@ test("managed basic turn calls the model, executes one tool and persists canonic
   assert.deepEqual(await api(`${path}/turn/${submitted.turn.id}`), {
     active: false,
   });
-  const { SANDBOXES } = await mf.getBindings("exo");
-  assert.equal(await SANDBOXES.getByName(thread.id).count(), 1);
+  assert.equal(await (await sandboxFor(agent, thread)).count(), 1);
   assert.equal(modelRequests, 2);
   for (let i = 1; i < events.length; i++)
     assert(events[i - 1].id < events[i].id);
 });
 
 test("approval pauses durably, rejects the wrong session and executes only after approval", async () => {
-  const { thread, path } = await create(true);
+  const { agent, thread, path } = await create(true);
   const submitted = await api(
     `${path}/turn`,
     "POST",
@@ -459,8 +537,7 @@ test("approval pauses durably, rejects the wrong session and executes only after
   const approval = events.find(
     (event) => event.data.event_type === "agent_runtime.approval_requested",
   ).data.payload;
-  const { SANDBOXES } = await mf.getBindings("exo");
-  assert.equal(await SANDBOXES.getByName(thread.id).count(), 0);
+  assert.equal(await (await sandboxFor(agent, thread)).count(), 0);
   await api(
     `${path}/turn/${submitted.turn.id}/approval-response`,
     "POST",
@@ -475,7 +552,7 @@ test("approval pauses durably, rejects the wrong session and executes only after
   await waitEvents(path, (events) =>
     events.some((event) => event.data.type === "turn_ended"),
   );
-  assert.equal(await SANDBOXES.getByName(thread.id).count(), 1);
+  assert.equal(await (await sandboxFor(agent, thread)).count(), 1);
 });
 
 test("artifact versions, event cursors and encrypted vaults survive a runtime restart", async () => {
@@ -524,7 +601,7 @@ test("artifact versions, event cursors and encrypted vaults survive a runtime re
 });
 
 test("shared runtime serializes concurrent submissions and cancellation prevents pending tools", async () => {
-  const { thread, path } = await create(true);
+  const { agent, thread, path } = await create(true);
   const first = await api(
     `${path}/turn`,
     "POST",
@@ -569,8 +646,7 @@ test("shared runtime serializes concurrent submissions and cancellation prevents
   assert.deepEqual(await api(`${path}/turn/${submitted.turn.id}`), {
     active: false,
   });
-  const { SANDBOXES } = await mf.getBindings("exo");
-  assert.equal(await SANDBOXES.getByName(thread.id).count(), 0);
+  assert.equal(await (await sandboxFor(agent, thread)).count(), 0);
   const events = (await api(`${path}/event`)).events;
   assert.equal(
     events.filter((event) => event.data.type === "turn_started").length,
@@ -578,12 +654,10 @@ test("shared runtime serializes concurrent submissions and cancellation prevents
   );
 });
 
-test("SSE replays a cursor and streams new events without duplicates", async () => {
-  const { path } = await create();
-  const first = (await api(`${path}/event`)).events[0];
+async function watch(path, after) {
   const abort = new AbortController();
   const response = await mf.dispatchFetch(
-    `https://exo.test/exo/${path}/event/watch?after=${first.id}`,
+    `https://exo.test/exo/${path}/event/watch${after ? `?after=${after}` : ""}`,
     { headers: { authorization: `Bearer ${token}` }, signal: abort.signal },
   );
   assert.equal(response.headers.get("content-type"), "text/event-stream");
@@ -613,6 +687,13 @@ test("SSE replays a cursor and streams new events without duplicates", async () 
       }
     }
   })();
+  return { received, collect, cancel: () => abort.abort() };
+}
+
+test("SSE replays a cursor and streams new events without duplicates", async () => {
+  const { path } = await create();
+  const first = (await api(`${path}/event`)).events[0];
+  const { received, collect, cancel } = await watch(path, first.id);
   try {
     await api(
       `${path}/turn`,
@@ -628,12 +709,13 @@ test("SSE replays a cursor and streams new events without duplicates", async () 
       received.length,
     );
   } finally {
-    abort.abort();
+    cancel();
   }
 });
 
-test("Codex reuses its RPC process across turns and resumes after an idle checkpoint", async () => {
-  const { thread, path } = await create(false, "codex");
+test("Codex reuses its RPC process across turns and resumes after backend shutdown", async () => {
+  const { agent, thread, path } = await create(false, "codex");
+  const streaming = await watch(path);
   const first = await api(
     `${path}/turn`,
     "POST",
@@ -654,9 +736,17 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
         event.data.type === "tool_result" && event.data.result.exit_code === 0,
     ),
   );
-  assert(events.some((event) => event.data.event_type === "codex_text_delta"));
-  const sandbox = await mf.getDurableObjectNamespace("SANDBOXES", "exo");
-  assert.equal(await sandbox.getByName(thread.id).lastMethod(), "thread/start");
+  await streaming.collect;
+  streaming.cancel();
+  assert(
+    streaming.received.some(
+      (event) => event.data.type === "lingua_stream_chunk",
+    ),
+  );
+  assert(!events.some((event) => event.data.type === "lingua_stream_chunk"));
+  assert(!events.some((event) => event.data.event_type === "codex_text_delta"));
+  const sandbox = await sandboxFor(agent, thread);
+  assert.equal(await sandbox.lastMethod(), "thread/start");
 
   const second = await api(
     `${path}/turn`,
@@ -674,7 +764,7 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
     !finished.some((event) => event.data.type === "error"),
     JSON.stringify(finished),
   );
-  assert.equal(await sandbox.getByName(thread.id).lastMethod(), "thread/start");
+  assert.equal(await sandbox.lastMethod(), "thread/start");
   const started = finished.find(
     (event) =>
       event.turn_id === second.turn.id &&
@@ -683,8 +773,7 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
   assert.equal(started.data.payload.hydrated_from, "warm_codex_thread");
   assert.equal(started.data.payload.warm_app_server_reused, true);
   assert.equal(started.data.payload.warm_thread_reused, true);
-  assert.equal(await sandbox.getByName(thread.id).processCount(), 1);
-  assert.equal(await sandbox.getByName(thread.id).snapshotCount(), 0);
+  assert.equal(await sandbox.processCount(), 1);
   for (const id of [first.turn.id, second.turn.id]) {
     const usage = finished.filter(
       (event) =>
@@ -700,9 +789,8 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
       prompt_cached_tokens: 5,
     });
   }
-  await sandbox.getByName(thread.id).expireIdleForTest();
-  assert.equal(await sandbox.getByName(thread.id).snapshotCount(), 1);
-  assert.equal(await sandbox.getByName(thread.id).processCount(), 0);
+  await sandbox.stop();
+  assert.equal(await sandbox.processCount(), 0);
   const third = await api(
     `${path}/turn`,
     "POST",
@@ -726,13 +814,9 @@ test("Codex reuses its RPC process across turns and resumes after an idle checkp
   );
   assert.equal(resumedStart.data.payload.warm_app_server_reused, false);
   assert.equal(resumedStart.data.payload.hydrated_from, "warm_codex_thread");
-  assert.equal(
-    await sandbox.getByName(thread.id).lastMethod(),
-    "thread/resume",
-  );
-  assert.equal(await sandbox.getByName(thread.id).snapshotCount(), 1);
-  assert.equal(await sandbox.getByName(thread.id).processCount(), 1);
-  await sandbox.getByName(thread.id).stop();
+  assert.equal(await sandbox.lastMethod(), "thread/resume");
+  assert.equal(await sandbox.processCount(), 1);
+  await sandbox.stop();
 });
 
 test("managed thread pagination follows latest activity", async () => {
@@ -768,6 +852,19 @@ async function rpc(request) {
   assert.equal(response.ok, true, response.error);
   return response.response;
 }
+async function sandboxRecord(agent, thread) {
+  const result = await rpc({
+    type: "list_sandboxes",
+    scope: { type: "thread", agent_id: agent.id, thread_id: thread.id },
+  });
+  assert(result.sandboxes.length > 0);
+  assert.notEqual(result.sandboxes[0].id, thread.id);
+  return result.sandboxes[0];
+}
+async function sandboxFor(agent, thread) {
+  const { SANDBOXES } = await mf.getBindings("exo");
+  return SANDBOXES.getByName((await sandboxRecord(agent, thread)).id);
+}
 async function writeThreadArtifact(agent_id, conversation_id, request) {
   return (
     await rpc({
@@ -778,6 +875,77 @@ async function writeThreadArtifact(agent_id, conversation_id, request) {
     })
   ).artifact;
 }
+
+test("sandbox process RPC preserves binary stdin, drains output and cancels processes", async () => {
+  const { agent, thread } = await create();
+  const scope = { type: "thread", agent_id: agent.id, thread_id: thread.id };
+  const { sandbox_id } = await rpc({
+    type: "create_sandbox",
+    scope,
+    request: {
+      name: "io-test",
+      provider: "cloudflare",
+      image: "",
+      default_workdir: "/workspace",
+      file_system_mounts: null,
+      durable_file_systems: null,
+      enable_networking: false,
+      idle_seconds: 60,
+    },
+  });
+  const start = async () =>
+    (
+      await rpc({
+        type: "start_sandbox_process",
+        scope,
+        request: { sandbox_id, command: ["cat"], cwd: null, stdin: "open" },
+      })
+    ).process.id;
+  const process_id = await start();
+  const data = [0, 255, 128, 195, 169, 10];
+  await rpc({
+    type: "write_sandbox_process_input",
+    scope,
+    request: { sandbox_id, process_id, data },
+  });
+  await rpc({
+    type: "close_sandbox_process_input",
+    scope,
+    request: { sandbox_id, process_id },
+  });
+  const status = await rpc({
+    type: "wait_sandbox_process",
+    scope,
+    request: { sandbox_id, process_id },
+  });
+  assert.deepEqual(status.status, { type: "exited", exit_code: 0 });
+  const output = await rpc({
+    type: "get_sandbox_process_events",
+    scope,
+    query: { sandbox_id, process_id, after: null, limit: null, follow: false },
+  });
+  assert.deepEqual(
+    output.result.events
+      .filter((e) => e.type === "stdout")
+      .flatMap((e) => e.data),
+    data,
+  );
+  const second = await start();
+  const canceled = await rpc({
+    type: "cancel_sandbox_process",
+    scope,
+    request: { sandbox_id, process_id: second, signal: null },
+  });
+  assert.deepEqual(canceled.status, { type: "cancelled" });
+  const { SANDBOXES } = await mf.getBindings("exo");
+  for (
+    let i = 0;
+    i < 100 && (await SANDBOXES.getByName(sandbox_id).processCount());
+    i++
+  )
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(await SANDBOXES.getByName(sandbox_id).processCount(), 0);
+});
 
 test("existing Rust trait contracts run against the Worker store", async () => {
   const endpoint = new URL("/exo", await mf.ready).href;
@@ -828,12 +996,48 @@ test("Rust egress checks scoped placeholders, revocation, TLS and redirects", as
   const { agent, thread } = await create(false, "codex");
   const { PROVIDERS } = await mf.getBindings("exo");
   const provider = PROVIDERS.getByName("test-account");
-  const identity = { agentId: agent.id, threadId: thread.id };
-  const environment = JSON.parse(await provider.environmentForTest(identity));
+  await api(
+    `${"agent/" + agent.id + "/thread/" + thread.id}/turn`,
+    "POST",
+    { input: { role: "user", content: "hello" } },
+    202,
+  );
+  await waitEvents(`agent/${agent.id}/thread/${thread.id}`, (events) =>
+    events.some((e) => e.data.type === "turn_ended"),
+  );
+  const record = await sandboxRecord(agent, thread);
+  const identity = {
+    agentId: agent.id,
+    threadId: thread.id,
+    sandboxId: record.id,
+  };
+  const request = {
+    sandbox_id: record.id,
+    scope: { type: "thread", agent_id: agent.id, thread_id: thread.id },
+    spec: {
+      image: record.image,
+      default_workdir: "/workspace",
+      mounts: [],
+      durable_file_systems: [],
+      policy: {
+        networking: { type: "unrestricted" },
+        credentials: [
+          (await api(`vault/${(await api("vault"))[0].id}/secret`))[0],
+        ].map((secret) => ({
+          name: secret.id,
+          environment_variable: "OPENAI_API_KEY",
+          ...policy("https://model.example"),
+        })),
+      },
+    },
+    lifecycle: { idle_ttl: { secs: 300, nanos: 0 } },
+    provider_state: null,
+  };
+  const environment = JSON.parse(await provider.environmentForTest(request));
   const placeholder = environment.OPENAI_API_KEY;
   assert(placeholder.startsWith("exo_egress_"));
   assert.equal(
-    (await provider.sandboxPolicy(identity)).OPENAI_API_KEY,
+    (await provider.sandboxPolicy(request)).OPENAI_API_KEY,
     placeholder,
   );
   for (const url of ["http://model.example/v1", "https://other.example/v1"]) {

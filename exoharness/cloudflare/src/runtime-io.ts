@@ -12,7 +12,6 @@ import {
   type HarnessClient,
   type RawAgentRecord,
   type RawConversationHandleInfo,
-  type RawExoResponse,
   type RawTurnRecord,
 } from "../../typescript/harness/client";
 import type {
@@ -21,16 +20,40 @@ import type {
   RawSendRequest,
 } from "../../typescript/harness/wire";
 import type { Message, ToolDefinition } from "../../typescript/harness/index";
-import type { Env, SandboxIdentity } from "./env";
+import type { Env, SandboxIdentity, SandboxRequest } from "./env";
 import { CloudflareSandbox } from "./sandbox";
 import { Storage, type StorageOperation } from "./storage";
 import type { Runtime } from "./runtime";
 
 type Identity = { agent_id: string; thread_id: string };
-type SandboxCommand = Identity &
-  ({ type: "info" | "snapshot" } | { type: "stop"; terminate: boolean });
+type ProcessCommand = {
+  argv: string[];
+  env: Record<string, string>;
+  cwd: string | null;
+  timeout: { secs: number; nanos: number } | null;
+};
+type SandboxCommand =
+  | {
+      type: "acquire";
+      request: SandboxRequest;
+      snapshot: { id: string } | null;
+    }
+  | { type: "info" | "snapshot"; request: SandboxRequest }
+  | { type: "stop"; request: SandboxRequest; terminate: boolean }
+  | { type: "exec" | "start"; request: SandboxRequest; command: ProcessCommand }
+  | { type: "read"; process_id: string; stream: "stdout" | "stderr" }
+  | { type: "write"; process_id: string; bytes: number[] }
+  | { type: "close_input" | "wait" | "close"; process_id: string };
+type Process = Awaited<ReturnType<CloudflareSandbox["openProcess"]>>;
+type RunningProcess = {
+  process: Process;
+  stdout: ReadableStreamDefaultReader<Uint8Array>;
+  stderr: ReadableStreamDefaultReader<Uint8Array>;
+  ended: Set<string>;
+};
 type HarnessRequest = Identity & {
   type: "harness";
+  sandbox_id: string;
   turn: RawTurnRecord;
   agent_config: RawAgentConfig;
   conversation_config: RawConversationConfig;
@@ -51,20 +74,20 @@ export type HostRequest =
         max_output_tokens: number | null;
       };
     }
-  | (Identity & {
-      type: "exec";
-      command: string[];
-    })
-  | HarnessRequest
-  | { type: "stop_sandbox"; thread_id: string };
+  | HarnessRequest;
 
 export class RuntimeIO {
   private readonly codex = createCodexHarness(codexVersion.trim());
   private readonly storage: Storage;
+  private readonly processes = new Map<string, RunningProcess>();
   constructor(
     private readonly ctx: DurableObjectState,
     private readonly env: Env,
     private readonly runtime: Runtime,
+    private readonly emitProgress: (
+      threadId: string,
+      event: import("../../typescript/harness/client").RawEvent,
+    ) => void,
   ) {
     this.storage = new Storage(ctx.storage, env.ARTIFACTS, ctx.id.toString());
   }
@@ -73,26 +96,8 @@ export class RuntimeIO {
     switch (request.type) {
       case "storage":
         return this.storage.handle(request.operation);
-      case "sandbox": {
-        const command = request.command;
-        const sandbox = this.env.SANDBOXES.getByName(command.thread_id);
-        const identity = {
-          agentId: command.agent_id,
-          threadId: command.thread_id,
-        };
-        if (command.type === "info") return sandbox.info(identity);
-        if (command.type === "snapshot")
-          return (await sandbox.snapshot(identity)).id;
-        if (command.type === "stop") {
-          if (command.terminate) await sandbox.terminate(identity);
-          else await sandbox.stop();
-          return null;
-        }
-        throw new Error("unsupported sandbox command");
-      }
-      case "stop_sandbox":
-        await this.env.SANDBOXES.getByName(request.thread_id).stop();
-        return {};
+      case "sandbox":
+        return this.sandbox(request.command);
       case "model": {
         const r = request.request;
         await initLingua(linguaWasm);
@@ -128,15 +133,128 @@ export class RuntimeIO {
             : null,
         };
       }
-      case "exec": {
-        signal.throwIfAborted();
-        return this.env.SANDBOXES.getByName(request.thread_id).exec(
-          { agentId: request.agent_id, threadId: request.thread_id },
-          { command: request.command },
-        );
-      }
       case "harness":
         return this.runHarness(request, signal);
+    }
+  }
+
+  private async sandbox(command: SandboxCommand): Promise<unknown> {
+    if ("process_id" in command) {
+      const entry = this.processes.get(command.process_id);
+      if (!entry) {
+        if (command.type === "close" || command.type === "close_input")
+          return null;
+        throw new Error("sandbox process not found");
+      }
+      switch (command.type) {
+        case "read": {
+          let result: ReadableStreamReadResult<Uint8Array>;
+          try {
+            result = await entry[command.stream].read();
+          } catch (error) {
+            this.processes.delete(command.process_id);
+            await entry.process.close();
+            throw error;
+          }
+          const { done, value } = result;
+          if (done) this.finished(command.process_id, entry, command.stream);
+          return done ? null : [...value];
+        }
+        case "write":
+          await entry.process.writeStdin(new Uint8Array(command.bytes));
+          return null;
+        case "close_input":
+          await entry.process.closeStdin();
+          return null;
+        case "wait": {
+          const code = await entry.process.wait();
+          this.finished(command.process_id, entry, "wait");
+          return code;
+        }
+        case "close":
+          this.processes.delete(command.process_id);
+          await entry.process.close();
+          return null;
+      }
+    }
+    const request = command.request;
+    if (request.scope.type !== "thread")
+      throw new Error("Cloudflare sandboxes require a thread scope");
+    const identity: SandboxIdentity = {
+      agentId: request.scope.agent_id,
+      threadId: request.scope.thread_id,
+      sandboxId: request.sandbox_id,
+    };
+    const stub = this.env.SANDBOXES.getByName(request.sandbox_id);
+    switch (command.type) {
+      case "acquire": {
+        const environment = await this.runtime.call<Record<string, string>>({
+          type: "sandbox_policy",
+          request,
+        });
+        await stub.acquire(
+          identity,
+          request.spec.default_workdir,
+          environment,
+          command.snapshot,
+          request.lifecycle.idle_ttl!.secs * 1000 +
+            request.lifecycle.idle_ttl!.nanos / 1e6,
+        );
+        return null;
+      }
+      case "info":
+        return stub.info(identity);
+      case "snapshot":
+        return { id: (await stub.snapshot(identity)).id };
+      case "stop":
+        if (command.terminate) await stub.terminate(identity);
+        else await stub.stop();
+        return null;
+      case "exec": {
+        const c = command.command;
+        const result = await stub.exec(identity, {
+          command: c.argv,
+          env: c.env,
+          cwd: c.cwd ?? undefined,
+          timeoutMs: c.timeout
+            ? c.timeout.secs * 1000 + c.timeout.nanos / 1e6
+            : undefined,
+        });
+        return {
+          ok: result.exitCode === 0,
+          exit_code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          command: c.argv,
+          cwd: c.cwd ?? request.spec.default_workdir,
+        };
+      }
+      case "start": {
+        const adapter = new CloudflareSandbox(stub, identity, (promise) =>
+          this.ctx.waitUntil(promise),
+        );
+        const process = await adapter.openProcess({
+          command: command.command.argv,
+          env: command.command.env,
+          cwd: command.command.cwd ?? undefined,
+        });
+        const id = crypto.randomUUID();
+        this.processes.set(id, {
+          process,
+          stdout: process.stdout.getReader(),
+          stderr: process.stderr.getReader(),
+          ended: new Set(),
+        });
+        return id;
+      }
+    }
+  }
+
+  private finished(id: string, entry: RunningProcess, part: string): void {
+    entry.ended.add(part);
+    if (entry.ended.size === 3) {
+      this.processes.delete(id);
+      this.ctx.waitUntil(entry.process.close());
     }
   }
 
@@ -147,23 +265,21 @@ export class RuntimeIO {
     const identity: SandboxIdentity = {
       agentId: r.agent_id,
       threadId: r.thread_id,
+      sandboxId: r.sandbox_id,
     };
     const sandbox = new CloudflareSandbox(
-      this.env.SANDBOXES.getByName(r.thread_id),
+      this.env.SANDBOXES.getByName(r.sandbox_id),
       identity,
       (promise) => this.ctx.waitUntil(promise),
     );
-    const agent = await this.runtime.call<RawExoResponse>({
-      type: "state",
-      request: { type: "get_agent", agent_id: r.agent_id },
+    const agent = await this.runtime.requestExo({
+      type: "get_agent",
+      agent_id: r.agent_id,
     });
-    const thread = await this.runtime.call<RawExoResponse>({
-      type: "state",
-      request: {
-        type: "get_conversation",
-        agent_id: r.agent_id,
-        conversation_id: r.thread_id,
-      },
+    const thread = await this.runtime.requestExo({
+      type: "get_conversation",
+      agent_id: r.agent_id,
+      conversation_id: r.thread_id,
     });
     if (
       agent.type !== "agent" ||
@@ -173,8 +289,7 @@ export class RuntimeIO {
     )
       throw new Error("turn context disappeared");
     const client: HarnessClient = {
-      requestExo: (request) =>
-        this.runtime.call({ type: "state", request }, signal),
+      requestExo: (request) => this.runtime.requestExo(request, signal),
       requestRuntime: (request) => {
         if (request.type !== "authorize_tool")
           throw new Error("custom Codex tools are not supported");
@@ -190,24 +305,19 @@ export class RuntimeIO {
         );
       },
       startSandboxProcess: async (request) => {
-        await context.exoharness.current.turn.addEvents([
-          {
-            type: "custom",
-            event_type: "codex_process_start_requested",
-            payload: {},
-          },
-        ]);
         await sandbox.prepareCodex(codexVersion.trim());
-        const process = await sandbox.startProcess(request);
-        await context.exoharness.current.turn.addEvents([
-          { type: "custom", event_type: "codex_process_started", payload: {} },
-        ]);
-        return process;
+        return sandbox.startProcess(request);
       },
-      emitStream: async (event) => {
-        await context.exoharness.current.turn.addEvents([
-          { type: "custom", event_type: `codex_${event.type}`, payload: event },
-        ]);
+      emitStream: async (
+        event: Parameters<NonNullable<HarnessClient["emitStream"]>>[0],
+      ) => {
+        const progress = await this.runtime.call<
+          import("../../typescript/harness/client").RawEvent | null
+        >(
+          { type: "progress", thread_id: r.thread_id, turn: r.turn, event },
+          signal,
+        );
+        if (progress) this.emitProgress(r.thread_id, progress);
       },
     };
     const context = createTurnContext(client, {
@@ -223,7 +333,7 @@ export class RuntimeIO {
       tools: [],
     });
     const stop = () =>
-      this.ctx.waitUntil(this.env.SANDBOXES.getByName(r.thread_id).stop());
+      this.ctx.waitUntil(this.env.SANDBOXES.getByName(r.sandbox_id).stop());
     signal.throwIfAborted();
     signal.addEventListener("abort", stop, { once: true });
     const timer = setTimeout(stop, 600_000);

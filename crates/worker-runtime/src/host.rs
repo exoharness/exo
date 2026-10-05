@@ -6,13 +6,11 @@ use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use executor::runtime_host::RuntimeHost;
 use executor::{AgentConfig, ConversationConfig, ModelRequest, SendRequest};
-use exoharness::protocol::{Request, Response};
 use exoharness::{AgentId, ThreadId, TurnRecord};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::task::ArcWake;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use url::Url;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -21,17 +19,13 @@ pub(crate) enum HostRequest {
         operation: StorageOperation,
     },
     Sandbox {
-        command: SandboxCommand,
+        command: crate::sandbox::Command,
     },
     Model {
         request: ModelRequest,
     },
-    Exec {
-        agent_id: AgentId,
-        thread_id: ThreadId,
-        command: Vec<String>,
-    },
     Harness {
+        sandbox_id: String,
         agent_id: AgentId,
         thread_id: ThreadId,
         turn: TurnRecord,
@@ -39,9 +33,6 @@ pub(crate) enum HostRequest {
         conversation_config: ConversationConfig,
         request: SendRequest,
         recovering: bool,
-    },
-    StopSandbox {
-        thread_id: ThreadId,
     },
 }
 
@@ -202,139 +193,5 @@ impl exoharness::Storage for HostStorage {
                 },
             })
             .await
-    }
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum SandboxCommand {
-    Info {
-        agent_id: AgentId,
-        thread_id: ThreadId,
-    },
-    Stop {
-        agent_id: AgentId,
-        thread_id: ThreadId,
-        terminate: bool,
-    },
-    Snapshot {
-        agent_id: AgentId,
-        thread_id: ThreadId,
-    },
-}
-#[derive(Deserialize)]
-struct SandboxInfo {
-    exists: bool,
-    running: bool,
-}
-pub(crate) struct SandboxTransport {
-    pub host: Arc<Host>,
-    pub endpoint: Url,
-}
-#[async_trait]
-impl exoharness::ExoHttpTransport for SandboxTransport {
-    fn endpoint(&self) -> &Url {
-        &self.endpoint
-    }
-    async fn request(&self, request: Request) -> Result<Response> {
-        use exoharness::ResourceScope;
-        use exoharness::protocol::SnapshotScope;
-        let scope = match &request {
-            Request::ListSandboxes { scope }
-            | Request::StopSandbox { scope, .. }
-            | Request::TerminateSandbox { scope, .. } => *scope,
-            Request::SnapshotSandbox {
-                scope: SnapshotScope::Resource { scope },
-                ..
-            } => *scope,
-            Request::SnapshotSandbox {
-                scope:
-                    SnapshotScope::Turn {
-                        agent_id,
-                        thread_id,
-                        ..
-                    },
-                ..
-            } => ResourceScope::Thread {
-                agent_id: *agent_id,
-                thread_id: *thread_id,
-            },
-            _ => bail!("sandbox operation is not supported by this host"),
-        };
-        let ResourceScope::Thread {
-            agent_id,
-            thread_id,
-        } = scope
-        else {
-            if matches!(request, Request::ListSandboxes { .. }) {
-                return Ok(Response::Sandboxes {
-                    sandboxes: Vec::new(),
-                });
-            }
-            bail!("Cloudflare sandboxes are thread scoped");
-        };
-        let terminate = matches!(request, Request::TerminateSandbox { .. });
-        match request {
-            Request::ListSandboxes { .. } => {
-                let info: SandboxInfo = self
-                    .host
-                    .call(HostRequest::Sandbox {
-                        command: SandboxCommand::Info {
-                            agent_id,
-                            thread_id,
-                        },
-                    })
-                    .await?;
-                Ok(Response::Sandboxes {
-                    sandboxes: if info.exists {
-                        vec![exoharness::SandboxRecord {
-                            id: thread_id.to_string().parse()?,
-                            name: None,
-                            provider: exoharness::SandboxProvider::from_static("cloudflare"),
-                            image: "cloudflare/debian-trixie".into(),
-                            running: info.running,
-                        }]
-                    } else {
-                        Vec::new()
-                    },
-                })
-            }
-            Request::StopSandbox { sandbox_id, .. }
-            | Request::TerminateSandbox { sandbox_id, .. } => {
-                anyhow::ensure!(
-                    sandbox_id.to_string() == thread_id.to_string(),
-                    "sandbox is not in this thread"
-                );
-                self.host
-                    .call::<()>(HostRequest::Sandbox {
-                        command: SandboxCommand::Stop {
-                            agent_id,
-                            thread_id,
-                            terminate,
-                        },
-                    })
-                    .await?;
-                Ok(Response::Unit)
-            }
-            Request::SnapshotSandbox { sandbox_id, .. } => {
-                anyhow::ensure!(
-                    sandbox_id.to_string() == thread_id.to_string(),
-                    "sandbox is not in this thread"
-                );
-                let id: String = self
-                    .host
-                    .call(HostRequest::Sandbox {
-                        command: SandboxCommand::Snapshot {
-                            agent_id,
-                            thread_id,
-                        },
-                    })
-                    .await?;
-                Ok(Response::SnapshotId {
-                    snapshot_id: id.parse()?,
-                })
-            }
-            _ => unreachable!(),
-        }
     }
 }

@@ -7,7 +7,14 @@ rust-version.workspace = true
 
 [features]
 default = ["client"]
-client = ["dep:futures", "dep:reqwest", "dep:rmcp", "dep:sha2", "dep:sse-stream", "dep:tokio"]
+client = [
+  "dep:futures",
+  "dep:reqwest",
+  "dep:rmcp",
+  "dep:sha2",
+  "dep:sse-stream",
+  "dep:tokio",
+]
 
 [dependencies]
 async-trait.workspace = true

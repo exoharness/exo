@@ -3,12 +3,18 @@ import type {
   RawEvent,
   RawGetEventsResult,
 } from "../../typescript/harness/client";
-import type { Env, SandboxIdentity, SandboxPolicy } from "./env";
+import type {
+  Env,
+  SandboxIdentity,
+  SandboxPolicy,
+  SandboxRequest,
+} from "./env";
 import { Runtime } from "./runtime";
 import { RuntimeIO } from "./runtime-io";
 
 export class ExoProvider extends DurableObject<Env> {
   private readonly runtime: Runtime;
+  private readonly progress = new Map<string, Set<(event: RawEvent) => void>>();
   private readonly recovered: Promise<unknown>;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -19,16 +25,17 @@ export class ExoProvider extends DurableObject<Env> {
       (request, signal) => io.handle(request, signal),
       (promise) => ctx.waitUntil(promise),
     );
-    io = new RuntimeIO(ctx, env, this.runtime);
+    io = new RuntimeIO(ctx, env, this.runtime, (threadId, event) => {
+      for (const send of this.progress.get(threadId) ?? []) send(event);
+    });
     this.recovered = this.runtime.call({ type: "recover" });
     ctx.waitUntil(this.recovered);
   }
 
-  async sandboxPolicy(identity: SandboxIdentity): Promise<SandboxPolicy> {
+  async sandboxPolicy(request: SandboxRequest): Promise<SandboxPolicy> {
     return this.runtime.call({
       type: "sandbox_policy",
-      agent_id: identity.agentId,
-      thread_id: identity.threadId,
+      request,
     });
   }
 
@@ -37,6 +44,7 @@ export class ExoProvider extends DurableObject<Env> {
       type: "proxy_headers",
       agent_id: identity.agentId,
       thread_id: identity.threadId,
+      sandbox_id: identity.sandboxId,
       url: request.url,
       method: request.method,
       headers: [...request.headers],
@@ -158,6 +166,17 @@ export class ExoProvider extends DurableObject<Env> {
           if (!abort.signal.aborted)
             controller.enqueue(encoder.encode(": heartbeat\n\n"));
         }, 10_000);
+        const emit = (event: RawEvent) => {
+          if (!abort.signal.aborted)
+            controller.enqueue(
+              encoder.encode(
+                `event: exo_event\ndata: ${JSON.stringify(event)}\n\n`,
+              ),
+            );
+        };
+        const listeners = this.progress.get(threadId) ?? new Set();
+        this.progress.set(threadId, listeners);
+        listeners.add(emit);
         const send = async () => {
           try {
             while (!abort.signal.aborted) {
@@ -172,17 +191,15 @@ export class ExoProvider extends DurableObject<Env> {
               );
               for (const event of page.events as RawEvent[]) {
                 abort.signal.throwIfAborted();
-                controller.enqueue(
-                  encoder.encode(
-                    `event: exo_event\ndata: ${JSON.stringify(event)}\n\n`,
-                  ),
-                );
+                emit(event);
                 after = event.id;
               }
             }
           } catch (error) {
             if (!abort.signal.aborted) controller.error(error);
           } finally {
+            listeners.delete(emit);
+            if (!listeners.size) this.progress.delete(threadId);
             clearInterval(timer);
             request.signal.removeEventListener("abort", cancel);
           }

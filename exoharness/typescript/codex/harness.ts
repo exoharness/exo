@@ -60,7 +60,11 @@ import {
   nativeTurnSnapshot,
   type NativeTurnSnapshot,
 } from "./recovery";
-import { CodexUsageAccumulator, codexUsageEvent } from "./usage";
+import {
+  CodexUsageAccumulator,
+  codexUsageEvent,
+  type CodexTokenUsageUpdate,
+} from "./usage";
 
 import { authorizeMcpElicitation } from "./mcp-approval";
 
@@ -1104,7 +1108,9 @@ async function handleCodexNotification(
       await appendCustomEvent(turn, "codex_diff_updated", notification.params);
       return "running";
     case "thread/tokenUsage/updated":
-      traceState.tokenUsage.record(notification.params);
+      traceState.tokenUsage.record(
+        notification.params as CodexTokenUsageUpdate | null,
+      );
       await appendCustomEvent(turn, "codex_token_usage", notification.params);
       return "running";
     case "turn/completed": {

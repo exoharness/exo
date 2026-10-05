@@ -1,7 +1,6 @@
-import { messagesEvent, type EventData, type JsonValue } from "../harness";
+import { messagesEvent, type EventData } from "../harness";
 import { type PricingTable } from "../model-runtime/cost";
 import { modelUsageRecord } from "../model-runtime/usage";
-import { isRecord } from "../model-runtime/shared";
 
 export interface CodexTokenUsage {
   inputTokens?: number;
@@ -12,6 +11,12 @@ export interface CodexTokenUsage {
   reasoningOutputTokens?: number;
 }
 
+export interface CodexTokenUsageUpdate {
+  threadId?: string;
+  turnId?: string;
+  tokenUsage?: { last?: CodexTokenUsage; total?: CodexTokenUsage };
+}
+
 // Record only notifications already filtered to the active native turn. `last`
 // is one model call; `total` includes earlier turns and also identifies repeated
 // notifications. Raw response events are not emitted by resumed app-servers.
@@ -19,10 +24,9 @@ export class CodexUsageAccumulator {
   value: CodexTokenUsage | null = null;
   private lastThreadTotal: number | undefined;
 
-  record(params: JsonValue | null): void {
-    if (!isRecord(params) || !isRecord(params.tokenUsage)) return;
-    const { last, total } = params.tokenUsage;
-    if (!isRecord(last) || !isRecord(total)) return;
+  record(params: CodexTokenUsageUpdate | null): void {
+    const { last, total } = params?.tokenUsage ?? {};
+    if (!last || !total) return;
     const input = tokenCount(last.inputTokens);
     const output = tokenCount(last.outputTokens);
     const tokens = tokenCount(last.totalTokens);
@@ -32,8 +36,6 @@ export class CodexUsageAccumulator {
       output === undefined ||
       tokens === undefined ||
       threadTotal === undefined ||
-      tokens !== input + output ||
-      threadTotal < tokens ||
       (this.lastThreadTotal !== undefined &&
         threadTotal <= this.lastThreadTotal)
     )

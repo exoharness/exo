@@ -2,7 +2,7 @@
 use crate::host::{Host, HostStorage};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use executor::{AgentConfig, ConversationConfig, Runtime};
+use executor::Runtime;
 use exoharness::egress_credentials::{
     CredentialBindings, EgressCredentialResolver, EgressDestination, EgressIdentity,
     strip_hop_headers,
@@ -21,7 +21,64 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Serialize, Deserialize)]
 struct Session {
     policy: EgressPolicy,
+    agent_id: AgentId,
+    thread_id: ThreadId,
     environment: HashMap<String, String>,
+}
+
+pub(crate) async fn environment(
+    runtime: &Runtime,
+    host: &Arc<Host>,
+    request: exoharness::SandboxRequest,
+) -> Result<HashMap<String, String>> {
+    let ResourceScope::Thread {
+        agent_id,
+        thread_id,
+    } = request.scope
+    else {
+        anyhow::bail!("Cloudflare egress requires a thread");
+    };
+    let agent = runtime
+        .exoharness_handle()
+        .get_agent(&agent_id)
+        .await?
+        .context("agent not found")?;
+    agent
+        .get_thread(&thread_id)
+        .await?
+        .context("thread not found")?;
+    let storage = HostStorage(host.clone());
+    let key = format!("sandbox/{}/egress.json", request.sandbox_id);
+    let saved = storage
+        .get(&key)
+        .await?
+        .map(|bytes| serde_json::from_slice::<Session>(&bytes))
+        .transpose()?;
+    let policy = request.spec.policy;
+    let mut environment = CredentialBindings::new(policy.credentials.clone(), None)?.environment();
+    if let Some(saved) = &saved {
+        ensure!(
+            saved.agent_id == agent_id && saved.thread_id == thread_id,
+            "sandbox identity mismatch"
+        );
+        for binding in &policy.credentials {
+            if saved.policy.credentials.contains(binding)
+                && let Some(value) = saved.environment.get(&binding.environment_variable)
+            {
+                environment.insert(binding.environment_variable.clone(), value.clone());
+            }
+        }
+    }
+    let session = Session {
+        agent_id,
+        thread_id,
+        policy,
+        environment,
+    };
+    storage
+        .put(&key, serde_json::to_vec(&session)?, false)
+        .await?;
+    Ok(session.environment)
 }
 
 async fn session(
@@ -29,6 +86,7 @@ async fn session(
     host: &Arc<Host>,
     agent_id: AgentId,
     thread_id: ThreadId,
+    sandbox_id: &str,
 ) -> Result<(Arc<dyn ConversationHandle>, Session)> {
     let agent = runtime
         .exoharness_handle()
@@ -39,58 +97,16 @@ async fn session(
         .get_thread(&thread_id)
         .await?
         .context("thread not found")?;
-    let agent_config: AgentConfig = executor::load_agent_config(agent.as_ref()).await?;
-    let config: ConversationConfig = executor::load_conversation_config(thread.as_ref()).await?;
-    let policy = executor::sandbox_policy::sandbox_policy(thread.as_ref(), &agent_config, &config)
+    let bytes = HostStorage(host.clone())
+        .get(&format!("sandbox/{sandbox_id}/egress.json"))
         .await?
-        .unwrap_or_else(|| {
-            if agent_config.sandbox.enable_networking {
-                SandboxNetworkPolicy::Unrestricted.into()
-            } else {
-                SandboxNetworkPolicy::Disabled.into()
-            }
-        });
-    let storage = HostStorage(host.clone());
-    let key = format!("sandbox/{thread_id}/egress.json");
-    let saved = storage
-        .get(&key)
-        .await?
-        .map(|bytes| serde_json::from_slice::<Session>(&bytes))
-        .transpose()?;
-    // Processes retain their environment while warm, including across provider
-    // eviction. Reuse opaque values only for an unchanged credential binding.
-    let fresh = CredentialBindings::new(policy.credentials.clone(), None)?.environment();
-    let mut environment = fresh;
-    if let Some(saved) = &saved {
-        for binding in &policy.credentials {
-            if saved.policy.credentials.contains(binding)
-                && let Some(value) = saved.environment.get(&binding.environment_variable)
-            {
-                environment.insert(binding.environment_variable.clone(), value.clone());
-            }
-        }
-    }
-    let session = Session {
-        policy,
-        environment,
-    };
-    if saved.as_ref().is_none_or(|saved| {
-        saved.policy != session.policy || saved.environment != session.environment
-    }) {
-        storage
-            .put(&key, serde_json::to_vec(&session)?, false)
-            .await?;
-    }
+        .context("sandbox egress is not configured")?;
+    let session: Session = serde_json::from_slice(&bytes)?;
+    ensure!(
+        session.agent_id == agent_id && session.thread_id == thread_id,
+        "sandbox identity mismatch"
+    );
     Ok((thread, session))
-}
-
-pub(crate) async fn environment(
-    runtime: &Runtime,
-    host: &Arc<Host>,
-    agent: AgentId,
-    thread: ThreadId,
-) -> Result<HashMap<String, String>> {
-    Ok(session(runtime, host, agent, thread).await?.1.environment)
 }
 
 struct Resolver(Arc<dyn ConversationHandle>);
@@ -120,6 +136,7 @@ pub(crate) async fn proxy_headers(
     host: &Arc<Host>,
     agent: AgentId,
     thread: ThreadId,
+    sandbox_id: &str,
     url: &str,
     method: &str,
     headers: Vec<(String, String)>,
@@ -148,7 +165,7 @@ pub(crate) async fn proxy_headers(
         matches!((url.scheme(), port), ("http", 80) | ("https", 443)),
         "the sandbox intercepts HTTP port 80 and HTTPS port 443"
     );
-    let (conversation, session) = session(runtime, host, agent, thread).await?;
+    let (conversation, session) = session(runtime, host, agent, thread, sandbox_id).await?;
     ensure!(session.policy.allows_tcp_port(port), "network port denied");
     ensure!(
         match &session.policy.networking {
@@ -182,7 +199,7 @@ pub(crate) async fn proxy_headers(
             &mut map,
             &destination,
             &EgressIdentity {
-                sandbox_id: thread.to_string(),
+                sandbox_id: sandbox_id.into(),
                 scope: ResourceScope::Thread {
                     agent_id: agent,
                     thread_id: thread,

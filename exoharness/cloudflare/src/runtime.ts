@@ -1,6 +1,10 @@
 import { initSync, WorkerRuntime } from "./wasm/exo_worker_runtime";
 import runtimeWasm from "./wasm/exo_worker_runtime_bg.wasm";
 import type { HostRequest } from "./runtime-io";
+import type {
+  RawExoRequest,
+  RawExoResponse,
+} from "../../typescript/harness/client";
 
 initSync({ module: runtimeWasm });
 
@@ -55,6 +59,32 @@ export class Runtime {
     return result.finally(() =>
       signal?.removeEventListener("abort", abortResult),
     );
+  }
+
+  async requestExo(
+    request: RawExoRequest,
+    signal?: AbortSignal,
+  ): Promise<RawExoResponse> {
+    const result = await this.call<{ status: number; body: string }>(
+      {
+        type: "http",
+        request: {
+          method: "POST",
+          path: ["request"],
+          query: "",
+          body: JSON.stringify({ kind: "request", id: 0, request }),
+        },
+      },
+      signal,
+    );
+    const message = JSON.parse(result.body) as {
+      ok: boolean;
+      response?: RawExoResponse;
+      error?: string;
+    };
+    if (result.status !== 200 || !message.ok || !message.response)
+      throw new Error(message.error ?? "Exo request failed");
+    return message.response;
   }
 
   private pump(): void {

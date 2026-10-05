@@ -330,3 +330,50 @@ pub struct ShellToolResult {
     pub stderr: String,
     pub exit_code: i32,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TypeScriptStreamEvent {
+    FirstChunk {
+        ttft_ms: u64,
+    },
+    TextDelta {
+        text: String,
+    },
+    ToolCall {
+        tool_call_id: String,
+        tool_name: String,
+        arguments: ToolArguments,
+    },
+    ToolResult {
+        tool_call_id: String,
+        result: ToolResult,
+    },
+}
+
+pub fn to_execution_stream_event(event: TypeScriptStreamEvent) -> ExecutionStreamEvent {
+    match event {
+        TypeScriptStreamEvent::FirstChunk { ttft_ms } => ExecutionStreamEvent::FirstChunk {
+            ttft: Duration::from_millis(ttft_ms),
+        },
+        TypeScriptStreamEvent::TextDelta { text } => {
+            ExecutionStreamEvent::Chunk(UniversalStreamChunk::text_delta(0, &text))
+        }
+        TypeScriptStreamEvent::ToolCall {
+            tool_call_id,
+            tool_name,
+            arguments,
+        } => ExecutionStreamEvent::ToolCall {
+            tool_call_id,
+            tool_name,
+            arguments,
+        },
+        TypeScriptStreamEvent::ToolResult {
+            tool_call_id,
+            result,
+        } => ExecutionStreamEvent::ToolResult {
+            tool_call_id,
+            result,
+        },
+    }
+}

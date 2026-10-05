@@ -55,7 +55,10 @@ oxide-auth = { version = "0.6.1", optional = true }
 sha2 = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-tokio = { version = "1.52.1", default-features = false, features = ["sync", "macros"] }
+tokio = { version = "1.52.1", default-features = false, features = [
+  "sync",
+  "macros",
+] }
 tokio-stream.workspace = true
 tokio-util = { workspace = true, features = ["rt"], optional = true }
 tracing.workspace = true

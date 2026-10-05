@@ -21,9 +21,8 @@ use crate::storage::BasicObjectStore;
 mod native;
 #[cfg(feature = "basic-backend")]
 pub use native::*;
-#[cfg(not(feature = "basic-backend"))]
-#[path = "basic/hosted.rs"]
-mod hosted;
+#[path = "basic/sandboxes.rs"]
+mod sandboxes;
 use crate::vault::{
     BasicVaultStore, VaultContext, VaultHandle, VaultId, compose_vaults, global_vault,
     require_vaults,
@@ -43,18 +42,16 @@ use crate::{
     StartSandboxRequest, TurnHandle, TurnId, TurnRecord, Uuid7, WaitSandboxProcessRequest,
     WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
-#[cfg(not(feature = "basic-backend"))]
-use hosted::*;
+pub use sandboxes::SandboxBackendRegistration;
+use sandboxes::*;
 
 #[path = "basic/access.rs"]
 mod access;
 #[cfg(feature = "basic-backend")]
 #[path = "basic/migration.rs"]
 mod migration;
-#[cfg(feature = "basic-backend")]
 #[path = "basic/vault_context.rs"]
 mod vault_context;
-#[cfg(feature = "basic-backend")]
 use vault_context::ScopedVaultContext;
 #[cfg(feature = "basic-backend")]
 #[path = "basic/egress.rs"]
@@ -207,8 +204,12 @@ struct BasicExoHarnessInner {
     subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
     #[cfg(feature = "basic-backend")]
     native: NativeState,
-    #[cfg(not(feature = "basic-backend"))]
-    sandbox_rpc: crate::HttpExoHarness,
+    sandbox_registry: HashMap<SandboxProvider, SandboxBackendRegistration>,
+    sandbox_policy: Option<crate::EgressPolicy>,
+    sandbox_backends: AsyncMutex<HashMap<SandboxProvider, Arc<dyn crate::ManagedSandboxBackend>>>,
+    running_sandboxes: AsyncMutex<HashMap<SandboxId, Arc<dyn crate::ManagedSandboxHandle>>>,
+    running_processes: AsyncMutex<HashMap<crate::SandboxProcessId, Arc<RunningSandboxProcess>>>,
+    host: Arc<dyn crate::runtime_host::RuntimeHost>,
     vaults: BasicVaultStore,
 }
 
@@ -252,6 +253,64 @@ impl BasicExoHarnessInner {
 }
 
 impl BasicExoHarness {
+    #[cfg(not(feature = "basic-backend"))]
+    pub fn hosted(
+        storage: Arc<dyn crate::Storage>,
+        master_key: [u8; 32],
+        backends: Vec<SandboxBackendRegistration>,
+        host: Arc<dyn crate::runtime_host::RuntimeHost>,
+    ) -> Result<Self> {
+        let mut registry = HashMap::new();
+        for backend in backends {
+            let provider = backend.provider();
+            anyhow::ensure!(
+                registry.insert(provider.clone(), backend).is_none(),
+                "duplicate sandbox provider {provider}"
+            );
+        }
+        let storage = BasicObjectStore::new(storage);
+        let cipher = crate::secrets::SecretCipher::new(Arc::new(
+            crate::secrets::StaticSecretKeyProvider::new(master_key),
+        ));
+        Ok(Self {
+            caller: None,
+            inner: Arc::new(BasicExoHarnessInner {
+                access_policy: Default::default(),
+                vaults: BasicVaultStore::hosted(storage.clone(), cipher.clone()),
+                storage,
+                write_lock: AsyncMutex::new(()),
+                resource_locks: Mutex::default(),
+                subscribers: Mutex::default(),
+                sandbox_registry: registry,
+                sandbox_policy: None,
+                sandbox_backends: AsyncMutex::default(),
+                running_sandboxes: AsyncMutex::default(),
+                running_processes: AsyncMutex::default(),
+                host,
+            }),
+        })
+    }
+
+    fn command_env(
+        &self,
+        owner: ResourceScope,
+        mounts: &[FileSystemMount],
+        env: HashMap<String, String>,
+    ) -> Result<HashMap<String, String>> {
+        #[cfg(feature = "basic-backend")]
+        {
+            self.inner.native.resources.command_env(owner, mounts, env)
+        }
+        #[cfg(not(feature = "basic-backend"))]
+        {
+            anyhow::ensure!(
+                mounts.is_empty(),
+                "filesystem mounts are not supported for {owner:?} on this host"
+            );
+            Ok(env)
+        }
+    }
+
     fn agents_dir(&self) -> PathBuf {
         PathBuf::from("agents")
     }
@@ -520,6 +579,7 @@ impl ExoHarness for BasicExoHarness {
             if !prepare_sandbox_scopes_for_deletion(self, &scopes).await? {
                 continue;
             }
+            #[cfg(feature = "basic-backend")]
             for conversation_id in agent_conversation_ids(self, &agent_dir).await? {
                 remove_thread_resources(self, *id, conversation_id).await?;
             }
@@ -786,7 +846,23 @@ impl AgentHandle for BasicAgentHandle {
         &self,
         resources: Vec<crate::resources::ResourceDefinition>,
     ) -> Result<Vec<crate::resources::PreparedResource>> {
-        self.prepare_resources_impl(resources).await
+        #[cfg(feature = "basic-backend")]
+        {
+            self.prepare_resources_impl(resources).await
+        }
+        #[cfg(not(feature = "basic-backend"))]
+        {
+            self.harness
+                .check(ResourceScope::Agent {
+                    agent_id: self.record.id,
+                })
+                .await?;
+            anyhow::ensure!(
+                resources.is_empty(),
+                "this host does not support filesystem resources"
+            );
+            Ok(Vec::new())
+        }
     }
 
     fn record(&self) -> &AgentRecord {
@@ -1031,6 +1107,7 @@ impl AgentHandle for BasicAgentHandle {
                 )
                 .await?;
             }
+            #[cfg(feature = "basic-backend")]
             remove_thread_resources(&self.harness, self.record.id, *id).await?;
             self.harness
                 .inner
@@ -1309,6 +1386,7 @@ impl ConversationHandle for BasicConversationHandle {
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         if record.environment.as_ref() != Some(&environment) {
+            #[cfg(feature = "basic-backend")]
             self.check_resource_environment(&environment.config.provider)?;
             let scope = self.sandbox_handle();
             for sandbox in scope.list_sandboxes().await? {
@@ -1363,7 +1441,24 @@ impl ConversationHandle for BasicConversationHandle {
         resources: Vec<crate::resources::PreparedResource>,
         provider: SandboxProvider,
     ) -> Result<Vec<FileSystemMount>> {
-        self.materialize_resources_impl(resources, provider).await
+        #[cfg(feature = "basic-backend")]
+        {
+            self.materialize_resources_impl(resources, provider).await
+        }
+        #[cfg(not(feature = "basic-backend"))]
+        {
+            self.harness
+                .check(ResourceScope::Thread {
+                    agent_id: self.agent_id,
+                    thread_id: self.record.id,
+                })
+                .await?;
+            anyhow::ensure!(
+                resources.is_empty(),
+                "provider {provider} does not support filesystem resources on this host"
+            );
+            Ok(Vec::new())
+        }
     }
 
     fn record(&self) -> &ConversationRecord {
@@ -1660,6 +1755,7 @@ impl ConversationHandle for BasicConversationHandle {
             .lock_thread_resources(self.agent_id, self.record.id)
             .await;
         let _guard = self.harness.inner.write_lock.lock().await;
+        #[cfg(feature = "basic-backend")]
         self.check_resource_fork()?;
         let agent = BasicAgentHandle {
             harness: self.harness.clone(),

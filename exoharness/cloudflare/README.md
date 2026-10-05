@@ -10,7 +10,7 @@ flowchart LR
   IO --> SQLite[(SQLite state and encrypted vault)]
   IO --> R2[(R2 artifacts)]
   IO --> Model[Model Responses API]
-  IO --> Sandbox[Per-thread Linux Sandbox]
+  IO --> Sandbox[Linux Sandbox]
   Sandbox --> Egress[ExoEgress Worker]
   Egress --> Provider
   Provider --> Upstream[Allowed HTTP/S upstream]
@@ -20,10 +20,10 @@ flowchart LR
 
 - The existing Rust `BasicExoHarness` store: agents, threads, sessions, turns, events, artifacts and encrypted vaults. JavaScript supplies opaque byte storage in Durable Objects and R2.
 - Managed-agent routes under `/exo` use the same Rust service functions as native Exo. The authenticated `/exo/request` endpoint dispatches the existing ExoHarness protocol in Rust.
-- The existing Rust basic turn loop runs in Worker WebAssembly. JavaScript supplies storage, model Responses calls and shell execution through native Sandbox `exec`. The bridge polls Rust futures and holds host I/O with `waitUntil`; it requires no Tokio runtime or native threads.
-- The existing Exo Codex harness, shared with the native deployment. Its app-server runs over native stdin/stdout/stderr with canonical shell/file/message events, persisted text deltas and saved thread resume.
-- Per-thread sandbox execution using Cloudflare's managed `cloudflare/debian-trixie` image. No custom image build is needed.
-- HTTP port 80 and HTTPS port 443 go through a Worker binding whose trusted props identify the agent/thread. Rust enforces the thread network policy and credential destinations. Other sandbox network access is disabled. Commands cannot select a different identity through request headers.
+- The existing Rust basic turn loop runs in Worker WebAssembly. JavaScript supplies storage, model Responses calls and sandbox process I/O through a `ManagedSandboxBackend`. The bridge polls Rust futures and holds host I/O with `waitUntil`; it requires no Tokio runtime or native threads.
+- The existing Exo Codex harness, shared with the native deployment. Its app-server runs over native stdin/stdout/stderr with canonical shell/file/message events, ephemeral streamed text deltas and saved thread resume.
+- Thread-scoped sandbox execution using Cloudflare's managed `cloudflare/debian-trixie` image. No custom image build is needed.
+- HTTP port 80 and HTTPS port 443 go through a Worker binding whose trusted props identify the sandbox and its agent/thread. Rust enforces the thread network policy and credential destinations. Other sandbox network access is disabled. Commands cannot select a different identity through request headers.
 - Opaque environment placeholders, Bearer/custom header and Basic auth substitution, destination checks, manual redirects and live vault revocation. Vault values stay outside the sandbox.
 - Filesystem snapshots and restoration after sandbox destruction. Sandboxes checkpoint on idle expiry or explicit stop; Codex's workspace and native history are included. Artifacts are stored separately in R2.
 
@@ -46,7 +46,7 @@ pnpm --dir exoharness/cloudflare test
 
 `test` builds the real Worker bundle and runs Miniflare with real SQLite Durable Object and R2 storage. Its model and sandbox execution bindings are fixtures. Live tests below exercise the actual Cloudflare Linux sandbox.
 
-The suite invokes the existing Rust core trait contracts against this backend through `HttpExoHarness` and `/exo/request`: CRUD, thread/conversation APIs, pagination, turn lifecycle and artifact ownership. Integration checks cover approvals, cancellation, SSE, persistence, credential substitution, Codex warm reuse and usage. Separate adapter tests execute the production sandbox lifecycle with a fixture for the platform container API. Run `test:live:contracts` against a deployed Worker to use the same Rust contracts there. Arbitrary process RPC is not implemented yet.
+The suite invokes the existing Rust core trait contracts against this backend through `HttpExoHarness` and `/exo/request`: CRUD, thread/conversation APIs, pagination, turn lifecycle and artifact ownership. Integration checks cover approvals, cancellation, SSE, persistence, credential substitution, Codex warm reuse and usage. Separate adapter tests execute the production sandbox lifecycle with a fixture for the platform container API. Run `test:live:contracts` against a deployed Worker to use the same Rust contracts there. Sandbox records, lifecycle operations and process RPC use the shared Rust manager.
 
 Choose the Worker name and R2 bucket in `wrangler.jsonc`, then authenticate Wrangler with your Cloudflare account. `ACCOUNT_ID` names the shared Exo account's Durable Object; it is separate from your Cloudflare account ID. Create the configured bucket and deploy:
 
@@ -132,7 +132,7 @@ Attach a static model key in an Exo vault with an HTTPS destination policy for `
 
 The Worker streams the pinned Codex Linux package into the standard sandbox and verifies its SHA-512 integrity before extraction. It does not build a custom image or grant the agent access to the npm registry. `src/codex-package.json` must match `containers/codex-sandbox/version`. Node and Codex's bundled ripgrep are available; additional project dependencies need authorized network origins and installation.
 
-The shared Codex harness reuses its app-server and native thread across turns while the sandbox is warm. The `CloudflareSandbox` adapter exposes the shared `SandboxProcess` interface and owns RPC capabilities, stream decoding and invocation lifetime. Its native exec invocation stays open until the process exits. Turns finish without stopping Codex or taking a filesystem snapshot. After five minutes of idle time, or an explicit sandbox stop, the sandbox closes its processes, checkpoints their files and stops. `/home/exo/.codex` preserves native thread history across sandbox destruction. A cold session uses `thread/resume`; Exo's existing recovery logic checks unresolved native tools before replaying an interrupted turn.
+The shared Codex harness reuses its app-server and native thread across turns while the sandbox is warm. The `CloudflareSandbox` adapter exposes the shared `SandboxProcess` interface and owns RPC capabilities, stream decoding and invocation lifetime. Its native exec invocation stays open until the process exits. Turns finish without stopping Codex or taking a filesystem snapshot. After five minutes of idle time, or an explicit sandbox stop, the sandbox closes its processes, checkpoints their files and stops. `/home/exo/.codex` preserves native thread history across sandbox destruction. Automatic idle shutdown preserves the logical sandbox; an explicit Exo `stop_sandbox` ends it, following the shared lifecycle. Use the existing snapshot/stop/start APIs to restore an explicitly stopped sandbox. A cold session uses `thread/resume`; Exo's existing recovery logic checks unresolved native tools before replaying an interrupted turn.
 
 Codex currently supports `always_allow` permissions. `always_ask`, custom tools/MCP, and basic-harness token/round limits are rejected. Turns have a ten-minute execution limit. Cancellation stops the running sandbox. Snapshots preserve filesystem state; they do not make an interrupted tool safe to repeat.
 
@@ -153,7 +153,7 @@ The agent tests create test agents and threads, exercise model/tool execution an
 - The `basic` and `codex` harnesses, OpenAI-compatible Responses models and static key credentials are supported. Vault OAuth credential refresh, GitHub CLI credentials, Claude/Pi subprocess harnesses, MCP, custom tool modules, resources, custom execution images, adapters, frontend tools and delivery callbacks require additional integration. Unsupported definition/request options fail explicitly.
 - The account Durable Object centralizes metadata and runs multiple thread turns. Per-user ownership and tenant isolation are not implemented.
 - A persisted alarm invokes the shared runtime recovery scan after object eviction; model calls can repeat after a crash. Tool dispatch is journaled first. If a tool's outcome is ambiguous after interruption, the sandbox is stopped and the turn ends with an error; the command is never automatically replayed. This is not exactly-once execution.
-- SSE sends canonical persisted events; Codex also persists `codex_text_delta` events. The basic harness collects model and shell output. Native process handles are used internally for Codex; arbitrary process and preview/port routing APIs are not exposed yet.
+- SSE sends canonical persisted events plus ephemeral Codex stream chunks. The basic harness collects model and shell output. Process RPC is supported through the existing ExoHarness protocol; preview/port routing is not implemented.
 - Egress follows Exo's disabled, limited-host or unrestricted network policy. Credential bindings retain their own destination restrictions. Interception supports public HTTP/S destinations on ports 80/443; generic TCP/UDP proxying is outside this implementation.
 - Sandboxes checkpoint and stop after five minutes of idle time or an explicit stop. Snapshots preserve files, not running processes; changes since the last checkpoint can be lost if the sandbox fails unexpectedly. Cloudflare currently expires unused snapshots after 30 days and ties them to their source image. Production should add R2 directory backups for longer retention/image migration.
 - The built-in image has Node 24 and a minimal Linux userspace. Other agents need their dependencies installed or a suitable execution image. Node, Python, curl and Git trust variables point to Cloudflare's interception CA.

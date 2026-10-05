@@ -1,10 +1,8 @@
 import { spawnSync } from "node:child_process";
-import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
-const base = process.env.EXO_WORKER_URL;
-assert(base, "EXO_WORKER_URL is required (the Worker origin, without /exo)");
-assert(process.env.EXO_TOKEN, "EXO_TOKEN is required");
+import { base } from "./live-api.mjs";
+
 const result = spawnSync(
   "cargo",
   [

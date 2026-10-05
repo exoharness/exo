@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use executor::{Runtime, managed_agents::service as api, runtime_host::RuntimeHost};
-use exo_managed_agents::http::protocol::*;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -218,15 +217,14 @@ async fn route(
                     let prepared =
                         api::prepare_turn(runtime, agent.as_ref(), conversation.as_ref(), body(r)?)
                             .await?;
-                    let (turn, mut stream) = runtime
-                        .start_turn(
-                            agent.clone(),
-                            conversation.clone(),
-                            prepared.request,
-                            false,
-                            Some(prepared.config),
-                        )
-                        .await?;
+                    let (result, mut stream) = api::submit_turn(
+                        runtime,
+                        agent.clone(),
+                        conversation.clone(),
+                        prepared,
+                        false,
+                    )
+                    .await?;
                     host.spawn(Box::pin(async move {
                         while let Some(event) = stream.next().await {
                             if let Err(error) = event {
@@ -234,12 +232,7 @@ async fn route(
                             }
                         }
                     }));
-                    let mut response = json(SubmitTurnResult {
-                        agent: agent.record().clone(),
-                        thread: conversation.record().clone(),
-                        turn,
-                        harness: prepared.harness,
-                    })?;
+                    let mut response = json(result)?;
                     response.status = 202;
                     return Ok(response);
                 }
@@ -259,15 +252,9 @@ async fn route(
                     ("POST", ["cancel"]) => {
                         let agent = service.agent(turn.agent_id).await?;
                         service.thread(agent.as_ref(), turn.thread_id).await?;
-                        return json(CancelTurnResult {
-                            canceled_active_turn: runtime
-                                .cancel_turn(executor::harness::HarnessTurnKey::new(
-                                    turn.thread_id,
-                                    turn.turn_id,
-                                ))
-                                .await?,
-                            finished_event_id: None,
-                        });
+                        return json(
+                            api::cancel_turn(runtime, turn.thread_id, turn.turn_id).await?,
+                        );
                     }
                     ("POST", ["frontend-tool-result"]) => bail!(api::UnsupportedRequest(
                         "this runtime does not execute frontend tools"
