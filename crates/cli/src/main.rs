@@ -150,7 +150,9 @@ struct FirecrackerArgs {
     /// Permit sudo and other privilege elevation inside Firecracker guests.
     #[arg(
         long = "firecracker-allow-guest-root",
-        env = "EXO_FIRECRACKER_ALLOW_GUEST_ROOT"
+        env = "EXO_FIRECRACKER_ALLOW_GUEST_ROOT",
+        action = clap::ArgAction::Set,
+        default_value_t = FirecrackerConfig::default().allow_guest_root
     )]
     allow_guest_root: bool,
     /// Firecracker VMM executable.

@@ -31,7 +31,7 @@ fn runtime_fingerprint_uses_requested_resources() {
 
 #[test]
 fn guest_root_policy_changes_runtime_and_snapshot_identity() {
-    assert!(!FirecrackerConfig::default().allow_guest_root);
+    assert!(FirecrackerConfig::default().allow_guest_root);
     let restricted = test_runtime();
     let mut host = test_host_runtime();
     host.allow_guest_root = true;

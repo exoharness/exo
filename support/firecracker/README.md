@@ -71,10 +71,12 @@ Most ordinary Linux container images work, subject to these constraints:
   not applied; commands and their environment are supplied through the sandbox
   API instead.
 - Workload processes start as UID/GID 10001. Guest privilege elevation is
-  disabled by default with `no_new_privs` and `nosuid` root mounts. Operators
-  can opt in with `FirecrackerConfig.allow_guest_root = true`, the CLI flag
-  `--firecracker-allow-guest-root`, or `EXO_FIRECRACKER_ALLOW_GUEST_ROOT=true`.
-  The generic Codex image then provides passwordless `sudo` for package
+  enabled by default. Operators can disable it with
+  `FirecrackerConfig.allow_guest_root = false`,
+  `--firecracker-allow-guest-root=false`, or
+  `EXO_FIRECRACKER_ALLOW_GUEST_ROOT=false`. Restricted guests use
+  `no_new_privs` and `nosuid` root mounts.
+  The generic Codex image provides passwordless `sudo` for package
   installation and Docker inside the guest. This setting is part of VM and
   snapshot identity; a privileged VM cannot be adopted or restored by a
   restricted backend. Xattrs and file capabilities are not extracted while
@@ -113,7 +115,7 @@ the pseudo filesystems, configures the guest network, mounts an optional
 workspace, reaps orphaned descendants like an init should, and serves the
 bounded process protocol only to the host vsock CID. Every workload child
 clears supplementary groups and starts as UID/GID 10001. The root filesystem
-permits setuid tools only when guest root is explicitly enabled; repository
+permits setuid tools when guest root is enabled; repository
 resource mounts remain `nosuid,nodev`.
 Cgroup v2 and a writable `/dev/shm` tmpfs are mounted inside the guest.
 Standard `/dev/fd` and stdio links are provided. Boot moves the

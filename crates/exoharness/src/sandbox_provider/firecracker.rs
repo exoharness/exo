@@ -186,8 +186,8 @@ pub struct FirecrackerConfig {
     #[serde(default)]
     pub network_device_policy: FirecrackerNetworkDevicePolicy,
     /// Permit workload processes to elevate to root inside the guest, for
-    /// example through sudo. Disabled by default; workloads start as UID 10001.
-    #[serde(default)]
+    /// example through sudo. Enabled by default; workloads start as UID 10001.
+    #[serde(default = "default_allow_guest_root")]
     pub allow_guest_root: bool,
     pub allowed_local_images: Vec<PathBuf>,
     // Registry entry points the root-run materializer may contact; empty =
@@ -220,13 +220,17 @@ impl Default for FirecrackerConfig {
             dns_server: Ipv4Addr::new(1, 1, 1, 1),
             allowed_egress_cidrs: Vec::new(),
             network_device_policy: FirecrackerNetworkDevicePolicy::default(),
-            allow_guest_root: false,
+            allow_guest_root: default_allow_guest_root(),
             allowed_local_images: vec![PathBuf::from(super::default_firecracker_image())],
             allowed_registries: Vec::new(),
             network_bytes_per_second: DEFAULT_NETWORK_BYTES_PER_SECOND,
             max_machines: None,
         }
     }
+}
+
+fn default_allow_guest_root() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
