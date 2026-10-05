@@ -18,7 +18,11 @@ class FakeCodexProcess extends RpcTarget {
     if (request.method === "initialize") this.emit({id:request.id, result:{}});
     else if (request.method === "thread/start" || request.method === "thread/resume") {
       await this.storage.put("last-method", request.method);
+      this.rawEvents = request.method === "thread/start" && p.experimentalRawEvents;
       this.emit({id:request.id, result:{thread:{id:p.threadId ?? "fixture-thread"}}});
+      if (request.method === "thread/resume") {
+        this.emit({method:"thread/tokenUsage/updated", params:{threadId:p.threadId, turnId:"previous-turn", tokenUsage:{last:{inputTokens:5, outputTokens:2, totalTokens:7}, total:{totalTokens:await this.storage.get("usage-total")}}}});
+      }
     } else if (request.method === "thread/read") this.emit({id:request.id, result:{thread:{id:"fixture-thread", turns:this.turns}}});
     else if (request.method === "turn/start") {
       const id = "turn-" + crypto.randomUUID(), threadId = p.threadId;
@@ -29,6 +33,15 @@ class FakeCodexProcess extends RpcTarget {
       this.turns.push(turn);
       this.emit({id:request.id, result:{turn:{id}}});
       this.emit({method:"item/agentMessage/delta", params:{threadId, turnId:id, itemId:"msg-"+id, delta:"Done."}});
+      let total = await this.storage.get("usage-total") ?? 0;
+      for (const last of [{inputTokens:10, outputTokens:3, totalTokens:13, cachedInputTokens:4}, {inputTokens:5, outputTokens:2, totalTokens:7, cachedInputTokens:1}]) {
+        total += last.totalTokens;
+        const params = {threadId, turnId:id, tokenUsage:{last, total:{totalTokens:total}}};
+        if (this.rawEvents) this.emit({method:"rawResponse/completed", params:{threadId, turnId:id, usage:last}});
+        this.emit({method:"thread/tokenUsage/updated", params});
+        this.emit({method:"thread/tokenUsage/updated", params});
+      }
+      await this.storage.put("usage-total", total);
       this.emit({method:"turn/completed", params:{threadId, turn}});
     } else this.emit({id:request.id, error:{message:"Unexpected method " + request.method}});
   }

@@ -1,23 +1,16 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
 
-const base =
-  process.env.EXO_WORKER_URL ??
-  "https://exo-managed-agents-spike.braintrust.workers.dev";
-const secrets = JSON.parse(
-  await readFile(new URL("../.local/secrets.json", import.meta.url), "utf8"),
-);
-process.loadEnvFile(new URL("../../../.env", import.meta.url));
-assert(
-  process.env.OPENAI_API_KEY,
-  "OPENAI_API_KEY is required in the repository .env",
-);
+const base = process.env.EXO_WORKER_URL;
+assert(base, "EXO_WORKER_URL is required (the Worker origin, without /exo)");
+assert(process.env.EXO_TOKEN, "EXO_TOKEN is required");
+assert(process.env.PROBE_KEY, "PROBE_KEY is required");
+assert(process.env.OPENAI_API_KEY, "OPENAI_API_KEY is required");
 
 async function api(path, method = "GET", body, expected = 200) {
   const response = await fetch(`${base}/exo/${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${secrets.EXO_TOKEN}`,
+      authorization: `Bearer ${process.env.EXO_TOKEN}`,
       "content-type": "application/json",
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -69,10 +62,10 @@ await put(
 );
 const probeId = await put(
   "LIVE_PROBE",
-  secrets.PROBE_KEY,
+  process.env.PROBE_KEY,
   new URL(base).origin,
 );
-const source = `---\nname: Cloudflare Live Test\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: global/OPENAI_API_KEY\n  max_tool_round_trips: 3\n  max_output_tokens: 1024\n---\nUse the shell tool to read /workspace/persisted.txt. Reply with the exact contents. Do not claim you read a file without using shell.`;
+const source = `---\nname: Cloudflare Live Test\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: OPENAI_API_KEY\n  max_tool_round_trips: 3\n  max_output_tokens: 1024\n---\nUse the shell tool to read /workspace/persisted.txt. Reply with the exact contents. Do not claim you read a file without using shell.`;
 const agent = await api("agent", "POST", {
   slug: `cloudflare-live-${Date.now()}`,
   name: "Cloudflare Live Test",
@@ -83,20 +76,13 @@ await api(`agent/${agent.id}/artifact`, "POST", {
 });
 const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
 const path = `agent/${agent.id}/thread/${thread.id}`;
-await writeFile(
-  new URL("../.local/live-target.json", import.meta.url),
-  JSON.stringify(
-    { base, agentId: agent.id, threadId: thread.id, path },
-    null,
-    2,
-  ),
-);
+console.log(`Testing ${path}`);
 const checks = [];
 try {
   await api(`${path}/sandbox/policy`, "PUT", {
     origins: [new URL(base).origin],
     credentials: [
-      { environment_variable: "TEST_API_KEY", credential: "global/LIVE_PROBE" },
+      { environment_variable: "TEST_API_KEY", credential: "LIVE_PROBE" },
     ],
   });
   assert.equal(
@@ -234,20 +220,6 @@ try {
   await api(`vault/${vault.id}/secret/${probeId}`, "DELETE");
   assert.equal(await exec(path, probe), "403 Exo egress denied");
   checks.push("vault revocation applies to an already running sandbox");
-  await writeFile(
-    new URL("../.local/live-results.json", import.meta.url),
-    JSON.stringify(
-      {
-        base,
-        agentId: agent.id,
-        threadId: thread.id,
-        checks,
-        passedAt: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
-  );
   for (const check of checks) console.log(`PASS ${check}`);
 } finally {
   await api(`${path}/sandbox/stop`, "POST", {});

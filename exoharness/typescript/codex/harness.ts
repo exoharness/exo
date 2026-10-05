@@ -60,11 +60,7 @@ import {
   nativeTurnSnapshot,
   type NativeTurnSnapshot,
 } from "./recovery";
-import {
-  accumulateCodexUsage,
-  codexUsageEvent,
-  type CodexTokenUsage,
-} from "./usage";
+import { CodexUsageAccumulator, codexUsageEvent } from "./usage";
 
 import { authorizeMcpElicitation } from "./mcp-approval";
 
@@ -85,7 +81,7 @@ export function createCodexHarness(
   interface CodexTurnTraceState {
     finalText: string;
     ttftMs: number | null;
-    tokenUsage: CodexTokenUsage | null;
+    tokenUsage: CodexUsageAccumulator;
     promptMessages: Message[];
     startedAt: number;
     sawTextDelta: boolean;
@@ -327,10 +323,6 @@ export function createCodexHarness(
       const scope = this.current;
       if (!scope) return;
       scope.protocolLog.record(entry);
-      scope.traceState.tokenUsage = accumulateCodexUsage(
-        scope.traceState.tokenUsage,
-        entry,
-      );
       if (entry.direction !== "server_to_client") return;
       const message = asRecord(entry.message);
       if (message.method !== "item/started") return;
@@ -411,7 +403,7 @@ export function createCodexHarness(
     const traceState: CodexTurnTraceState = {
       finalText: "",
       ttftMs: null,
-      tokenUsage: null,
+      tokenUsage: new CodexUsageAccumulator(),
       promptMessages: [],
       startedAt: Date.now(),
       sawTextDelta: false,
@@ -705,11 +697,11 @@ export function createCodexHarness(
         );
       }
       try {
-        if (traceState.tokenUsage) {
+        if (traceState.tokenUsage.value) {
           await appendEvents(context, [
             codexUsageEvent(
               modelBinding.model,
-              traceState.tokenUsage,
+              traceState.tokenUsage.value,
               getTable(),
             ),
           ]);
@@ -807,7 +799,7 @@ export function createCodexHarness(
     traceState: CodexTurnTraceState,
   ): Record<string, number> {
     const metrics: Record<string, number> = {};
-    const usage = traceState.tokenUsage;
+    const usage = traceState.tokenUsage.value;
     if (usage?.inputTokens !== undefined) {
       metrics.prompt_tokens = usage.inputTokens;
     }
@@ -1135,6 +1127,7 @@ export function createCodexHarness(
         );
         return "running";
       case "thread/tokenUsage/updated":
+        traceState.tokenUsage.record(notification.params);
         await appendCustomEvent(turn, "codex_token_usage", notification.params);
         return "running";
       case "turn/completed": {

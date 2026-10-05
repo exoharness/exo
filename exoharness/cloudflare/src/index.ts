@@ -13,7 +13,11 @@ declare global {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
     const url = new URL(request.url);
     // Optional live-test target, using a synthetic secret rather than a real API.
     if (url.pathname === "/_probe" && env.PROBE_KEY)
@@ -26,13 +30,16 @@ export default {
           request.headers.get("authorization") ?? ""
         ).includes("exo_egress_"),
       });
-    if (
-      !env.EXO_TOKEN ||
-      request.headers.get("authorization") !== `Bearer ${env.EXO_TOKEN}`
-    )
-      return new Response("Unauthorized", { status: 401 });
     if (!url.pathname.startsWith("/exo/"))
       return new Response("Not found", { status: 404 });
-    return env.PROVIDERS.getByName(env.ACCOUNT_ID).fetch(request);
+    const provider = env.PROVIDERS.getByName(env.ACCOUNT_ID);
+    if (env.ACCESS_AUD !== undefined) {
+      if (!env.ACCESS_AUD || ctx.access?.aud !== env.ACCESS_AUD)
+        return new Response("Cloudflare Access required", { status: 403 });
+      // Access context does not propagate to Durable Objects. Use the trusted
+      // binding after verification, never a caller-supplied identity header.
+      return provider.handleRequest(request);
+    }
+    return provider.fetch(request);
   },
 } satisfies ExportedHandler<Env>;

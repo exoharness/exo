@@ -31,7 +31,7 @@ export class FakeSandbox extends DurableObject {
 }
 export default { fetch() { return new Response("fixture"); } };`;
 
-async function options() {
+async function options({ accessAud, access, staticToken = token } = {}) {
   const modules = {
     "index.js": {
       type: "esm",
@@ -119,7 +119,12 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
             },
             ARTIFACTS: { type: "r2", name: "artifacts" },
             ACCOUNT_ID: { type: "json", value: "test-account" },
-            EXO_TOKEN: { type: "json", value: token },
+            ...(staticToken === null
+              ? {}
+              : { EXO_TOKEN: { type: "json", value: staticToken } }),
+            ...(accessAud === undefined
+              ? {}
+              : { ACCESS_AUD: { type: "json", value: accessAud } }),
             VAULT_KEY: { type: "json", value: "ab".repeat(32) },
           },
           exports: {
@@ -127,6 +132,7 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
           },
         },
         dev: {
+          access,
           outboundService: {
             type: "fetcher",
             handler: async (request) => {
@@ -147,9 +153,12 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
               );
               modelRequests += 1;
               const body = await request.json();
-              const hasResult = body.input.some(
-                (item) => item.type === "function_call_output",
+              const lastUser = body.input.findLastIndex(
+                (item) => item.role === "user",
               );
+              const hasResult = body.input
+                .slice(lastUser + 1)
+                .some((item) => item.type === "function_call_output");
               return Response.json({
                 id: "resp_test",
                 object: "response",
@@ -232,7 +241,7 @@ const policy = (origin) => ({
   injection_location: { header: true },
 });
 const definition = (ask) =>
-  `---\nname: Test Agent\nharness: basic\nconfig:\n  model: test-model\n  base_url: https://model.example/v1\n  credential: global/OPENAI_API_KEY\npermission_policy: {type: ${ask ? "always_ask" : "always_allow"}}\n---\nUse shell to print Linux, then finish.`;
+  `---\nname: Test Agent\nharness: basic\nconfig:\n  model: test-model\n  base_url: https://model.example/v1\n  credential: OPENAI_API_KEY\npermission_policy: {type: ${ask ? "always_ask" : "always_allow"}}\n---\nUse shell to print Linux, then finish.`;
 async function create(ask = false, harness = "basic") {
   const agent = await api("agent", "POST", {
     slug: `agent-${crypto.randomUUID()}`,
@@ -281,7 +290,126 @@ test("bearer authentication protects every Exo route", async () => {
     (await mf.dispatchFetch("https://exo.test/exo/identity")).status,
     401,
   );
+  for (const authorization of [
+    "Bearer wrong-token",
+    "Basic test-operator-token",
+    "Bearer ",
+  ])
+    assert.equal(
+      (
+        await mf.dispatchFetch("https://exo.test/exo/identity", {
+          headers: { authorization },
+        })
+      ).status,
+      401,
+    );
   assert.deepEqual(await api("identity"), { account_id: "test-account" });
+});
+
+test("Access requires the configured platform audience and ignores identity headers", async () => {
+  for (const access of [undefined, { aud: "other-app" }]) {
+    const worker = new Miniflare(
+      await options({ accessAud: "exo-app", access }),
+    );
+    try {
+      for (const path of ["identity", "agent", "request"]) {
+        const response = await worker.dispatchFetch(
+          `https://exo.test/exo/${path}`,
+          {
+            headers: {
+              authorization: `Bearer ${token}`,
+              "Cf-Access-Jwt-Assertion": "forged-jwt",
+              "Cf-Access-Authenticated-User-Email": "admin@example.com",
+            },
+          },
+        );
+        assert.equal(response.status, 403);
+      }
+      // The static token is configured and valid, but cannot bypass Access
+      // through a request forwarded directly to the Durable Object.
+      const { PROVIDERS } = await worker.getBindings("exo");
+      const direct = await PROVIDERS.getByName("test-account").fetch(
+        new Request("https://exo.test/exo/identity", {
+          headers: { authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.equal(direct.status, 401);
+    } finally {
+      await worker.dispose();
+    }
+  }
+});
+
+test("missing authentication configuration fails closed", async () => {
+  const worker = new Miniflare(await options({ staticToken: null }));
+  try {
+    assert.equal(
+      (await worker.dispatchFetch("https://exo.test/exo/identity")).status,
+      401,
+    );
+  } finally {
+    await worker.dispose();
+  }
+});
+
+test("Access forwards HTTP bodies and SSE over the trusted Durable Object binding", async () => {
+  const worker = new Miniflare(
+    await options({
+      accessAud: "exo-app",
+      access: { aud: "exo-app", identity: { email: "operator@example.com" } },
+      staticToken: null,
+    }),
+  );
+  try {
+    const identity = await worker.dispatchFetch(
+      "https://exo.test/exo/identity",
+    );
+    assert.equal(identity.status, 200);
+    assert.deepEqual(await identity.json(), { account_id: "test-account" });
+    const created = await worker.dispatchFetch("https://exo.test/exo/agent", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ slug: "access-agent", name: "Access agent" }),
+    });
+    assert.equal(created.status, 200);
+    const agent = await created.json();
+    const listed = await worker.dispatchFetch("https://exo.test/exo/agent");
+    assert.equal(listed.status, 200);
+    assert.equal((await listed.json()).agents[0].id, agent.id);
+    const artifact = await worker.dispatchFetch(
+      `https://exo.test/exo/agent/${agent.id}/artifact`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          path: "managed-agents/agent.md",
+          contents: [...new TextEncoder().encode(definition(false))],
+        }),
+      },
+    );
+    assert.equal(artifact.status, 200);
+    const opened = await worker.dispatchFetch(
+      `https://exo.test/exo/agent/${agent.id}/thread`,
+      { method: "POST", body: "{}" },
+    );
+    assert.equal(opened.status, 200);
+    const { thread } = await opened.json();
+    const stream = await worker.dispatchFetch(
+      `https://exo.test/exo/agent/${agent.id}/thread/${thread.id}/event/watch`,
+    );
+    assert.equal(stream.status, 200);
+    assert.equal(stream.headers.get("content-type"), "text/event-stream");
+    const reader = stream.body.getReader();
+    try {
+      const { value, done } = await reader.read();
+      assert.equal(done, false);
+      assert.match(new TextDecoder().decode(value), /event: exo_event/);
+    } finally {
+      await reader.cancel();
+    }
+  } finally {
+    await worker.dispose();
+  }
 });
 
 test("managed basic turn calls the model, executes one tool and persists canonical events", async () => {
@@ -415,9 +543,7 @@ test("proxy replaces only scoped placeholders, checks destination and returns re
       "http://echo.example",
       "https://other.example",
     ],
-    credentials: [
-      { environment_variable: "PROBE_KEY", credential: "global/PROBE" },
-    ],
+    credentials: [{ environment_variable: "PROBE_KEY", credential: "PROBE" }],
   });
   const configured = await api(`${path}/sandbox/policy`);
   const placeholder = configured.credentials[0].placeholder;
@@ -532,17 +658,27 @@ test("pending approvals survive eviction; an ambiguous tool execution is ended w
   const storage = await mf.unsafeGetDurableObjectStorage("exo", "ExoProvider", {
     name: "test-account",
   });
-  const [{ json }] = await storage.exec(
-    "SELECT json FROM state WHERE key = ?",
-    `job/${thread.id}`,
+  const requested = events.find(
+    (event) => event.data.event_type === "agent_runtime.approval_requested",
   );
-  const job = JSON.parse(json);
-  job.phase = "executing";
+  // An unresolved tool call without a pending approval has an unknown outcome.
+  // Remove only the pending-approval marker from the persisted canonical log.
+  requested.data.event_type = "fixture.removed_approval";
   await storage.exec(
     "UPDATE state SET json = ? WHERE key = ?",
-    JSON.stringify(job),
-    `job/${thread.id}`,
+    JSON.stringify({
+      id: requested.id,
+      conversationId: thread.id,
+      sessionId: requested.session_id,
+      turnId: requested.turn_id,
+      createdAt: requested.created_at,
+      data: requested.data,
+    }),
+    `event/${thread.id}/${requested.id}`,
   );
+  await mf.dispose();
+  mf = new Miniflare(await options());
+  await mf.ready;
   const { PROVIDERS, SANDBOXES } = await mf.getBindings("exo");
   await PROVIDERS.getByName("test-account").recoverForTest();
   const recovered = (await api(`${path}/event`)).events;
@@ -550,45 +686,55 @@ test("pending approvals survive eviction; an ambiguous tool execution is ended w
     recovered.some(
       (event) =>
         event.data.type === "error" &&
-        event.data.message.includes("outcome is unknown"),
+        event.data.message.includes("unresolved tool call"),
     ),
   );
   assert(recovered.some((event) => event.data.type === "turn_ended"));
   assert.equal(await SANDBOXES.getByName(thread.id).count(), 0);
 });
 
-test("concurrent submissions admit one active turn and cancellation prevents pending tools", async () => {
+test("shared runtime serializes concurrent submissions and cancellation prevents pending tools", async () => {
   const { thread, path } = await create(true);
-  const responses = await Promise.all(
-    [1, 2].map(() =>
-      mf.dispatchFetch(`https://exo.test/exo/${path}/turn`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          input: { role: "user", content: "Print Linux." },
-        }),
-      }),
-    ),
+  const first = await api(
+    `${path}/turn`,
+    "POST",
+    { input: { role: "user", content: "Print Linux." } },
+    202,
   );
-  assert.deepEqual(
-    responses.map((response) => response.status).sort(),
-    [202, 400],
+  const second = api(
+    `${path}/turn`,
+    "POST",
+    { input: { role: "user", content: "Print Linux again." } },
+    202,
   );
-  const submitted = await responses
-    .find((response) => response.status === 202)
-    .json();
   await waitEvents(path, (events) =>
     events.some(
       (event) => event.data.event_type === "agent_runtime.approval_requested",
     ),
   );
   assert.equal(
+    (await api(`${path}/turn/${first.turn.id}/cancel`, "POST", {}))
+      .canceled_active_turn,
+    true,
+  );
+  const submitted = await second;
+  await waitEvents(path, (events) =>
+    events.some(
+      (event) =>
+        event.turn_id === submitted.turn.id &&
+        event.data.event_type === "agent_runtime.approval_requested",
+    ),
+  );
+  assert.equal(
     (await api(`${path}/turn/${submitted.turn.id}/cancel`, "POST", {}))
       .canceled_active_turn,
     true,
+  );
+  await waitEvents(path, (events) =>
+    events.some(
+      (event) =>
+        event.turn_id === submitted.turn.id && event.data.type === "turn_ended",
+    ),
   );
   assert.deepEqual(await api(`${path}/turn/${submitted.turn.id}`), {
     active: false,
@@ -598,7 +744,7 @@ test("concurrent submissions admit one active turn and cancellation prevents pen
   const events = (await api(`${path}/event`)).events;
   assert.equal(
     events.filter((event) => event.data.type === "turn_started").length,
-    1,
+    2,
   );
 });
 
@@ -734,6 +880,21 @@ test("Codex uses JSONL over RPC streams, persists tools and resumes the native t
       event.data.event_type === "codex_turn_started",
   );
   assert.equal(started.data.payload.hydrated_from, "warm_codex_thread");
+  for (const id of [first.turn.id, second.turn.id]) {
+    const usage = finished.filter(
+      (event) =>
+        event.turn_id === id &&
+        event.data.type === "messages" &&
+        event.data.usage,
+    );
+    assert.equal(usage.length, 1);
+    assert.deepEqual(usage[0].data.usage, {
+      model: "test-model",
+      prompt_tokens: 15,
+      completion_tokens: 5,
+      prompt_cached_tokens: 5,
+    });
+  }
 });
 
 for (const name of Object.keys(harnessContracts)) {

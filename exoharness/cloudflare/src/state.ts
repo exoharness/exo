@@ -119,6 +119,7 @@ export class CloudflareExoHarness implements ExoHarness {
   readonly store: StateStore;
   readonly bucket: R2Bucket;
   readonly vaultKey: string;
+  readonly onEvents: (threadId: string) => void;
   private readonly activeContext?: ExoHarnessCurrent & { turn: CloudflareTurn };
 
   constructor(
@@ -126,11 +127,13 @@ export class CloudflareExoHarness implements ExoHarness {
     bucket: R2Bucket,
     vaultKey: string,
     current?: ExoHarnessCurrent & { turn: CloudflareTurn },
+    onEvents: (threadId: string) => void = () => {},
   ) {
     this.store = store;
     this.bucket = bucket;
     this.vaultKey = vaultKey;
     this.activeContext = current;
+    this.onEvents = onEvents;
   }
 
   get current(): ExoHarnessCurrent & { turn: CloudflareTurn } {
@@ -222,14 +225,22 @@ export class CloudflareExoHarness implements ExoHarness {
     threadId: string,
     input: EventData[],
     sessionId?: string,
+    initialEvents: EventData[] = [],
   ): Promise<Turn> {
-    return this.beginTurnRecord(agentId, threadId, input, sessionId);
+    return this.beginTurnRecord(
+      agentId,
+      threadId,
+      input,
+      sessionId,
+      initialEvents,
+    );
   }
   beginTurnRecord(
     agentId: string,
     threadId: string,
     input: EventData[],
     sessionId?: string,
+    initialEvents: EventData[] = [],
   ): CloudflareTurn {
     required(
       this.store.get<AgentRecord>(`agent/${agentId}`),
@@ -256,6 +267,7 @@ export class CloudflareExoHarness implements ExoHarness {
       data: [
         ...(sessionId === undefined ? [{ type: "session_started" }] : []),
         { type: "turn_started" },
+        ...initialEvents,
         ...input,
       ],
     });
@@ -278,11 +290,17 @@ export class CloudflareExoHarness implements ExoHarness {
     );
     if (saved.sessionId !== record.sessionId)
       throw new Error("turn session mismatch");
-    return new CloudflareExoHarness(this.store, this.bucket, this.vaultKey, {
-      agent,
-      conversation,
-      turn: new CloudflareTurn(this, agentId, threadId, saved),
-    });
+    return new CloudflareExoHarness(
+      this.store,
+      this.bucket,
+      this.vaultKey,
+      {
+        agent,
+        conversation,
+        turn: new CloudflareTurn(this, agentId, threadId, saved),
+      },
+      this.onEvents,
+    );
   }
 }
 
@@ -590,6 +608,7 @@ class CloudflareConversation extends ArtifactStore implements Conversation {
       ...record,
       latestEventId,
     });
+    this.harness.onEvents(this.id);
     return { eventIds: ids, latestEventId };
   }
   async fork(request: ForkConversationRequest = {}): Promise<Conversation> {
@@ -673,6 +692,11 @@ export class CloudflareTurn extends ArtifactStore implements Turn {
     return Promise.resolve(this.appendEvents(data));
   }
   appendEvents(data: EventData[]): AddEventsResult {
+    if (
+      this.harness.store.get<TurnRecord>(`active/${this.conversationId}`)
+        ?.id !== this.turnId
+    )
+      throw new Error("turn is not active");
     return new CloudflareConversation(
       this.harness,
       this.agentId,

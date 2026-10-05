@@ -14,6 +14,7 @@ mod harness_events;
 mod harness_executor;
 mod harness_helpers;
 mod harness_types;
+pub mod http_auth;
 pub mod managed_agents;
 mod mcp_types;
 mod message_history;
@@ -51,7 +52,7 @@ pub use harness_types::{CreateAgentRequest, CreateConversationRequest};
 pub use mcp_types::{NativeMcpServer, NativeMcpTool};
 pub use provider::{LocalProvider, Provider, ProviderTurn};
 
-pub(crate) use basic::BasicExecutor;
+pub use basic::BasicExecutor;
 
 pub use exoharness::EgressPolicy;
 

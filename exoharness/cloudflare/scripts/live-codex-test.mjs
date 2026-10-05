@@ -1,17 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile, writeFile } from "node:fs/promises";
 
-const base =
-  process.env.EXO_WORKER_URL ??
-  "https://exo-managed-agents-spike.braintrust.workers.dev";
-const secrets = JSON.parse(
-  await readFile(new URL("../.local/secrets.json", import.meta.url), "utf8"),
-);
+const base = process.env.EXO_WORKER_URL;
+assert(base, "EXO_WORKER_URL is required (the Worker origin, without /exo)");
+assert(process.env.EXO_TOKEN, "EXO_TOKEN is required");
 async function api(path, method = "GET", body, expected = 200) {
   const response = await fetch(`${base}/exo/${path}`, {
     method,
     headers: {
-      authorization: `Bearer ${secrets.EXO_TOKEN}`,
+      authorization: `Bearer ${process.env.EXO_TOKEN}`,
       "content-type": "application/json",
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -28,7 +24,7 @@ async function exec(path, source) {
   assert.equal(result.exitCode, 0, result.stderr);
   return result.stdout.trim();
 }
-const source = `---\nname: Cloudflare Codex Test\nharness: codex\nconfig:\n  model: ${process.env.EXO_CODEX_MODEL ?? "gpt-5.4"}\n  credential: global/OPENAI_API_KEY\n---\nYou are a coding agent. Work in /workspace. Implement the requested changes and run node tests. Keep the final answer concise.`;
+const source = `---\nname: Cloudflare Codex Test\nharness: codex\nconfig:\n  model: ${process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol"}\n  credential: OPENAI_API_KEY\n---\nYou are a coding agent. Work in /workspace. Implement the requested changes and run node tests. Keep the final answer concise.`;
 const agent = await api("agent", "POST", {
   slug: `cloudflare-codex-${Date.now()}`,
   name: "Cloudflare Codex Test",
@@ -39,14 +35,6 @@ await api(`agent/${agent.id}/artifact`, "POST", {
 });
 const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
 const path = `agent/${agent.id}/thread/${thread.id}`;
-await writeFile(
-  new URL("../.local/codex-target.json", import.meta.url),
-  JSON.stringify(
-    { base, agentId: agent.id, threadId: thread.id, path },
-    null,
-    2,
-  ),
-);
 console.log(`Testing ${path}`);
 const checks = [];
 async function turn(content) {
@@ -67,10 +55,6 @@ async function turn(content) {
       console.log(`Waiting for Codex (${i}s, ${events.length} events)`);
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
-  await writeFile(
-    new URL(`../.local/codex-${submitted.turn.id}.json`, import.meta.url),
-    JSON.stringify(events, null, 2),
-  );
   assert(
     events.some((event) => event.data.type === "turn_ended"),
     "Codex turn did not finish",
@@ -94,6 +78,36 @@ async function turn(content) {
     "Codex did not run a successful shell command",
   );
   assert(events.some((event) => event.data.event_type === "codex_text_delta"));
+  const usage = events
+    .filter(
+      (event) =>
+        event.turn_id === submitted.turn.id && event.data.type === "messages",
+    )
+    .map((event) => event.data.usage)
+    .filter(Boolean);
+  assert.equal(usage.length, 1, "expected one canonical usage event per turn");
+  assert(usage[0].prompt_tokens > 0, "Codex input token counts are missing");
+  assert(
+    usage[0].completion_tokens > 0,
+    "Codex output token counts are missing",
+  );
+  assert(Number.isFinite(usage[0].cost_usd), "Codex cost is missing");
+  const markers = new Map(
+    events.map((event) => [event.data.event_type ?? event.data.type, event]),
+  );
+  console.log(
+    JSON.stringify({
+      turn: submitted.turn.id,
+      duration_ms:
+        Date.parse(markers.get("turn_ended").created_at) -
+        Date.parse(markers.get("turn_started").created_at),
+      shutdown_ms: markers.get("codex_process_closed")?.data.payload
+        .duration_ms,
+      snapshot_ms: markers.get("codex_snapshot_completed")?.data.payload
+        .duration_ms,
+      usage: usage[0],
+    }),
+  );
   return {
     events,
     nativeThread: started.data.payload.codex_thread_id,
@@ -113,7 +127,7 @@ try {
     "0 6 0",
   );
   checks.push(
-    "real Codex app-server coding turn, file edits, native shell execution, canonical history and streamed text",
+    "real Codex app-server coding turn, file edits, native shell execution, canonical history, streamed text and token/cost usage",
   );
   assert.equal(
     await exec(
@@ -156,22 +170,7 @@ try {
   assert.equal(tests.exitCode, 0, tests.stderr);
   assert.match(tests.stdout, /tests 4/);
   checks.push(
-    "automatic snapshot restores workspace and native Codex history after sandbox destruction; follow-up changes pass four tests",
-  );
-  await writeFile(
-    new URL("../.local/codex-results.json", import.meta.url),
-    JSON.stringify(
-      {
-        base,
-        agentId: agent.id,
-        threadId: thread.id,
-        nativeThread: first.nativeThread,
-        checks,
-        passedAt: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
+    "automatic snapshot restores workspace and native Codex history after sandbox destruction; resumed usage is reported and follow-up changes pass four tests",
   );
   for (const check of checks) console.log(`PASS ${check}`);
 } finally {

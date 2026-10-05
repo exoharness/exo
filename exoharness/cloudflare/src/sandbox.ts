@@ -68,6 +68,7 @@ export class CloudflareProcess extends RpcTarget {
   }
   async close(): Promise<void> {
     await this.closeStdin();
+    this.process.kill(15);
     const timer = setTimeout(() => this.process.kill(9), 5000);
     try {
       await this.process.exitCode;

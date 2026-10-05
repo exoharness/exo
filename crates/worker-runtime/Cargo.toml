@@ -1,0 +1,24 @@
+[package]
+name = "exo-worker-runtime"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+cost = { path = "../cost" }
+executor = { path = "../executor", default-features = false }
+exo-managed-agents = { path = "../managed-agents", default-features = false }
+exoharness = { path = "../exoharness", features = ["rpc-client"] }
+futures.workspace = true
+lingua.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+tracing.workspace = true
+wasm-bindgen = "=0.2.115"

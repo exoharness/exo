@@ -6,7 +6,9 @@ export interface Env {
   SANDBOXES: DurableObjectNamespace<ExoSandbox>;
   ARTIFACTS: R2Bucket;
   ACCOUNT_ID: string;
-  EXO_TOKEN: string;
+  EXO_TOKEN?: string;
+  // Set to require the platform-verified Cloudflare Access application audience.
+  ACCESS_AUD?: string;
   VAULT_KEY: string;
   // Optional test receiver: responds with booleans, never reflects the key.
   PROBE_KEY?: string;

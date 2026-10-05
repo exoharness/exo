@@ -54,7 +54,7 @@ fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
 pub struct RuntimeHttpService {
     runtime: Arc<Runtime>,
     agent_id: Option<AgentId>,
-    authorization: Option<HeaderValue>,
+    bearer_token: Option<String>,
     progress: broadcast::Sender<Event>,
     definition_updates: Arc<tokio::sync::Mutex<()>>,
     auth: Option<Arc<crate::remote::AuthServer>>,
@@ -77,8 +77,10 @@ impl RuntimeHttpService {
             account_id: "local".into(),
             session: None,
             agent_id: None,
-            authorization: token
-                .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
+            bearer_token: token
+                .map(|token| {
+                    HeaderValue::from_str(&format!("Bearer {token}")).map(|_| token.to_owned())
+                })
                 .transpose()?,
             progress: broadcast::channel(1024).0,
             definition_updates: Default::default(),
@@ -308,8 +310,13 @@ async fn authorize(
     let service = req
         .app_data::<web::Data<Arc<RuntimeHttpService>>>()
         .ok_or_else(|| ErrorInternalServerError("runtime service not configured"))?;
-    if let Some(authorization) = &service.authorization
-        && req.headers().get(AUTHORIZATION) != Some(authorization)
+    if let Some(token) = &service.bearer_token
+        && !crate::http_auth::bearer_token_matches(
+            token,
+            req.headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+        )
     {
         return Err(ErrorUnauthorized("runtime bearer token required"));
     }
