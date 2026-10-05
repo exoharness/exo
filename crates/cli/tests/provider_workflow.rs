@@ -1650,13 +1650,30 @@ async fn provider_selection_is_visible_and_clearable() -> Result<()> {
     let current = success(f.output(&["provider"], Some(&nested), None).await?)?;
     assert!(current.contains("provider: local\nselection: directory "));
     assert!(current.contains(&directory.display().to_string()));
-    f.cli(&["provider", "clear"]).await?;
+    let cleared = success(
+        f.output(&["provider", "clear"], Some(&nested), None)
+            .await?,
+    )?;
+    assert!(cleared.contains("provider: remote\nselection: global"));
+    assert!(cleared.contains("\"workspace\":\"test\""));
+    success(
+        f.output(
+            &["provider", "switch", "local", "--local"],
+            Some(&directory),
+            None,
+        )
+        .await?,
+    )?;
+    success(
+        f.output(&["provider", "clear", "--global"], Some(&nested), None)
+            .await?,
+    )?;
     assert_eq!(
         success(f.output(&["provider"], Some(&nested), None).await?)?,
         current
     );
     success(
-        f.output(&["provider", "clear", "--local"], Some(&directory), None)
+        f.output(&["provider", "clear", "--local"], Some(&nested), None)
             .await?,
     )?;
     assert!(

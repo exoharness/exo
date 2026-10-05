@@ -174,11 +174,14 @@ pub enum ProviderCommands {
     Get {
         name: Option<String>,
     },
-    /// Clear the global provider selection without deleting profiles or credentials.
+    /// Clear the active directory selection, or the global selection when none applies.
     Clear {
-        /// Clear only the selection saved in this directory.
-        #[arg(long)]
+        /// Clear the directory selection that applies here without changing the global selection.
+        #[arg(long, conflicts_with = "global")]
         local: bool,
+        /// Clear only the global selection without changing directory selections.
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
     },
     Create(ConfigureArgs),
     Update(ConfigureArgs),
@@ -719,13 +722,19 @@ pub async fn run(command: Option<&ProviderCommands>, store: &mut Store) -> Resul
     let command = command.unwrap_or(&current);
     match command {
         ProviderCommands::Get { name: None } => print_selection(store)?,
-        ProviderCommands::Clear { local } => {
-            let directory = local.then(std::env::current_dir).transpose()?;
+        ProviderCommands::Clear { local, global } => {
+            let cwd = std::env::current_dir()?;
             store.update(|config| {
-                if let Some(directory) = &directory {
+                let directory = (!global)
+                    .then(|| {
+                        cwd.ancestors()
+                            .find(|path| config.directory_defaults.contains_key(*path))
+                    })
+                    .flatten();
+                if let Some(directory) = directory {
                     config.directory_defaults.remove(directory);
                     config.directory_contexts.remove(directory);
-                } else {
+                } else if !local {
                     config.default = None;
                     config.default_context = None;
                 }
