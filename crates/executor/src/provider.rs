@@ -7,9 +7,10 @@ use std::{
 use async_trait::async_trait;
 use exo_managed_agents::AgentBackend;
 use exoharness::{AgentHandle, ExoHarness, Result, ThreadHandle, TurnRecord};
+use lingua::Message;
 use tokio::sync::oneshot;
 
-use crate::harness::{Harness, HarnessCommand};
+use crate::harness::{Harness, HarnessCommand, HarnessTurnKey};
 use crate::harness_adapter::{ExecutorHarness, ExecutorTurn};
 use crate::harness_executor::{HarnessExecutor, RecoveryRuntimeResolver};
 use crate::{
@@ -264,6 +265,10 @@ impl Harness<ProviderTurn> for LocalProvider {
             result?;
         }
         self.harness.shutdown().await
+    }
+
+    async fn inject(&self, key: HarnessTurnKey, message: Message) -> Result<()> {
+        self.harness.inject(key, message).await
     }
 
     async fn submit(&self, command: HarnessCommand<ProviderTurn>) -> Result<()> {

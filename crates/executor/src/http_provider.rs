@@ -13,11 +13,12 @@ use exoharness::{
     AgentId, EventId, EventStream, ExoHarness, ExoHttpTransport, HttpExoHarness, ThreadId,
 };
 use futures::StreamExt;
+use lingua::Message;
 use url::Url;
 
 use crate::{
     Provider, ProviderTurn,
-    harness::{Harness, HarnessCommand},
+    harness::{Harness, HarnessCommand, HarnessTurnKey},
 };
 
 pub struct HttpProvider {
@@ -181,6 +182,10 @@ impl Harness<ProviderTurn> for HttpProvider {
             .expect("HTTP watchers poisoned")
             .abort_all();
         Ok(())
+    }
+
+    async fn inject(&self, _key: HarnessTurnKey, _message: Message) -> Result<()> {
+        bail!("HTTP providers do not support message injection")
     }
 
     async fn submit(&self, command: HarnessCommand<ProviderTurn>) -> Result<()> {

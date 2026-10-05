@@ -5,6 +5,7 @@ use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use exoharness::{AgentHandle, ConversationHandle, TurnHandle};
 use futures::FutureExt;
+use lingua::Message;
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::execution_tracing::TurnExecutionTrace;
@@ -114,6 +115,10 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
             idle.await;
         }
         self.executor.shutdown().await
+    }
+
+    async fn inject(&self, _key: HarnessTurnKey, _message: Message) -> Result<()> {
+        bail!("{} harness does not support message injection", self.name())
     }
 
     async fn submit(&self, command: HarnessCommand<ExecutorTurn>) -> Result<()> {

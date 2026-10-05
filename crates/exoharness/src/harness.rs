@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::{Error, Event, EventData, Result, ThreadId, TurnId};
 use async_trait::async_trait;
+use lingua::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HarnessTurnKey {
@@ -79,6 +80,9 @@ pub trait Harness<T: Send>: Send + Sync {
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Adds a message to the turn's model input without starting a new turn.
+    async fn inject(&self, key: HarnessTurnKey, message: Message) -> Result<()>;
 
     async fn submit(&self, command: HarnessCommand<T>) -> Result<()>
     where
