@@ -61,9 +61,9 @@ import {
   type NativeTurnSnapshot,
 } from "./recovery";
 import {
-  accumulateCodexUsage,
+  CodexUsageAccumulator,
   codexUsageEvent,
-  type CodexTokenUsage,
+  type CodexTokenUsageUpdate,
 } from "./usage";
 
 import { authorizeMcpElicitation } from "./mcp-approval";
@@ -77,7 +77,7 @@ const CODEX_WARM_SESSION_EVENT = "codex_warm_session";
 interface CodexTurnTraceState {
   finalText: string;
   ttftMs: number | null;
-  tokenUsage: CodexTokenUsage | null;
+  tokenUsage: CodexUsageAccumulator;
   promptMessages: Message[];
   startedAt: number;
   sawTextDelta: boolean;
@@ -256,7 +256,7 @@ class CodexWarmSession {
     const pendingProtocol: CodexProtocolLogEntry[] = [];
     const process = await scope.context.startSandboxProcess({
       command: codexSandboxCommand(scope.context, version),
-      env: codexSandboxEnv(),
+      env: codexSandboxEnv(scope.context),
       reuseKey: sessionKey,
     });
     const warmRecord = await latestCodexWarmSession(
@@ -307,18 +307,14 @@ class CodexWarmSession {
     }
   }
 
-  close(): void {
-    this.server.close();
+  async close(): Promise<void> {
+    await this.server.close();
   }
 
   private recordProtocol(entry: CodexProtocolLogEntry): void {
     const scope = this.current;
     if (!scope) return;
     scope.protocolLog.record(entry);
-    scope.traceState.tokenUsage = accumulateCodexUsage(
-      scope.traceState.tokenUsage,
-      entry,
-    );
     if (entry.direction !== "server_to_client") return;
     const message = asRecord(entry.message);
     if (message.method !== "item/started") return;
@@ -417,7 +413,7 @@ async function runCodexTurn(
   const traceState: CodexTurnTraceState = {
     finalText: "",
     ttftMs: null,
-    tokenUsage: null,
+    tokenUsage: new CodexUsageAccumulator(),
     promptMessages: [],
     startedAt: Date.now(),
     sawTextDelta: false,
@@ -441,8 +437,10 @@ async function runCodexTurn(
       warm_session_key: sessionKey,
     },
     () =>
-      codexSessions.get(sessionKey, () =>
-        CodexWarmSession.start(scope, sessionKey, version),
+      codexSessions.get(
+        sessionKey,
+        () => CodexWarmSession.start(scope, sessionKey, version),
+        (session) => session.server.isRunning,
       ),
   );
   session.setTurnScope(scope);
@@ -692,18 +690,18 @@ async function runCodexTurn(
     await protocolLog.flush();
     return null;
   } catch (error) {
-    await codexSessions.delete(sessionKey, (warmSession) => {
-      warmSession.close();
-    });
+    await codexSessions.delete(sessionKey, (warmSession) =>
+      warmSession.close(),
+    );
     throw error;
   } finally {
     session.clearTurnScope(scope);
     try {
-      if (traceState.tokenUsage) {
+      if (traceState.tokenUsage.value) {
         await appendEvents(context, [
           codexUsageEvent(
             modelBinding.model,
-            traceState.tokenUsage,
+            traceState.tokenUsage.value,
             getTable(),
           ),
         ]);
@@ -801,7 +799,7 @@ function codexUsageMetrics(
   traceState: CodexTurnTraceState,
 ): Record<string, number> {
   const metrics: Record<string, number> = {};
-  const usage = traceState.tokenUsage;
+  const usage = traceState.tokenUsage.value;
   if (usage?.inputTokens !== undefined) {
     metrics.prompt_tokens = usage.inputTokens;
   }
@@ -1110,6 +1108,9 @@ async function handleCodexNotification(
       await appendCustomEvent(turn, "codex_diff_updated", notification.params);
       return "running";
     case "thread/tokenUsage/updated":
+      traceState.tokenUsage.record(
+        notification.params as CodexTokenUsageUpdate | null,
+      );
       await appendCustomEvent(turn, "codex_token_usage", notification.params);
       return "running";
     case "turn/completed": {
@@ -1444,13 +1445,14 @@ function codexSandboxCommand(context: TurnContext, version: string): string[] {
   return [shell, "-lc", command];
 }
 
-function codexSandboxEnv(): Record<string, string> {
+function codexSandboxEnv(context: TurnContext): Record<string, string> {
   return {
     ...pickEnv((key) =>
       ["OPENAI_ORG_ID", "OPENAI_ORGANIZATION", "OPENAI_PROJECT"].includes(key),
     ),
-    CODEX_HOME: "/tmp/exo-codex-home",
-    HOME: "/tmp/exo-home",
+    ...(codexEffectiveSandboxProvider(context) === "local_process"
+      ? { CODEX_HOME: "/tmp/exo-codex-home", HOME: "/tmp/exo-home" }
+      : {}),
   };
 }
 
