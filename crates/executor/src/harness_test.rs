@@ -121,6 +121,7 @@ impl Fixture {
             })
             .await?;
         let config = AgentConfig {
+            frontend_tools: Vec::new(),
             credential: Some("test-openai".into()),
             base_url: None,
             reasoning_effort: None,

@@ -605,10 +605,11 @@ async fn managed_agents_created_locally_resume_over_http() -> Result<()> {
     );
     let remote = Runtime::new(HttpProvider::new(f.client.clone()), None);
     let definition = exo_managed_agents::AgentDefinition::parse(
-        "---\nname: shared-agent\nharness: basic\nconfig:\n  model: test-model\n---\n\nKeep the saved instructions.".into(),
+        "---\nharness: basic\nconfig:\n  model: test-model\n---\n\nKeep the saved instructions."
+            .into(),
     )?;
     let saved = local
-        .create_managed_agent(&definition, "local-managed")
+        .create_managed_agent(&definition, "local-managed", "local-managed")
         .await?;
     for (runtime, slug) in [(&local, "local-thread"), (&remote, "http-thread")] {
         let agent = runtime
@@ -675,7 +676,7 @@ async fn managed_agents_created_locally_resume_over_http() -> Result<()> {
     }
     assert!(remote.delete_agent(&saved.record().id.to_string()).await?);
     let uploaded = remote
-        .create_managed_agent(&definition, "http-managed")
+        .create_managed_agent(&definition, "http-managed", "http-managed")
         .await?;
     assert_eq!(
         exo_managed_agents::load_definition(uploaded.as_ref())
@@ -942,7 +943,7 @@ async fn saved_policy_changes_apply_to_existing_local_and_http_threads() -> Resu
             let policy = if ask { "always_ask" } else { "always_allow" };
             local_agent.write_artifact(exoharness::WriteArtifactRequest {
                 path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-                contents: format!("---\nname: Policy test\nharness: basic\npermission_policy: {{type: {policy}}}\nconfig:\n  model: test-model\n---\nUse tools.").into_bytes(),
+                contents: format!("---\nharness: basic\npermission_policy: {{type: {policy}}}\nconfig:\n  model: test-model\n---\nUse tools.").into_bytes(),
             }).await?;
             f.release.add_permits(1);
             let (turn, mut stream) = runtime
@@ -1135,7 +1136,8 @@ async fn canceled_http_observer_does_not_orphan_the_next_accepted_turn() -> Resu
 #[actix_web::test]
 async fn rejected_agent_update_restores_the_saved_definition() -> Result<()> {
     let f = Fixture::new().await?;
-    let source = "---\nname: restored-agent\nharness: basic\nconfig:\n  model: test-model\n---\n\nKeep the saved instructions.";
+    let source =
+        "---\nharness: basic\nconfig:\n  model: test-model\n---\n\nKeep the saved instructions.";
     let request = |source: &str| exoharness::WriteArtifactRequest {
         path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
         contents: source.as_bytes().to_vec(),

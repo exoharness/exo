@@ -1,5 +1,4 @@
 ---
-name: pi-assistant
 harness: pi
 config:
   model: gpt-5-mini

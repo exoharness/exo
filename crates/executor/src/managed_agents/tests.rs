@@ -11,7 +11,8 @@ use exoharness::{
 };
 use tempfile::TempDir;
 
-const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  model: gpt-5.4\n---\n\nInvestigate support tickets.\n";
+const SOURCE: &str =
+    "---\nharness: basic\nconfig:\n  model: gpt-5.4\n---\n\nInvestigate support tickets.\n";
 
 #[test]
 fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
@@ -111,7 +112,9 @@ async fn updating_a_definition_preserves_mounts_added_outside_the_spec() -> Resu
     let store = state(&config).await?;
     let runtime = runtime(store, &config, Default::default())?;
     let definition = AgentDefinition::parse(SOURCE.into())?;
-    let agent = runtime.create_managed_agent(&definition, "support").await?;
+    let agent = runtime
+        .create_managed_agent(&definition, "support", "support")
+        .await?;
     let mount = FileSystemMount {
         host_path: temp.path().to_string_lossy().into_owned(),
         mount_path: "/workspace".into(),
@@ -143,7 +146,9 @@ async fn applying_an_environment_preserves_thread_mounts() -> Result<()> {
     let store = state(&config).await?;
     let runtime = runtime(store, &config, Default::default())?;
     let definition = AgentDefinition::parse(SOURCE.into())?;
-    let agent = runtime.create_managed_agent(&definition, "support").await?;
+    let agent = runtime
+        .create_managed_agent(&definition, "support", "support")
+        .await?;
     let thread = runtime
         .open_managed_thread(
             &agent,
@@ -223,7 +228,9 @@ async fn runtime_reads_config_changes_made_by_another_runtime() -> Result<()> {
     let server = runtime(store.clone(), &config, Default::default())?;
     let cli = runtime(store, &config, Default::default())?;
     let definition = AgentDefinition::parse(SOURCE.into())?;
-    let agent = server.create_managed_agent(&definition, "support").await?;
+    let agent = server
+        .create_managed_agent(&definition, "support", "support")
+        .await?;
     let thread = server
         .open_managed_thread(
             &agent,
@@ -282,7 +289,11 @@ async fn switching_harnesses_keeps_the_thread_history_and_selects_the_new_defaul
     let store = state(&config).await?;
     let runtime = runtime(store, &config, Default::default())?;
     let agent = runtime
-        .create_managed_agent(&AgentDefinition::parse(SOURCE.into())?, "support")
+        .create_managed_agent(
+            &AgentDefinition::parse(SOURCE.into())?,
+            "support",
+            "support",
+        )
         .await?;
     let thread = runtime
         .open_managed_thread(&agent, None, Default::default(), &Default::default())
@@ -436,7 +447,9 @@ async fn mcp_authentication_errors_identify_the_selected_vaults_and_secret() -> 
         &format!("mcp_servers:\n  - type: url\n    name: github\n    url: {url}\nconfig:\n"),
     ))?;
     let runtime = runtime(store.clone(), &config, Default::default())?;
-    let agent = runtime.create_managed_agent(&definition, "support").await?;
+    let agent = runtime
+        .create_managed_agent(&definition, "support", "support")
+        .await?;
     for attached in [false, true] {
         let error = runtime
             .open_managed_thread(
@@ -508,7 +521,9 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
     };
     let runtime = runtime(store.clone(), &config, isolated.clone())?;
     let definition = AgentDefinition::parse(SOURCE.into())?;
-    let agent = runtime.create_managed_agent(&definition, "support").await?;
+    let agent = runtime
+        .create_managed_agent(&definition, "support", "support")
+        .await?;
     let mount = FileSystemMount {
         host_path: temp.path().to_string_lossy().into_owned(),
         mount_path: "/workspace".into(),
@@ -657,7 +672,7 @@ async fn agent_resources_are_inherited_pinned_and_cleaned_up() -> Result<()> {
     std::fs::write(&agent_file, &definition_text)?;
     let definition = AgentDefinition::load(&agent_file)?;
     let agent = runtime
-        .create_managed_agent(&definition, "resources")
+        .create_managed_agent(&definition, "resources", "resources")
         .await?;
     let result = async {
         let first = runtime
@@ -751,7 +766,7 @@ async fn git_resources_require_a_selected_vault_and_matching_origin() -> Result<
     )?;
     let definition = AgentDefinition::parse(SOURCE.replace("config:\n", "resources:\n  - name: code\n    type: git_repository\n    url: https://github.com/exoharness/exo\n    credential: github\n    mount_path: /workspace\nconfig:\n"))?;
     let agent = runtime
-        .create_managed_agent(&definition, "private-code")
+        .create_managed_agent(&definition, "private-code", "private-code")
         .await?;
     for vaults in [vec![], vec![vault.record().id]] {
         let opened = runtime

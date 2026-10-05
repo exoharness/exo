@@ -368,6 +368,18 @@ impl Runtime {
             .await
     }
 
+    pub async fn frontend_tool_result(
+        &self,
+        agent: exoharness::AgentId,
+        thread: exoharness::ThreadId,
+        turn: exoharness::TurnId,
+        body: &exo_managed_agents::http::protocol::FrontendToolResultBody,
+    ) -> Result<exoharness::EventId> {
+        self.provider
+            .frontend_tool_result(agent, thread, turn, body)
+            .await
+    }
+
     pub(crate) async fn is_turn_active(
         &self,
         thread: &dyn exoharness::ThreadHandle,
@@ -695,6 +707,7 @@ impl Runtime {
                             })
                         });
                     if !pending_approval
+                        && !crate::frontend_tools::contains(&work.agent_config, &request.function_name)
                         && !provider
                             .executor
                             .can_reconcile_unresolved_tool_call(&work.agent_config)
@@ -1219,9 +1232,10 @@ impl Runtime {
     pub async fn create_managed_agent(
         &self,
         definition: &exo_managed_agents::AgentDefinition,
+        name: &str,
         slug: &str,
     ) -> Result<Arc<dyn AgentHandle>> {
-        exo_managed_agents::create_agent(self.provider.as_ref(), definition, slug).await
+        exo_managed_agents::create_agent(self.provider.as_ref(), definition, name, slug).await
     }
 
     pub async fn open_managed_thread(
@@ -1268,6 +1282,7 @@ impl Runtime {
     pub async fn create_agent(&self, request: CreateAgentRequest) -> Result<Arc<dyn AgentHandle>> {
         let name = request.name.clone().unwrap_or_else(|| request.slug.clone());
         let config = AgentConfig {
+            frontend_tools: Vec::new(),
             resources: Vec::new(),
             instructions: Vec::new(),
             harness: request.harness,

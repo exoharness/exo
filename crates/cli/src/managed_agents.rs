@@ -175,7 +175,11 @@ pub async fn open_thread(
                 runtime.update_managed_agent(&agent, definition).await?;
                 agent
             }
-            None => runtime.create_managed_agent(definition, &slug).await?,
+            None => {
+                runtime
+                    .create_managed_agent(definition, &name.to_string_lossy(), &slug)
+                    .await?
+            }
         }
     } else {
         crate::must_get_agent(

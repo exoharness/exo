@@ -109,6 +109,7 @@ where
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
+        crate::frontend_tools::validate(agent_config, &self.tools.definitions())?;
         self.tools
             .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await
@@ -238,8 +239,8 @@ where
         request: RuntimeRequest,
         stream_mode: ExecutorStreamMode<'_>,
     ) -> Result<RuntimeResponsePayload> {
-        if let RuntimeRequest::ExecuteTool { request } | RuntimeRequest::AuthorizeTool { request } =
-            &request
+        if let RuntimeRequest::ExecuteTool { request, .. }
+        | RuntimeRequest::AuthorizeTool { request } = &request
         {
             crate::permissions::authorize(
                 conversation,
@@ -258,19 +259,35 @@ where
             RuntimeRequest::AuthorizeTool { .. } => Ok(RuntimeResponsePayload::ToolResult {
                 result: serde_json::Value::Null,
             }),
-            RuntimeRequest::ExecuteTool { request } => Ok(RuntimeResponsePayload::ToolResult {
-                result: self
-                    .tools
-                    .execute(
-                        agent,
-                        conversation,
-                        Some(turn.as_ref()),
-                        agent_config,
-                        conversation_config,
-                        &request,
-                    )
-                    .await?,
-            }),
+            RuntimeRequest::ExecuteTool {
+                request,
+                tool_call_id,
+            } => {
+                let result =
+                    if crate::frontend_tools::contains(agent_config, &request.function_name) {
+                        crate::frontend_tools::execute(
+                            conversation,
+                            turn.as_ref(),
+                            tool_call_id
+                                .as_deref()
+                                .context("client tool execution requires a tool call ID")?,
+                            &request,
+                        )
+                        .await?
+                    } else {
+                        self.tools
+                            .execute(
+                                agent,
+                                conversation,
+                                Some(turn.as_ref()),
+                                agent_config,
+                                conversation_config,
+                                &request,
+                            )
+                            .await?
+                    };
+                Ok(RuntimeResponsePayload::ToolResult { result })
+            }
             RuntimeRequest::StartSandboxProcess { .. }
             | RuntimeRequest::WriteSandboxProcessStdin { .. }
             | RuntimeRequest::CloseSandboxProcessStdin { .. }
@@ -459,7 +476,12 @@ impl TypeScriptRunnerProcess {
                     request: prepared.clone(),
                     streaming: matches!(stream_mode, ExecutorStreamMode::Enabled(_)),
                     recovering,
-                    tools: executor.tools.definitions(),
+                    tools: executor
+                        .tools
+                        .definitions()
+                        .into_iter()
+                        .chain(crate::frontend_tools::definitions(agent_config))
+                        .collect(),
                     mcp_servers: executor.tools.mcp_servers(conversation).await?,
                     braintrust_parent: turn_trace.and_then(TurnExecutionTrace::export_parent),
                 }),
@@ -1085,6 +1107,7 @@ enum RuntimeRequest {
     },
     ExecuteTool {
         request: ToolRequest,
+        tool_call_id: Option<String>,
     },
     StartSandboxProcess {
         command: Vec<String>,
@@ -1611,10 +1634,15 @@ export default {
             r#"
 export default {
   async runTurn(context) {
-    await context.exoharness.current.turn.addEvents([
+    const turn = context.exoharness.current.turn;
+    await turn.addEvents([
       { type: "tool_requested", tool_call_id: "call", response_id: null,
-        request: { function_name: "shell", arguments: { command: "pwd" } } },
-      { type: "tool_result", tool_call_id: "call", result: { stdout: "/workspace" } },
+        request: { function_name: "lookup", arguments: {} } }
+    ]);
+    await turn.addEvents(await context.executePendingTools([
+      { toolCallId: "call", request: { functionName: "lookup", arguments: {} } }
+    ]));
+    await turn.addEvents([
       { type: "messages", response_id: null, messages: [{ role: "assistant", content: "done" }] }
     ]);
   }
@@ -1634,6 +1662,7 @@ export default {
         let config: AgentConfig = serde_json::from_value(serde_json::json!({
             "instructions": [], "harness": "typescript",
             "typescript": { "module_path": module },
+            "frontend_tools": [{ "name": "lookup", "description": "Client tool", "parameters": { "type": "object" } }],
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
         let runtime = Runtime::new(
@@ -1645,7 +1674,8 @@ export default {
             ),
             None,
         );
-        let (_, mut stream) = runtime
+        let agent_id = agent.record().id;
+        let (turn, mut stream) = runtime
             .start_turn(
                 agent,
                 thread.clone(),
@@ -1666,6 +1696,13 @@ export default {
                     ExecutionStreamEvent::ToolCall { tool_call_id, .. } => {
                         assert_eq!(tool_call_id, "call");
                         calls += 1;
+                        runtime.frontend_tool_result(agent_id, thread.record().id, turn.id,
+                            &exo_managed_agents::http::protocol::FrontendToolResultBody {
+                                session_id: turn.session_id, tool_call_id,
+                                result: exo_managed_agents::http::protocol::FrontendToolExecutionResult::FrontendToolSuccess {
+                                    output: serde_json::json!({"stdout": "/workspace"}), model_input: None,
+                                },
+                            }).await?;
                     }
                     ExecutionStreamEvent::ToolResult { tool_call_id, .. } => {
                         assert_eq!(tool_call_id, "call");

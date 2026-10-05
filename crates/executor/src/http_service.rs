@@ -266,7 +266,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/frontend-tool-result",
-                web::post().to(unsupported_interaction),
+                web::post().to(frontend_tool_result),
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/event",
@@ -935,7 +935,6 @@ async fn submit_turn(
         || body.parent.is_some()
         || body.endpoint_name.is_some()
         || body.reasoning_effort.is_some()
-        || body.frontend_tools.is_some()
         || body.auto_approve_tools.is_some()
         || body.page_scope.is_some()
         || body.reset_history
@@ -952,6 +951,10 @@ async fn submit_turn(
         .get_thread_agent_config(agent.as_ref(), thread.as_ref())
         .await
         .map_err(ErrorBadRequest)?;
+    config.frontend_tools = body
+        .frontend_tools
+        .map(OneOrMany::into_vec)
+        .unwrap_or_default();
     if let Some(harness) = body.harness.as_deref() {
         let harness =
             crate::managed_agents::resolve_thread_harness(thread.as_ref(), &config, harness)
@@ -1088,10 +1091,17 @@ async fn approval_response(
     Ok(web::Json(EventResult { event_id }))
 }
 
-async fn unsupported_interaction(_service: Service) -> Result<HttpResponse, Error> {
-    Err(ErrorNotImplemented(
-        "this runtime does not execute frontend tools",
-    ))
+async fn frontend_tool_result(
+    service: Service,
+    path: web::Path<TurnPath>,
+    body: web::Json<FrontendToolResultBody>,
+) -> Result<web::Json<EventResult>, Error> {
+    let event_id = service
+        .runtime
+        .frontend_tool_result(path.agent_id, path.thread_id, path.turn_id, &body)
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(EventResult { event_id }))
 }
 
 async fn events(

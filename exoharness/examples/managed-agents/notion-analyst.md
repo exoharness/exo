@@ -1,5 +1,4 @@
 ---
-name: notion-analyst
 harness: codex
 config:
   model: gpt-5.6-sol

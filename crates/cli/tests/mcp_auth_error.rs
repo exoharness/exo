@@ -15,7 +15,7 @@ async fn chat_shows_one_line_for_auth_errors_unless_full_verbosity_is_requested(
     std::fs::write(
         &agent,
         format!(
-            "---\nname: github-analyst\nharness: codex\nconfig:\n  model: gpt-5.6-sol\nmcp_servers:\n  - type: url\n    name: github\n    url: {}/mcp\n---\nInvestigate GitHub issues.\n",
+            "---\nharness: codex\nconfig:\n  model: gpt-5.6-sol\nmcp_servers:\n  - type: url\n    name: github\n    url: {}/mcp\n---\nInvestigate GitHub issues.\n",
             server.uri()
         ),
     )?;

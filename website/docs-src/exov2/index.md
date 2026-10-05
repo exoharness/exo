@@ -22,7 +22,6 @@ Define an agent in a markdown file like `support-analyst.md`.
 
 ```markdown
 ---
-name: support-analyst
 harness: codex
 model:
   name: gpt-6.1-sol

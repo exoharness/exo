@@ -128,7 +128,7 @@ pub async fn materialize_conversation_messages(
     let mut messages = Vec::new();
     let mut tool_call_names = HashMap::<ToolCallId, String>::new();
 
-    crate::message_history::extend_message_history(&mut messages, &mut tool_call_names, &events);
+    crate::message_history::extend_message_history(&mut messages, &mut tool_call_names, &events)?;
 
     Ok(messages)
 }
@@ -435,7 +435,8 @@ mod tests {
                     &mut messages,
                     &mut HashMap::new(),
                     &events,
-                );
+                )
+                .unwrap();
                 assert_eq!(messages.len(), 3);
                 assert!(matches!(messages[0], Message::Assistant { .. }));
                 let Message::Tool { content } = &messages[1] else {
@@ -534,7 +535,7 @@ mod vault_tests {
                 ..Default::default()
             })
             .await?;
-        let definition = exo_managed_agents::AgentDefinition::parse("---\nname: test\nharness: basic\nconfig:\n  model: gpt-5.6-sol\n  credential: provider\n---\nTest.".into())?;
+        let definition = exo_managed_agents::AgentDefinition::parse("---\nharness: basic\nconfig:\n  model: gpt-5.6-sol\n  credential: provider\n---\nTest.".into())?;
         let mut config = crate::managed_agents::agent_config(
             &definition,
             SandboxProvider::LocalProcess,

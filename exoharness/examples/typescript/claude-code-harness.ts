@@ -49,6 +49,10 @@ import {
 } from "@exo/model-runtime/shared";
 
 import { claudeToolName } from "../../typescript/harness/native-mcp";
+import {
+  claudeRuntimeTools,
+  claudeRuntimeToolName,
+} from "../../typescript/harness/claude-runtime-tools";
 import { modelUsageRecord } from "@exo/model-runtime/usage";
 
 const DEFAULT_CLAUDE_CODE_SANDBOX_EXECUTABLE = "/usr/local/bin/claude-code";
@@ -68,6 +72,7 @@ interface ClaudeTraceState {
   result: SDKResultMessage | null;
   finalMessageStored: boolean;
   observedToolCalls: Map<string, PendingToolCall>;
+  runtimeToolCalls: Set<string>;
 }
 
 export default defineHarness({
@@ -101,6 +106,7 @@ async function runClaudeCodeTurn(
     result: null,
     finalMessageStored: false,
     observedToolCalls: new Map(),
+    runtimeToolCalls: new Set(),
   };
 
   await appendCustomEvent(
@@ -181,7 +187,9 @@ async function consumeClaudeQuery(
           context,
           message.tools.map(
             (name) =>
-              claudeToolName(context.mcpServers, name) ?? `claude.${name}`,
+              claudeRuntimeToolName(context, name) ??
+              claudeToolName(context.mcpServers, name) ??
+              `claude.${name}`,
           ),
         );
         state.toolPoliciesValidated = true;
@@ -268,22 +276,26 @@ function claudeOptions(
     disallowedTools: context.mcpServers.flatMap((server) =>
       server.disabledTools.map((tool) => `mcp__${server.name}__${tool}`),
     ),
-    mcpServers: Object.fromEntries(
-      context.mcpServers.map((server) => [
-        server.name,
-        {
-          type: "http",
-          url: server.url,
-          ...(server.environmentVariable
-            ? {
-                headers: {
-                  Authorization: "Bearer ${" + server.environmentVariable + "}",
-                },
-              }
-            : {}),
-        },
-      ]),
-    ),
+    mcpServers: {
+      ...claudeRuntimeTools(context),
+      ...Object.fromEntries(
+        context.mcpServers.map((server) => [
+          server.name,
+          {
+            type: "http",
+            url: server.url,
+            ...(server.environmentVariable
+              ? {
+                  headers: {
+                    Authorization:
+                      "Bearer ${" + server.environmentVariable + "}",
+                  },
+                }
+              : {}),
+          },
+        ]),
+      ),
+    },
     hooks: {
       PreToolUse: [
         {
@@ -295,6 +307,15 @@ function claudeOptions(
                   throw new Error(
                     "Claude Code has not reported its tool inventory",
                   );
+                }
+                if (claudeRuntimeToolName(context, input.tool_name)) {
+                  // The runtime authorizes these calls before dispatching them.
+                  return {
+                    hookSpecificOutput: {
+                      hookEventName: "PreToolUse",
+                      permissionDecision: "allow",
+                    },
+                  };
                 }
                 const functionName = claudeToolName(
                   context.mcpServers,
@@ -359,10 +380,7 @@ async function handleClaudeMessage(
     await appendAndTraceObservedToolEvents(
       context,
       turnParent,
-      projectAnthropicMessageToolEvents(message, {
-        toolName: (name) =>
-          claudeToolName(context.mcpServers, name) ?? `claude.${name}`,
-      }),
+      observedClaudeToolEvents(context, state, message),
       state.observedToolCalls,
       "claude_observed_tool",
     );
@@ -377,10 +395,7 @@ async function handleClaudeMessage(
     await appendAndTraceObservedToolEvents(
       context,
       turnParent,
-      projectAnthropicMessageToolEvents(message, {
-        toolName: (name) =>
-          claudeToolName(context.mcpServers, name) ?? `claude.${name}`,
-      }),
+      observedClaudeToolEvents(context, state, message),
       state.observedToolCalls,
       "claude_observed_tool",
     );
@@ -394,6 +409,36 @@ async function handleClaudeMessage(
 
 function shouldStoreClaudeSdkMessage(message: SDKMessage): boolean {
   return message.type !== "stream_event";
+}
+
+function observedClaudeToolEvents(
+  context: TurnContext,
+  state: ClaudeTraceState,
+  message: SDKMessage,
+) {
+  return projectAnthropicMessageToolEvents(message, {
+    toolName: (name) =>
+      claudeRuntimeToolName(context, name) ??
+      claudeToolName(context.mcpServers, name) ??
+      `claude.${name}`,
+  }).filter((event) => {
+    if (typeof event.tool_call_id !== "string") return true;
+    const request = asRecord(event.request);
+    if (
+      event.type === "tool_requested" &&
+      context.tools.some((tool) => tool.name === request.function_name) &&
+      !context.mcpServers.some((server) =>
+        server.tools.some((tool) => tool.exposedName === request.function_name),
+      )
+    ) {
+      state.runtimeToolCalls.add(event.tool_call_id);
+      return false;
+    }
+    return !(
+      event.type === "tool_result" &&
+      state.runtimeToolCalls.delete(event.tool_call_id)
+    );
+  });
 }
 
 async function appendClaudeFinalMessage(

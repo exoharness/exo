@@ -43,7 +43,6 @@ The `typescript` harness runs a module that owns the turn loop:
 ```bash
 cat > ts-basic.md <<'EOF'
 ---
-name: "TS Basic"
 harness: exoharness/examples/typescript/basic-harness.ts
 config:
   model: gpt-5.5

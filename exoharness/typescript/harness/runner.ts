@@ -48,6 +48,7 @@ import {
 } from "./index";
 
 interface RawAgentConfig {
+  frontend_tools?: AgentConfig["frontendTools"];
   instructions: Message[];
   harness: "basic" | "rlm" | "typescript" | "type_script" | "exo";
   typescript?: {
@@ -231,7 +232,7 @@ interface RawTypeScriptInitPayload {
 
 type RawRuntimeRequest =
   | { type: "authorize_tool"; request: RawToolRequest }
-  | { type: "execute_tool"; request: RawToolRequest }
+  | { type: "execute_tool"; request: RawToolRequest; tool_call_id?: string }
   | {
       type: "start_sandbox_process";
       command: string[];
@@ -878,6 +879,7 @@ class SandboxProcessHandle implements SandboxProcess {
 
 function toAgentConfig(raw: RawAgentConfig): AgentConfig {
   return {
+    frontendTools: raw.frontend_tools ?? [],
     instructions: raw.instructions,
     harness: raw.harness === "type_script" ? "typescript" : raw.harness,
     typescript: raw.typescript
@@ -1607,10 +1609,11 @@ function createTurnContext(
         request: toRawToolRequest(request),
       });
     },
-    async executeTool(request): Promise<ToolResult> {
+    async executeTool(request, toolCallId): Promise<ToolResult> {
       const payload = await client.requestRuntime({
         type: "execute_tool",
         request: toRawToolRequest(request),
+        tool_call_id: toolCallId,
       });
       if (payload.type !== "tool_result") {
         throw new Error(`expected tool_result payload, got ${payload.type}`);
@@ -1629,7 +1632,10 @@ function createTurnContext(
       for (const toolCall of toolCalls) {
         let result: ToolResult;
         try {
-          result = await context.executeTool(toolCall.request);
+          result = await context.executeTool(
+            toolCall.request,
+            toolCall.toolCallId,
+          );
         } catch (error) {
           result = {
             ok: false,

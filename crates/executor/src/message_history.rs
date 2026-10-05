@@ -16,8 +16,15 @@ pub(crate) fn extend_message_history(
     history: &mut Vec<Message>,
     tool_call_names: &mut HashMap<ToolCallId, String>,
     events: &[exoharness::Event],
-) {
+) -> anyhow::Result<()> {
     let mut pending_tool_call_ids = Vec::new();
+    let mut model_inputs = HashMap::new();
+    let mut client_messages = Vec::new();
+    for event in events {
+        if let Some((id, content)) = crate::frontend_tools::model_input(event)? {
+            model_inputs.insert(id, content);
+        }
+    }
 
     for event in events {
         match &event.data {
@@ -32,11 +39,14 @@ pub(crate) fn extend_message_history(
                                 );
                             }
                         }
-                        _ => flush_dangling_tool_results(
-                            history,
-                            tool_call_names,
-                            &mut pending_tool_call_ids,
-                        ),
+                        _ => {
+                            flush_dangling_tool_results(
+                                history,
+                                tool_call_names,
+                                &mut pending_tool_call_ids,
+                            );
+                            history.append(&mut client_messages);
+                        }
                     }
                     if let Message::Assistant {
                         content: AssistantContent::Array(parts),
@@ -102,11 +112,19 @@ pub(crate) fn extend_message_history(
                         provider_options: None,
                     })],
                 });
+                if let Some(content) = model_inputs.remove(tool_call_id) {
+                    client_messages.push(Message::User { content });
+                }
+                if pending_tool_call_ids.is_empty() {
+                    history.append(&mut client_messages);
+                }
             }
             _ => {}
         }
     }
     flush_dangling_tool_results(history, tool_call_names, &mut pending_tool_call_ids);
+    history.append(&mut client_messages);
+    Ok(())
 }
 
 fn flush_dangling_tool_results(

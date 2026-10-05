@@ -329,12 +329,13 @@ pub fn agent_config(
         }
     }
     Ok(AgentConfig {
+        frontend_tools: Vec::new(),
         resources: Vec::new(),
         harness: kind,
         typescript: module,
         enable_agent_tool_creation: definition.frontmatter.tool_creation,
         instructions: vec![crate::harness_helpers::system_message(
-            &definition.system_prompt(),
+            &definition.instructions,
         )],
         sandbox: AgentSandboxConfig {
             image: preset

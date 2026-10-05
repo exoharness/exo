@@ -19,6 +19,9 @@ use crate::braintrust::BraintrustTracingConfig;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AgentConfig {
+    /// Client tools supplied for this turn, saved with its recovery configuration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontend_tools: Vec<exo_managed_agents::http::protocol::FrontendToolDefinition>,
     #[serde(default)]
     pub resources: Vec<exoharness::resources::PreparedResource>,
     pub instructions: Vec<Message>,

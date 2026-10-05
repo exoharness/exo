@@ -28,7 +28,9 @@ fn default_true() -> bool {
 pub struct AgentFrontmatter {
     #[serde(default)]
     pub resources: Vec<exoharness::resources::ResourceDefinition>,
-    pub name: String,
+    // Names in saved definitions from before this change are ignored.
+    #[serde(default, rename = "name")]
+    _legacy_name: Option<String>,
     pub harness: String,
     #[serde(alias = "model")]
     pub config: AgentModelConfig,
@@ -90,7 +92,6 @@ impl AgentDefinition {
             serde_yaml_ng::from_str(&contents[..yaml_end]).context("invalid agent frontmatter")?;
         let instructions = contents[body_start..].trim().to_string();
         for (field, value) in [
-            ("name", frontmatter.name.as_str()),
             ("harness", frontmatter.harness.as_str()),
             ("model.name", frontmatter.config.model.as_str()),
             ("instructions", instructions.as_str()),
@@ -136,13 +137,6 @@ impl AgentDefinition {
 
     pub fn source(&self) -> &str {
         &self.source
-    }
-
-    pub fn system_prompt(&self) -> String {
-        format!(
-            "You are {}.\n\n{}",
-            self.frontmatter.name, self.instructions
-        )
     }
 }
 
@@ -194,17 +188,21 @@ pub async fn find_agent(harness: &dyn ExoHarness, reference: &str) -> Result<Arc
 pub async fn create_agent(
     backend: &dyn AgentBackend,
     definition: &AgentDefinition,
+    name: &str,
     slug: &str,
 ) -> Result<Arc<dyn AgentHandle>> {
-    if slug.trim().is_empty() {
+    if name.trim().is_empty() {
         bail!("saved agent name must not be empty");
+    }
+    if slug.trim().is_empty() {
+        bail!("saved agent slug must not be empty");
     }
     let agent = backend
         .exoharness()
         .new_agent(NewAgentRequest {
             vaults: vec![],
             slug: slug.to_string(),
-            name: definition.frontmatter.name.clone(),
+            name: name.to_string(),
         })
         .await?;
     let saved: Result<()> = async {

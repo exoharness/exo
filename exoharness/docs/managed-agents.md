@@ -5,7 +5,6 @@ Agents use Exo's local state and sandbox providers.
 
 ```markdown
 ---
-name: support-analyst
 harness: codex
 config:
   model: gpt-5.6-sol
@@ -17,7 +16,7 @@ Read the available evidence, cite the tickets behind each finding, and
 write your report to a file.
 ```
 
-`name`, `harness`, and `config.model` are required. The body supplies the agent's
+`harness` and `config.model` are required. The body supplies the agent's
 instructions. Unsupported fields are rejected so a typo or an unimplemented
 feature doesn't silently change how the agent runs.
 

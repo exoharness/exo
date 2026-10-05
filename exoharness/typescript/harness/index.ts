@@ -1,5 +1,6 @@
 import type { Message } from "@braintrust/lingua";
 import type { ToolModuleExport } from "./tool-modules";
+import { clientToolModelInput } from "./client-tools";
 
 export type { Message } from "@braintrust/lingua";
 
@@ -18,6 +19,7 @@ export * from "./skill-tools";
 export type MessageRole = Message["role"];
 
 export interface AgentConfig {
+  frontendTools?: ToolDefinition[];
   instructions: Message[];
   harness: "basic" | "rlm" | "typescript" | "exo";
   typescript?: {
@@ -413,7 +415,7 @@ export interface TurnContext {
   readonly braintrustParent?: string | null;
   readonly exoharness: ExoHarness;
   authorizeTool(request: ToolRequest): Promise<void>;
-  executeTool(request: ToolRequest): Promise<ToolResult>;
+  executeTool(request: ToolRequest, toolCallId?: string): Promise<ToolResult>;
   startSandboxProcess(
     request: SandboxProcessStartRequest,
   ): Promise<SandboxProcess>;
@@ -663,7 +665,12 @@ export async function materializeConversationMessages(
 ): Promise<Message[]> {
   const result = await conversation.getEvents({
     direction: "asc",
-    types: ["messages", "tool_requested", "tool_result"],
+    types: [
+      "messages",
+      "tool_requested",
+      "tool_result",
+      "agent_runtime.frontend_tool_response",
+    ],
   });
   return materializeEventsToMessages(result.events);
 }
@@ -672,6 +679,15 @@ export function materializeEventsToMessages(events: Event[]): Message[] {
   const messages: Message[] = [];
   const seen = new Set<string>();
   const pending = new Map<string, string>();
+  const modelInputs = new Map<
+    string,
+    Extract<Message, { role: "user" }>["content"]
+  >();
+  const clientMessages: Message[] = [];
+  for (const event of events) {
+    const input = clientToolModelInput(event);
+    if (input) modelInputs.set(input.id, input.content);
+  }
   const flush = () => {
     for (const [id, name] of pending) {
       messages.push(
@@ -688,7 +704,10 @@ export function materializeEventsToMessages(events: Event[]): Message[] {
     const data = event.data;
     if (isMessagesEvent(data)) {
       for (const message of data.messages) {
-        if (message.role !== "tool") flush();
+        if (message.role !== "tool") {
+          flush();
+          messages.push(...clientMessages.splice(0));
+        }
         if (Array.isArray(message.content)) {
           for (const part of message.content) {
             if (part.type === "tool_call") {
@@ -720,10 +739,14 @@ export function materializeEventsToMessages(events: Event[]): Message[] {
       if (name) {
         messages.push(toolResultMessage(data.tool_call_id, name, data.result));
         pending.delete(data.tool_call_id);
+        const content = modelInputs.get(data.tool_call_id);
+        if (content != null) clientMessages.push({ role: "user", content });
+        if (pending.size === 0) messages.push(...clientMessages.splice(0));
       }
     }
   }
   flush();
+  messages.push(...clientMessages);
   return messages;
 }
 

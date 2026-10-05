@@ -342,7 +342,10 @@ export async function traceExoharnessToolCall(
     turnParent,
     async (span) => {
       try {
-        const result = await context.executeTool(toolCall.request);
+        const result = await context.executeTool(
+          toolCall.request,
+          toolCall.toolCallId,
+        );
         span.log({ output: result });
         return result;
       } catch (error) {

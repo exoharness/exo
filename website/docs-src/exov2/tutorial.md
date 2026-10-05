@@ -27,10 +27,9 @@ We’ll start with a ticket triage bot that has no external dependencies. Define
 
 ```markdown
 ---
-name: support-analyst
 harness: codex
 model:
-  name: gpt-6-sol
+  name: gpt-6.1-sol
   credential: openai
 ---
 
@@ -85,10 +84,9 @@ Then, update the agent definition to include the git repo you’d like to triage
 
 ```bash
 ---
-name: support-analyst
 harness: codex
 model:
-  name: gpt-6-sol
+  name: gpt-6.1-sol
   credential: openai
 resources:
   - name: autoevals

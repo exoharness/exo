@@ -73,7 +73,6 @@ Store a vault secret, create an agent, then start chatting:
 ./target/debug/exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 cat > assistant.md <<'EOF'
 ---
-name: "assistant"
 harness: basic
 config:
   model: gpt-5.5
@@ -101,7 +100,6 @@ For explicit control over agents, conversations, or a shell-enabled sandbox:
 ```bash
 cat > sandbox-example.md <<'EOF'
 ---
-name: "Sandbox Example"
 harness: basic
 config:
   model: gpt-5.5
@@ -131,7 +129,6 @@ Then create an agent backed by a TypeScript harness module:
 ```bash
 cat > ts-basic.md <<'EOF'
 ---
-name: "TS Basic"
 harness: exoharness/examples/typescript/basic-harness.ts
 config:
   model: gpt-5.5

@@ -82,7 +82,7 @@ async fn chat_survives_model_call_failure() {
         &xdg,
     );
     let spec = root_dir.path().join("agent.md");
-    std::fs::write(&spec, format!("---\nname: Chat Error Test Agent\nharness: basic\nconfig:\n  model: gpt-test\n  credential: test-key\n  base_url: {}\n---\nReply to the user.\n", mock_server.uri())).unwrap();
+    std::fs::write(&spec, format!("---\nharness: basic\nconfig:\n  model: gpt-test\n  credential: test-key\n  base_url: {}\n---\nReply to the user.\n", mock_server.uri())).unwrap();
     run_exo(
         &[
             "agent",

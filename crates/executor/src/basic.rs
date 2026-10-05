@@ -69,6 +69,7 @@ struct ToolRoundContext<'a> {
 struct TurnProgress {
     start_round: u32,
     pending_tool_requests: Option<Vec<ExecutableToolRequest>>,
+    resume_first_approval: bool,
 }
 
 impl<M, T> BasicExecutor<M, T>
@@ -98,6 +99,7 @@ where
                     EventKind::MESSAGES,
                     EventKind::TOOL_REQUESTED,
                     EventKind::TOOL_RESULT,
+                    EventKind::custom(crate::frontend_tools::FRONTEND_TOOL_RESPONSE),
                 ]),
             }))
             .await?;
@@ -108,7 +110,7 @@ where
         let mut tool_call_names = cached_entry
             .as_ref()
             .map_or_else(HashMap::new, |entry| entry.tool_call_names.clone());
-        extend_message_history(&mut event_messages, &mut tool_call_names, &result.events);
+        extend_message_history(&mut event_messages, &mut tool_call_names, &result.events)?;
         let cursor = result
             .cursor
             .or_else(|| cached_entry.and_then(|entry| entry.cursor));
@@ -144,12 +146,15 @@ where
         let TurnProgress {
             start_round,
             mut pending_tool_requests,
+            resume_first_approval,
         } = if recovering {
-            self.load_turn_progress(conversation, turn.as_ref()).await?
+            self.load_turn_progress(conversation, turn.as_ref(), agent_config)
+                .await?
         } else {
             TurnProgress {
                 start_round: 0,
                 pending_tool_requests: None,
+                resume_first_approval: false,
             }
         };
         for round in start_round.. {
@@ -158,7 +163,7 @@ where
             {
                 // This model round was already committed; finish its tools before
                 // applying the limit to the next model call.
-                (saved_requests, true)
+                (saved_requests, resume_first_approval)
             } else {
                 if agent_config
                     .max_tool_round_trips
@@ -174,6 +179,9 @@ where
                     build_model_request(conversation, agent_config, conversation_config, messages)
                         .await?;
                 request.tools.extend(self.tools.definitions());
+                request
+                    .tools
+                    .extend(crate::frontend_tools::definitions(agent_config));
                 let response = complete_model_round(
                     self.model.as_ref(),
                     request,
@@ -255,6 +263,18 @@ where
                     context.stream_mode,
                 )
                 .await?;
+                if crate::frontend_tools::contains(
+                    context.agent_config,
+                    &tool_request.request.function_name,
+                ) {
+                    return crate::frontend_tools::execute(
+                        context.conversation,
+                        context.turn.as_ref(),
+                        &tool_request.tool_call_id,
+                        &tool_request.request,
+                    )
+                    .await;
+                }
                 self.tools
                     .execute(
                         context.agent,
@@ -300,6 +320,7 @@ where
         &self,
         conversation: &dyn ConversationHandle,
         turn: &dyn TurnHandle,
+        agent_config: &AgentConfig,
     ) -> Result<TurnProgress> {
         // Rebuild the saved model round before entering the normal turn loop.
         // Calling the model again could produce a different set of tool calls.
@@ -355,6 +376,7 @@ where
             return Ok(TurnProgress {
                 start_round: next_round,
                 pending_tool_requests: None,
+                resume_first_approval: false,
             });
         }
         let first = &pending[0];
@@ -368,13 +390,30 @@ where
             },
         )
         .await?;
-        anyhow::ensure!(
-            crate::permissions::pending_from_events(approvals)?
-                .iter()
-                .any(|approval| approval.tool_call_id.as_deref()
+        let mut resume_first_approval = false;
+        for event in &approvals {
+            if let EventData::Custom {
+                event_type,
+                payload,
+            } = &event.data
+                && event_type == crate::permissions::APPROVAL_REQUESTED
+            {
+                let approval: crate::permissions::ApprovalRequest =
+                    serde_json::from_value(payload.clone())?;
+                resume_first_approval |= approval.tool_call_id.as_deref()
                     == Some(first.tool_call_id.as_str())
                     && approval.round == Some(round)
-                    && approval.request == first.request),
+                    && approval.request == first.request;
+            }
+        }
+        anyhow::ensure!(
+            crate::frontend_tools::contains(agent_config, &first.request.function_name)
+                || crate::permissions::pending_from_events(approvals)?
+                    .iter()
+                    .any(|approval| approval.tool_call_id.as_deref()
+                        == Some(first.tool_call_id.as_str())
+                        && approval.round == Some(round)
+                        && approval.request == first.request),
             "cannot safely resume unresolved tool call `{}` (`{}`) for turn {}",
             first.tool_call_id,
             first.request.function_name,
@@ -383,6 +422,7 @@ where
         Ok(TurnProgress {
             start_round: round,
             pending_tool_requests: Some(pending),
+            resume_first_approval,
         })
     }
 }
@@ -408,12 +448,13 @@ where
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
-        conversation_config.permissions.validate_tool_names(
-            build_tool_definitions(conversation_config)
-                .iter()
-                .chain(self.tools.definitions().iter())
-                .map(|tool| tool.name.as_str()),
-        )?;
+        let mut definitions = build_tool_definitions(conversation_config);
+        definitions.extend(self.tools.definitions());
+        crate::frontend_tools::validate(agent_config, &definitions)?;
+        definitions.extend(crate::frontend_tools::definitions(agent_config));
+        conversation_config
+            .permissions
+            .validate_tool_names(definitions.iter().map(|tool| tool.name.as_str()))?;
         self.tools
             .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await

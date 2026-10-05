@@ -1033,7 +1033,6 @@ external network call:
 ```bash
 cat > irc-agent.md <<'EOF'
 ---
-name: "IRC Agent"
 harness: basic
 config:
   model: gpt-5.4

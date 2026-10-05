@@ -737,7 +737,7 @@ async fn chat_vault_smoke_restart_second_vault_rotation_revocation_and_public_mc
     std::fs::write(
         &file,
         format!(
-            "---\nname: Vault smoke\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model\n  base_url: {}\nmcp_servers:\n  - type: url\n    name: workspace\n    url: {}/mcp/\n---\nAnswer workspace questions.\n",
+            "---\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: model\n  base_url: {}\nmcp_servers:\n  - type: url\n    name: workspace\n    url: {}/mcp/\n---\nAnswer workspace questions.\n",
             model.uri(),
             f.server.uri(),
         ),
@@ -1185,7 +1185,7 @@ esac
     std::fs::write(
         &spec,
         format!(
-            "---\nname: GitHub fixture\nharness: basic\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: github\n    url: {url}\n---\nTest GitHub credentials.\n"
+            "---\nharness: basic\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: github\n    url: {url}\n---\nTest GitHub credentials.\n"
         ),
     )?;
     let script = std::fs::read_to_string(&executable)?

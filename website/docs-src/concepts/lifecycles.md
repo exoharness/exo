@@ -46,7 +46,6 @@ bindings, and secrets.
 ```bash
 cat > my-agent.md <<'EOF'
 ---
-name: "My Agent"
 harness: basic
 config:
   model: gpt-5.6-terra

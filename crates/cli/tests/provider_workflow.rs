@@ -281,7 +281,6 @@ async fn local_and_http_file_runs_sync_saved_agents_and_preserve_history() -> Re
 
         let updated = f
             .source()
-            .replace("Workflow agent", "Renamed file agent")
             .replace("Reply to the user.", "Follow the updated instructions.");
         std::fs::write(&f.agent_file, &updated)?;
         let directory = f.temp.path().join("nested");
@@ -995,7 +994,7 @@ export default defineHarness({{
     )?;
     assert!(!f.temp.path().join(&module).exists());
     let source = format!(
-        "---\nname: Remote workspace\nharness: {module}\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: workspace\n    permission_policy: {{type: always_allow}}\n    url: {url}\n---\nLook up the workspace.\n"
+        "---\nharness: {module}\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: workspace\n    permission_policy: {{type: always_allow}}\n    url: {url}\n---\nLook up the workspace.\n"
     );
     std::fs::write(&f.agent_file, &source)?;
     f.cli(&["provider", "switch", "remote"]).await?;

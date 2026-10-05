@@ -197,6 +197,7 @@ mod tests {
 
     fn test_agent_config(sandbox: AgentSandboxConfig) -> AgentConfig {
         AgentConfig {
+            frontend_tools: Vec::new(),
             credential: Some("test-openai".into()),
             base_url: None,
             reasoning_effort: None,

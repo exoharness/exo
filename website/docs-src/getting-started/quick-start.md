@@ -31,7 +31,6 @@ use the Anthropic API.
 ```bash
 cat > assistant.md <<'EOF'
 ---
-name: "assistant"
 harness: basic
 config:
   model: gpt-5.5

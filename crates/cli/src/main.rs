@@ -1127,7 +1127,7 @@ async fn run_selected(
                     provider_store.ensure_agent_alias_available(&slug)?;
                 }
                 eprintln!("Preparing agent resources...");
-                let agent = harness.create_managed_agent(definition, &slug).await?;
+                let agent = harness.create_managed_agent(definition, &name, &slug).await?;
                 if let Some(provider) = &selected_provider {
                     provider_store.pin_agent(agent.record().slug.clone(), provider.selection, &provider.account, agent.record().id)?;
                 }

@@ -52,7 +52,7 @@ impl AgentBackend for LocalProvider {
             None => self.executor.agent_config(definition)?,
         };
         config.instructions = vec![crate::harness_helpers::system_message(
-            &definition.system_prompt(),
+            &definition.instructions,
         )];
         let mut resources = definition.frontmatter.resources.clone();
         let base = definition
@@ -402,10 +402,10 @@ mod permission_tests {
             )?,
             None,
         );
-        let source = "---\nname: permissions\nharness: basic\nconfig:\n  model: fixture\npermission_policy: {type: always_allow}\n---\nUse tools.\n";
+        let source = "---\nharness: basic\nconfig:\n  model: fixture\npermission_policy: {type: always_allow}\n---\nUse tools.\n";
         let definition = AgentDefinition::parse(source.into())?;
         let agent = runtime
-            .create_managed_agent(&definition, "permissions")
+            .create_managed_agent(&definition, "permissions", "permissions")
             .await?;
         let opened = runtime
             .open_managed_thread(&agent, None, Default::default(), &Default::default())
