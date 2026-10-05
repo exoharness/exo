@@ -1,14 +1,17 @@
-mod config;
-mod executor;
-pub(crate) use config::sandbox_model_credential_variable;
-pub use config::{TypeScriptHarnessPreset, agent_config, model_credential_destination};
+pub(crate) mod config;
+pub mod service;
+#[cfg(feature = "native")]
+pub use crate::native::config::agent_config;
+pub use config::{
+    HarnessModules, TypeScriptHarnessPreset, agent_config_with_modules,
+    model_credential_destination,
+};
 
 use std::{path::Path, sync::Arc};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use exo_managed_agents::{self as managed, AgentBackend, AgentDefinition};
-use exo_mcp::McpToolSet;
 use exoharness::{AgentHandle, ExoHarness, ThreadHandle};
 
 use crate::{AgentConfig, ConversationConfig, ConversationModelConfig, LocalProvider};
@@ -229,211 +232,8 @@ impl AgentBackend for LocalProvider {
 }
 
 impl LocalProvider {
-    pub fn managed(
-        state: Arc<dyn ExoHarness>,
-        config: exoharness::BasicExoHarnessConfig,
-        env: std::collections::HashMap<String, String>,
-        pricing: Arc<cost::PricingTable>,
-    ) -> Result<Self> {
-        let executor = executor::ManagedExecutor::new(state.clone(), config, env, pricing)?;
-        Ok(Self::new(state, Arc::new(executor)))
-    }
-
     pub fn with_managed_agents(mut self, setup: LocalAgentSetup) -> Self {
         self.managed = setup;
         self
     }
 }
-
-struct PreparedMcp {
-    tools: Arc<McpToolSet>,
-    selection: Option<managed::vaults::VaultSelection>,
-    selection_is_new: bool,
-    config: exoharness::BasicExoHarnessConfig,
-    servers: Vec<exo_mcp::McpServerConfig>,
-}
-
-async fn connect_mcp(
-    agent: &dyn AgentHandle,
-    thread: &dyn ThreadHandle,
-    config: &exoharness::BasicExoHarnessConfig,
-) -> Result<PreparedMcp> {
-    let vaults = thread.list_vaults().await?;
-    let saved = managed::vaults::load_selection(thread).await?;
-    let selection_is_new = saved.is_none();
-    let servers = match managed::load_definition(agent).await? {
-        Some(definition) => definition.resolve_mcp_servers(&()).await?,
-        None => Vec::new(),
-    };
-    let selection = match saved {
-        Some(selection) => Some(selection),
-        None if servers.is_empty() && vaults.len() == 1 => None,
-        None => Some(managed::vaults::VaultSelection::from_vaults(&vaults, &servers).await?),
-    };
-    let tools = match &selection {
-        Some(selection) => {
-            selection.validate_servers(&servers)?;
-            let credentials = managed::vaults::VaultMcpCredentials::new(vaults, selection.clone());
-            Arc::new(McpToolSet::connect_with_provider(&servers, Arc::new(credentials)).await?)
-        }
-        None => Arc::default(),
-    };
-    Ok(PreparedMcp {
-        tools,
-        selection,
-        selection_is_new,
-        config: config.clone(),
-        servers,
-    })
-}
-
-impl PreparedMcp {
-    fn validate_thread(
-        &self,
-        agent_config: &AgentConfig,
-        config: &ConversationConfig,
-    ) -> Result<()> {
-        let provider = config
-            .sandbox_provider
-            .as_ref()
-            .unwrap_or(&agent_config.sandbox.provider);
-        if *provider != exoharness::SandboxProvider::LocalProcess {
-            for mount in agent_config
-                .sandbox
-                .mounts
-                .iter()
-                .chain(config.mounts.iter())
-            {
-                self.config
-                    .validate_secret_mount(Path::new(&mount.host_path))?;
-            }
-        } else if let Some(selection) = &self.selection
-            && (selection.vaults.len() > 1 || selection.bindings.iter().any(|b| b.secret.is_some()))
-        {
-            bail!(
-                "vault-backed chat requires an isolated sandbox; local-process can read host credentials"
-            );
-        }
-        Ok(())
-    }
-
-    async fn configure_thread(
-        &self,
-        agent_config: &AgentConfig,
-        conversation: &dyn ThreadHandle,
-        config: &ConversationConfig,
-    ) -> Result<()> {
-        self.validate_thread(agent_config, config)?;
-        if self.selection_is_new
-            && let Some(selection) = &self.selection
-        {
-            selection.save(conversation).await?;
-        }
-
-        let inventory = serde_json::to_value(self.tools.tools())?;
-        let previous = conversation
-            .get_events(Some(exoharness::EventQuery {
-                direction: Some(exoharness::EventQueryDirection::Desc),
-                limit: Some(1),
-                types: Some(vec![exoharness::EventKind::custom("mcp_tools")]),
-                ..Default::default()
-            }))
-            .await?;
-        if (!self.tools.tools().is_empty() || !previous.events.is_empty())
-            && !matches!(previous.events.first().map(|event| &event.data),
-                Some(crate::EventData::Custom { payload, .. }) if payload == &inventory)
-        {
-            conversation
-                .add_events(exoharness::AddEventsRequest {
-                    session_id: None,
-                    turn_id: None,
-                    data: vec![crate::EventData::Custom {
-                        event_type: "mcp_tools".to_string(),
-                        payload: inventory,
-                    }],
-                })
-                .await?;
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod permission_tests {
-    use super::*;
-    use exo_managed_agents::permissions::PermissionPolicy;
-    use exoharness::{BasicExoHarness, WriteArtifactRequest};
-
-    #[tokio::test]
-    async fn resumed_threads_use_updated_agent_permissions() -> Result<()> {
-        let temp = tempfile::TempDir::new()?;
-        let config = crate::test_support::local_test_config(temp.path().join("state"));
-        let state = Arc::new(BasicExoHarness::new(config.clone()).await?);
-
-        let runtime = crate::Runtime::new(
-            LocalProvider::managed(
-                state,
-                config,
-                Default::default(),
-                Arc::new(cost::PricingTable::empty()),
-            )?,
-            None,
-        );
-        let source = "---\nname: permissions\nharness: basic\nconfig:\n  model: fixture\npermission_policy: {type: always_allow}\n---\nUse tools.\n";
-        let definition = AgentDefinition::parse(source.into())?;
-        let agent = runtime
-            .create_managed_agent(&definition, "permissions")
-            .await?;
-        let opened = runtime
-            .open_managed_thread(&agent, None, Default::default())
-            .await?;
-        let thread = opened.thread;
-        assert_eq!(
-            runtime
-                .get_conversation_config(thread.as_ref())
-                .await?
-                .permissions
-                .for_tool("shell"),
-            PermissionPolicy::AlwaysAllow {}
-        );
-        for (name, expected) in [
-            ("always_ask", PermissionPolicy::AlwaysAsk {}),
-            ("always_allow", PermissionPolicy::AlwaysAllow {}),
-        ] {
-            agent
-                .write_artifact(WriteArtifactRequest {
-                    path: managed::AGENT_DEFINITION_PATH.into(),
-                    contents: source.replace("always_allow", name).into_bytes(),
-                })
-                .await?;
-            let resumed = runtime
-                .open_managed_thread(
-                    &agent,
-                    Some(&thread.record().id.to_string()),
-                    Default::default(),
-                )
-                .await?;
-            assert!(!resumed.created);
-            assert_eq!(
-                runtime
-                    .get_conversation_config(thread.as_ref())
-                    .await?
-                    .permissions
-                    .for_tool("shell"),
-                expected
-            );
-            assert_eq!(
-                crate::load_conversation_config(thread.as_ref())
-                    .await?
-                    .permissions
-                    .for_tool("shell"),
-                expected
-            );
-        }
-        runtime.shutdown().await?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests;

@@ -2,43 +2,56 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
-use bytes::Bytes;
-use futures::TryStreamExt;
-use object_store::ObjectStore;
-use object_store::local::LocalFileSystem;
-use object_store::memory::InMemory;
-use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tokio::fs;
 
 use crate::Result;
 
+/// Byte storage for the shared harness. The host may place blobs separately;
+/// keys and all metadata formats are owned by Rust. Calls are serialized by the
+/// harness for mutations; hosts must provide read-after-write consistency.
+#[async_trait::async_trait]
+pub trait Storage: Send + Sync {
+    async fn put(&self, key: &str, bytes: Vec<u8>, blob: bool) -> Result<()>;
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn list_directories(&self, prefix: &str) -> Result<Vec<String>> {
+        let base = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}/")
+        };
+        let mut directories = std::collections::BTreeSet::new();
+        for key in self.list(prefix).await? {
+            if let Some(relative) = key.strip_prefix(&base)
+                && let Some((directory, _)) = relative.split_once('/')
+            {
+                directories.insert(format!("{base}{directory}"));
+            }
+        }
+        Ok(directories.into_iter().collect())
+    }
+    async fn delete(&self, key: &str) -> Result<()>;
+    async fn copy(&self, source: &str, destination: &str) -> Result<()>;
+}
+
+#[cfg(feature = "basic-backend")]
+mod native;
+
 #[derive(Clone)]
 pub(crate) struct BasicObjectStore {
-    store: Arc<dyn ObjectStore>,
+    store: Arc<dyn Storage>,
     #[cfg(test)]
     fail_json_put_after: Arc<std::sync::Mutex<Option<usize>>>,
 }
 
 impl BasicObjectStore {
-    pub(crate) fn in_memory() -> Self {
+    pub(crate) fn new(store: Arc<dyn Storage>) -> Self {
         Self {
-            store: Arc::new(InMemory::new()),
+            store,
             #[cfg(test)]
             fail_json_put_after: Arc::new(std::sync::Mutex::new(None)),
         }
-    }
-
-    pub(crate) async fn local_filesystem(root: impl Into<PathBuf>) -> Result<Self> {
-        let root = root.into();
-        fs::create_dir_all(&root).await?;
-        let store = LocalFileSystem::new_with_prefix(&root)?;
-        Ok(Self {
-            store: Arc::new(store),
-            #[cfg(test)]
-            fail_json_put_after: Arc::new(std::sync::Mutex::new(None)),
-        })
     }
 
     #[cfg(test)]
@@ -68,15 +81,18 @@ impl BasicObjectStore {
                 *remaining = Some(count - 1);
             }
         }
-        let path = object_path(key.as_ref())?;
         let bytes = serde_json::to_vec_pretty(value)?;
-        self.store.put(&path, Bytes::from(bytes).into()).await?;
+        let blob = bytes.len() > 64 * 1024;
+        self.store
+            .put(&normalize_path(key.as_ref()), bytes, blob)
+            .await?;
         Ok(())
     }
 
     pub(crate) async fn put_bytes(&self, key: impl AsRef<Path>, value: Vec<u8>) -> Result<()> {
-        let path = object_path(key.as_ref())?;
-        self.store.put(&path, Bytes::from(value).into()).await?;
+        self.store
+            .put(&normalize_path(key.as_ref()), value, true)
+            .await?;
         Ok(())
     }
 
@@ -102,74 +118,45 @@ impl BasicObjectStore {
 
     pub(crate) async fn get_bytes(&self, key: impl AsRef<Path>) -> Result<Vec<u8>> {
         let key = key.as_ref();
-        let path = object_path(key)?;
-        let bytes = self
-            .store
-            .get(&path)
-            .await
-            .with_context(|| format!("failed to get {}", key.display()))?
-            .bytes()
-            .await?;
-        Ok(bytes.to_vec())
+        self.store
+            .get(&normalize_path(key))
+            .await?
+            .with_context(|| format!("failed to get {}", key.display()))
     }
 
     pub(crate) async fn get_bytes_if_exists(
         &self,
         key: impl AsRef<Path>,
     ) -> Result<Option<Vec<u8>>> {
-        let path = object_path(key.as_ref())?;
-        let get_result = match self.store.get(&path).await {
-            Ok(result) => result,
-            Err(object_store::Error::NotFound { .. }) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(Some(get_result.bytes().await?.to_vec()))
+        self.store.get(&normalize_path(key.as_ref())).await
     }
 
     pub(crate) async fn list_keys(&self, prefix: impl AsRef<Path>) -> Result<Vec<String>> {
-        let prefix = normalize_path(prefix.as_ref());
-        let object_prefix = match prefix.is_empty() {
-            true => None,
-            false => Some(object_prefix(Path::new(&prefix))?),
-        };
-        let mut keys = self
-            .store
-            .list(object_prefix.as_ref())
-            .map_ok(|meta| meta.location.to_string())
-            .try_collect::<Vec<_>>()
-            .await?;
+        let mut keys = self.store.list(&normalize_path(prefix.as_ref())).await?;
         keys.sort();
         Ok(keys)
     }
 
     pub(crate) async fn list_directories(&self, prefix: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
-        let prefix = object_prefix(prefix.as_ref())?;
-        let mut directories = self
+        Ok(self
             .store
-            .list_with_delimiter(Some(&prefix))
+            .list_directories(&normalize_path(prefix.as_ref()))
             .await?
-            .common_prefixes
             .into_iter()
-            .map(|path| PathBuf::from(path.to_string()))
-            .collect::<Vec<_>>();
-        directories.sort();
-        Ok(directories)
+            .map(PathBuf::from)
+            .collect())
     }
 
     /// Delete the object at exactly `key`, tolerating absence. Unlike
     /// `delete_prefix`, this works for a single object: `list`-based prefix
     /// deletion never matches an object at exactly the prefix path.
     pub(crate) async fn delete_key_if_exists(&self, key: impl AsRef<Path>) -> Result<()> {
-        match self.store.delete(&object_path(key.as_ref())?).await {
-            Ok(()) => Ok(()),
-            Err(object_store::Error::NotFound { .. }) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        self.store.delete(&normalize_path(key.as_ref())).await
     }
 
     pub(crate) async fn delete_prefix(&self, prefix: impl AsRef<Path>) -> Result<()> {
         for key in self.list_keys(prefix).await? {
-            self.store.delete(&object_path(Path::new(&key))?).await?;
+            self.store.delete(&key).await?;
         }
         Ok(())
     }
@@ -186,12 +173,7 @@ impl BasicObjectStore {
                 .strip_prefix(&src_prefix)
                 .expect("listed key should share prefix");
             let destination = format!("{dst_prefix}{relative}");
-            self.store
-                .copy(
-                    &object_path(Path::new(&key))?,
-                    &object_path(Path::new(&destination))?,
-                )
-                .await?;
+            self.store.copy(&key, &destination).await?;
         }
         Ok(())
     }
@@ -212,14 +194,6 @@ impl BasicObjectStore {
         }
         Ok(values)
     }
-}
-
-fn object_path(path: &Path) -> Result<ObjectPath> {
-    ObjectPath::parse(normalize_path(path)).map_err(Into::into)
-}
-
-fn object_prefix(prefix: &Path) -> Result<ObjectPath> {
-    ObjectPath::parse(normalize_path(prefix)).map_err(Into::into)
 }
 
 fn normalize_path(path: &Path) -> String {

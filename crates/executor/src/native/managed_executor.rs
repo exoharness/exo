@@ -1,6 +1,7 @@
-use super::{PreparedMcp, config, connect_mcp};
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
+use crate::native::config;
+use crate::native::managed_mcp::{PreparedMcp, connect_mcp};
 use crate::{
     AgentConfig, AgentHarnessKind, BasicExecutor, BasicToolRuntime, ConversationConfig,
     ExoToolRuntime, McpToolRuntime, RouterModelClient, SendRequest,

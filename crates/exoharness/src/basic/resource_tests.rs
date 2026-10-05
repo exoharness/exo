@@ -1,5 +1,9 @@
 use super::*;
+use crate::sandbox::{
+    ManagedSandboxBackend, ManagedSandboxHandle, SandboxRequest, SnapshotFormat, SnapshotPayload,
+};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 use crate::resources::{
     MaterializeResourcesRequest, PreparedResource, ResourceDefinition, ResourceSource,

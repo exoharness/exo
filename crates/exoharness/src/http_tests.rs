@@ -139,6 +139,12 @@ async fn hosted_http_exoharness_core_contract() {
     crate::contract_tests::supports_agent_and_conversation_crud(Arc::clone(&harness)).await;
     crate::contract_tests::begin_turn_tracks_events_through_finish(Arc::clone(&harness)).await;
     crate::contract_tests::turn_events_continue_after_artifact_writes(Arc::clone(&harness)).await;
+    crate::contract_tests::supports_thread_api_and_conversation_compatibility(Arc::clone(&harness))
+        .await;
+    crate::contract_tests::list_conversations_returns_recent_first_and_paginates(Arc::clone(
+        &harness,
+    ))
+    .await;
 }
 
 #[actix_web::test]

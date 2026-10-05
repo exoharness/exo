@@ -1,11 +1,16 @@
-use super::*;
-use crate::{Runtime, SandboxProvider, SendRequest};
+use crate::managed_agents::*;
+use crate::{ConversationConfig, LocalProvider, Runtime, SandboxProvider, SendRequest};
 use anyhow::Context;
+use anyhow::Result;
+use exo_managed_agents::{self as managed, AgentDefinition};
+use exoharness::ExoHarness;
 use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, FileSystemMount, FileSystemMountMode, NewThreadRequest,
     PutSecretRequest, Secret, WriteArtifactRequest,
     vault::{CredentialDestination, global_vault},
 };
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  model: gpt-5.4\n---\n\nInvestigate support tickets.\n";
@@ -13,7 +18,7 @@ const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  mod
 #[test]
 fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
     let definition = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: codex"))?;
-    let config = super::config::agent_config(&definition, SandboxProvider::Docker, None, None)?;
+    let config = agent_config(&definition, SandboxProvider::Docker, None, None)?;
     assert_eq!(
         config.sandbox.image.as_deref(),
         Some(

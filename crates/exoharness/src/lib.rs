@@ -1,5 +1,5 @@
 pub mod access;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 mod basic;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod basic_tests;
@@ -16,7 +16,6 @@ mod error;
 pub use environment::EnvironmentDefinition;
 mod credential_policy;
 pub mod harness;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod http;
 #[cfg(feature = "http-client")]
 mod http_client;
@@ -26,16 +25,16 @@ mod http_tests;
 mod local_volume;
 pub mod protocol;
 pub mod resources;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 mod sandbox;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sandbox_process;
 mod sandbox_provider;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 mod secrets;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 pub mod server;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 mod storage;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod test_support;
@@ -44,17 +43,24 @@ mod uuid7;
 pub use credential_policy::{CredentialDestination, CredentialPolicy};
 pub mod vault;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 pub use basic::*;
 pub use error::*;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use http::*;
 #[cfg(feature = "http-client")]
 pub use http_client::{AccessTokenProvider, HttpClient, HttpResponseError};
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 pub use sandbox::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use sandbox_process::with_process_management;
 pub use sandbox_provider::*;
 pub use types::*;
 pub use uuid7::*;
+
+#[cfg(feature = "store")]
+pub use storage::Storage;
+
+#[cfg(feature = "store")]
+pub mod egress_credentials;
+
+pub mod runtime_host;

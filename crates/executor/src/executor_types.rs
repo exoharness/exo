@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_stream::Stream;
 
-use crate::braintrust::BraintrustTracingConfig;
+use crate::BraintrustTracingConfig;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AgentConfig {
@@ -317,5 +317,63 @@ impl Stream for ExecutionStreamHandle {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.event_stream).poll_next(cx)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ShellToolArguments {
+    pub command: String,
+}
+#[derive(Debug, serde::Serialize)]
+pub struct ShellToolResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TypeScriptStreamEvent {
+    FirstChunk {
+        ttft_ms: u64,
+    },
+    TextDelta {
+        text: String,
+    },
+    ToolCall {
+        tool_call_id: String,
+        tool_name: String,
+        arguments: ToolArguments,
+    },
+    ToolResult {
+        tool_call_id: String,
+        result: ToolResult,
+    },
+}
+
+pub fn to_execution_stream_event(event: TypeScriptStreamEvent) -> ExecutionStreamEvent {
+    match event {
+        TypeScriptStreamEvent::FirstChunk { ttft_ms } => ExecutionStreamEvent::FirstChunk {
+            ttft: Duration::from_millis(ttft_ms),
+        },
+        TypeScriptStreamEvent::TextDelta { text } => {
+            ExecutionStreamEvent::Chunk(UniversalStreamChunk::text_delta(0, &text))
+        }
+        TypeScriptStreamEvent::ToolCall {
+            tool_call_id,
+            tool_name,
+            arguments,
+        } => ExecutionStreamEvent::ToolCall {
+            tool_call_id,
+            tool_name,
+            arguments,
+        },
+        TypeScriptStreamEvent::ToolResult {
+            tool_call_id,
+            result,
+        } => ExecutionStreamEvent::ToolResult {
+            tool_call_id,
+            result,
+        },
     }
 }

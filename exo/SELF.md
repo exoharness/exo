@@ -24,10 +24,10 @@ Use this map before changing Exo itself.
 - `exo/adapters/`: adapter setup prompts and worker implementations.
 - `exo/adapters/agent-cli/`: shell entry point adapter; `exo-cli` sends prompts plus the user's working directory over a unix socket, and the message tells you which sandbox path (under the `/agent-cli` mount by default) to `cd` into.
 - `exoharness/typescript/harness/adapter-tools.ts`: model-visible adapter tool definitions.
-- `crates/executor/src/adapter/`: Rust adapter runtime and supervision.
-- `crates/executor/src/harness_tool.rs`: Rust tool execution runtime (`execute_tool` match arms).
-- `crates/executor/src/agent_sandbox.rs`: shared agent sandbox selection.
-- `crates/executor/src/conversation_sandbox.rs`: conversation sandbox selection.
+- `crates/executor/src/native/adapter/`: Rust adapter runtime and supervision.
+- `crates/executor/src/native/harness_tool.rs`: Rust tool execution runtime (`execute_tool` match arms).
+- `crates/executor/src/native/agent_sandbox.rs`: shared agent sandbox selection.
+- `crates/executor/src/native/conversation_sandbox.rs`: conversation sandbox selection.
 - `crates/exoharness/`: durable harness API, conversation state, events, artifacts, and sandbox lifecycle.
 
 ## Local State
@@ -72,7 +72,7 @@ Tools have two layers, and both matter:
 2. **Execution (TypeScript or Rust)**: a tool's handler can run entirely in
    TypeScript, or delegate to the Rust runtime via
    `execution.context.executeTool(...)`, which dispatches on the function name
-   in `crates/executor/src/harness_tool.rs`.
+   in `crates/executor/src/native/harness_tool.rs`.
 
 For a local manifest tool, create its directory under
 `/workspace/exo/.exo/tool-sources/<name>` and call `manage_tool` with the
@@ -86,7 +86,7 @@ A Rust match arm alone is invisible to the model; it always needs a TypeScript
 definition that delegates to it:
 
 1. Implement the tool logic as a match arm in `execute_tool` in
-   `crates/executor/src/harness_tool.rs` (see `list_sandbox_snapshots` for a
+   `crates/executor/src/native/harness_tool.rs` (see `list_sandbox_snapshots` for a
    full example).
 2. Register a TypeScript definition with the same name using
    `registerHostTool` from `exo/tools/host-tools.ts`, wired into the

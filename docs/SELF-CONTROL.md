@@ -119,7 +119,7 @@ Gap: there is no sandbox _cloning_ — starting a second sandbox from an existin
 
 ## 5. Capability Extension: Tools and Adapters
 
-**Tools.** Tools are layered: the TypeScript registry defines what the model can see and call, and a handler either runs in TypeScript or delegates execution to the Rust tool runtime (`crates/executor/src/harness_tool.rs`) via `execution.context.executeTool(...)` with the same function name. Rust-backed tools therefore always need a TypeScript definition; `registerHostTool` in `exo/tools/host-tools.ts` is the standard bridge, and `exo/tools/sandbox-tools.ts` is the reference example. A Rust match arm without a registered TypeScript definition is unreachable, and an agent-installed tool must never reuse the name of a Rust-backed tool.
+**Tools.** Tools are layered: the TypeScript registry defines what the model can see and call, and a handler either runs in TypeScript or delegates execution to the Rust tool runtime (`crates/executor/src/native/harness_tool.rs`) via `execution.context.executeTool(...)` with the same function name. Rust-backed tools therefore always need a TypeScript definition; `registerHostTool` in `exo/tools/host-tools.ts` is the standard bridge, and `exo/tools/sandbox-tools.ts` is the reference example. A Rust match arm without a registered TypeScript definition is unreachable, and an agent-installed tool must never reuse the name of a Rust-backed tool.
 
 `inspect_tools` and `manage_tool` are the default discovery and installation path for registry-backed tools. Registry-installed tools load every turn regardless of the legacy compatibility flag. The older `install_agent_tool` / `uninstall_agent_tool` pair and `.exo/agent-tools/` scan are available only when `enableAgentToolCreation` is explicitly enabled. New Rust-backed capability goes through the code-edit path instead (area 1): implement the match arm, register the definition, rebuild, restart.
 
@@ -154,7 +154,7 @@ Exo's behavior is defined by a small set of prompt surfaces it can read (and, th
 - `exo/SELF.md` — the compact self map for navigating its own code.
 - Tool definitions — `exo/tools/sandbox-tools.ts`, `scheduler-tools.ts`, `guardian-tools.ts`, `introspection-tools.ts`, and `exoharness/typescript/harness/adapter-tools.ts` carry model-visible descriptions and JSON schemas; these are the most direct prompts for when and how to call each tool. `exoharness/typescript/harness/built-in-tools.ts` describes `shell`, `inspect_tools`, `manage_tool`, and the opt-in legacy creation tools.
 - `exo/adapters/*/setup-prompt.md` — setup-time guidance for creating specific adapters.
-- Wakeup prompts — `crates/executor/src/adapter/runtime.rs` builds the inbound-message wakeup prompts (including the reply-externally contract), and `crates/executor/src/scheduler_runtime.rs` builds scheduled-task wakeup prompts from each task's `reportPrompt`.
+- Wakeup prompts — `crates/executor/src/native/adapter/runtime.rs` builds the inbound-message wakeup prompts (including the reply-externally contract), and `crates/executor/src/native/scheduler_runtime.rs` builds scheduled-task wakeup prompts from each task's `reportPrompt`.
 - `.exo/exo-profile.md` (or `EXO_LOCAL_PROMPT_FILE`) — local, user-specific instructions that are not checked in.
 
 Checked-in prompts evolve through the normal self-modification loop: edit, commit, rebuild, restart (areas 1 and 8), which makes prompt history auditable in git. The local profile can be edited directly for user-specific memory that should not be committed.

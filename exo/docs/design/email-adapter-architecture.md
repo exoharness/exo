@@ -58,7 +58,7 @@ Shared adapter protocol changes, if any, should stay in:
 
 ```text
 exo/adapters/protocol.ts
-crates/executor/src/adapter/
+crates/executor/src/native/adapter/
 exoharness/typescript/harness/adapter-tools.ts
 ```
 
