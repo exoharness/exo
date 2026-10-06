@@ -1269,7 +1269,7 @@ impl Runtime {
         };
         shutdown?;
         if let Some(error) = finalizer_error {
-            return Err(error.into());
+            return Err(error);
         }
         flush?;
         stopped
