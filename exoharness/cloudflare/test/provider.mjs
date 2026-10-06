@@ -125,6 +125,8 @@ async function options({ accessAud, access, staticToken = token } = {}) {
       contents: `import { ExoProvider as Provider } from "./implementation.js";
 export class ExoProvider extends Provider {
   async harnessRequestForTest(thread_id, request) { try { return await this.runtime.call({type: "harness_request", thread_id, request}); } catch (error) { return {error: error.message}; } }
+  // Capture the Rust error before crossing Miniflare's RPC bridge.
+  async proxyForTest(identity, request) { try { const response = await this.proxy(identity, request); return {status: response.status, body: await response.text()}; } catch (error) { return {error: error.message}; } }
 }
 export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
     },
@@ -1015,26 +1017,87 @@ test("existing Rust trait contracts run against the Worker store", async () => {
   assert.equal(code, 0, output);
 });
 
-test("sandbox credentials cross the Worker egress bridge", async () => {
+test("Worker egress substitutes credentials and enforces destination policies", async () => {
   const { agent, thread, path } = await create(false, "codex");
   await sendTurn(path);
   await waitTurn(path);
   const sandbox = await sandboxFor(agent, thread);
   const { OPENAI_API_KEY } = await sandbox.environment();
   const { PROVIDERS } = await mf.getBindings("exo");
-  const response = await PROVIDERS.getByName("test-account").proxy(
-    {
-      agentId: agent.id,
-      threadId: thread.id,
-      sandboxId: (await sandboxRecord(agent, thread)).id,
-    },
-    new Request("https://model.example/echo", {
-      headers: { authorization: `Bearer ${OPENAI_API_KEY}` },
-    }),
-  );
+  const provider = PROVIDERS.getByName("test-account");
+  const identity = {
+    agentId: agent.id,
+    threadId: thread.id,
+    sandboxId: (await sandboxRecord(agent, thread)).id,
+  };
+  const headers = { authorization: `Bearer ${OPENAI_API_KEY}` };
+  const proxy = (identity, url, headers) =>
+    provider.proxyForTest(identity, new Request(url, { headers }));
+  const denied = async (identity, url, message, headers) =>
+    assert.match((await proxy(identity, url, headers)).error, message, url);
+  for (const [url, message] of [
+    ["https://other.example/", /credential placeholder does not match/],
+    ["http://model.example/echo", /credential substitution requires HTTPS/],
+  ])
+    await denied(identity, url, message, headers);
+  for (const host of [
+    "127.0.0.1",
+    "[::1]",
+    "localhost",
+    "app.localhost",
+    "app.internal",
+    "app.local",
+  ])
+    await denied(identity, `https://${host}/`, /public DNS hostname/);
+  for (const url of [
+    "https://model.example:8443/echo",
+    "http://model.example:8080/echo",
+    "http://model.example:443/echo",
+    "https://model.example:80/echo",
+  ])
+    await denied(identity, url, /HTTP port 80 and HTTPS port 443/);
+  const response = await proxy(identity, "https://model.example/echo", headers);
   assert.equal(response.status, 302);
-  assert.deepEqual(await response.json(), {
+  assert.deepEqual(JSON.parse(response.body), {
     header: `Bearer ${key}`,
   });
+  assert.equal(
+    (await proxy(identity, "http://model.example/echo")).status,
+    302,
+  );
+  for (const networking of [
+    { type: "limited", allowed_hosts: ["MODEL.EXAMPLE"] },
+    { type: "disabled" },
+  ]) {
+    const scope = { type: "thread", agent_id: agent.id, thread_id: thread.id };
+    const { sandbox_id } = await rpc({
+      type: "create_sandbox",
+      scope,
+      request: {
+        provider: "cloudflare",
+        image: "",
+        idle_seconds: 60,
+        policy: { networking },
+      },
+    });
+    const restricted = { ...identity, sandboxId: sandbox_id };
+    await denied(
+      restricted,
+      "https://other.example/",
+      /network destination denied/,
+    );
+    if (networking.type === "limited")
+      assert.equal(
+        (await proxy(restricted, "https://model.example/echo")).status,
+        302,
+      );
+    else
+      await denied(
+        restricted,
+        "https://model.example/echo",
+        /network destination denied/,
+      );
+    await rpc({ type: "stop_sandbox", scope, sandbox_id });
+  }
   await sandbox.stop();
 });
