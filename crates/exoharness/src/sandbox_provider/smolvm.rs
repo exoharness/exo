@@ -1828,10 +1828,8 @@ esac"#,
 
     #[cfg(unix)]
     fn write_test_binary(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_support::write_test_executable(path, &format!("#!/bin/sh\n{body}\n")).unwrap();
     }
 
     #[cfg(unix)]
