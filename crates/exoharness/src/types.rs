@@ -785,8 +785,6 @@ pub struct SandboxRecord {
     pub tcp_ports: Vec<u16>,
     /// The harness's recorded running state, not a service health check.
     pub running: bool,
-    /// Whether an external owner controls this attached sandbox's lifecycle.
-    pub attached: bool,
 }
 
 pub(crate) fn canonical_egress_host(host: &str) -> Result<String> {

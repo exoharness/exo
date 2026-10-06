@@ -1830,7 +1830,6 @@ impl From<StoredSandbox> for SandboxRecord {
             image: sandbox.image,
             tcp_ports: sandbox.tcp_ports,
             running: sandbox.running,
-            attached: sandbox.attachment.is_some(),
         }
     }
 }

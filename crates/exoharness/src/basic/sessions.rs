@@ -3,8 +3,9 @@ use std::{collections::HashMap, fs::File, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use tokio::sync::OnceCell;
 
+use super::sandboxes::StoredSandbox;
 use super::{BasicExoHarness, BasicScopedSandboxHandle};
-use crate::{AgentId, ResourceScope};
+use crate::{AgentId, ResourceScope, SandboxId};
 
 /// Process ownership is scoped to the sandbox's thread (or agent scope).
 /// The OS releases each lease on a crash; a new owner then recovers its VMs.
@@ -207,7 +208,7 @@ impl BasicExoHarness {
             let mut operator = self.clone();
             operator.caller = None;
             let sandboxes = scope_sandboxes(&operator, scope);
-            if sandboxes.list_sandboxes().await?.iter().any(|s| s.running && !s.attached) {
+            if !owned_running_sandbox_ids(&sandboxes).await?.is_empty() {
                 tracing::info!(target: "exoharness::progress", "Stopping sandboxes left by the previous local session...");
                 stop_owned_sandboxes(&sandboxes).await?;
             }
@@ -257,12 +258,9 @@ fn scope_sandboxes(
 
 async fn stop_owned_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()> {
     let mut failure = None;
-    for sandbox in scope.list_sandboxes().await? {
-        if sandbox.running
-            && !sandbox.attached
-            && let Err(error) = scope.stop_sandbox(sandbox.id.clone()).await
-        {
-            tracing::error!(%error, sandbox_id = %sandbox.id, "failed to stop sandbox");
+    for sandbox_id in owned_running_sandbox_ids(scope).await? {
+        if let Err(error) = scope.stop_sandbox(sandbox_id.clone()).await {
+            tracing::error!(%error, %sandbox_id, "failed to stop sandbox");
             failure = Some(error);
         }
     }
@@ -270,6 +268,19 @@ async fn stop_owned_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+async fn owned_running_sandbox_ids(scope: &BasicScopedSandboxHandle<'_>) -> Result<Vec<SandboxId>> {
+    Ok(scope
+        .harness
+        .inner
+        .storage
+        .list_json_matching_suffix::<StoredSandbox>(scope.sandboxes_dir(), ".json")
+        .await?
+        .into_iter()
+        .filter(|sandbox| sandbox.running && sandbox.attachment.is_none())
+        .map(|sandbox| sandbox.id)
+        .collect())
 }
 
 #[cfg(test)]
