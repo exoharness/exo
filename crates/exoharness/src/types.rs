@@ -45,12 +45,6 @@ impl ResourceScope {
 
 #[async_trait]
 pub trait ExoHarness: VaultContext {
-    /// Release process-owned local sandboxes after all execution has stopped.
-    /// Remote providers retain their own sandbox lifetime.
-    async fn release_local_sessions(&self) -> Result<()> {
-        Ok(())
-    }
-
     fn with_caller(&self, _caller: crate::access::Caller) -> Result<Arc<dyn ExoHarness>> {
         anyhow::bail!("this provider does not support caller-scoped execution")
     }
@@ -204,12 +198,6 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
 
 #[async_trait]
 pub trait ThreadHandle: SandboxHandle + VaultContext {
-    /// Claim this thread for local execution or configuration. Provider servers
-    /// and inline runtimes use the same ownership; remote handles delegate it.
-    async fn claim_local_session(&self) -> Result<()> {
-        Ok(())
-    }
-
     async fn activate_caller(&self) -> Result<bool> {
         Ok(false)
     }
@@ -756,10 +744,6 @@ pub struct DurableFileSystem {
 pub struct SandboxResourceShape {
     pub vcpu_count: NonZeroU8,
     pub memory_mib: NonZeroU32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_gib: Option<NonZeroU32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overlay_gib: Option<NonZeroU32>,
 }
 
 pub const DEFAULT_SANDBOX_VCPU_COUNT: u8 = 2;
@@ -773,8 +757,6 @@ impl SandboxResourceShape {
         Some(Self {
             vcpu_count: NonZeroU8::new(vcpu_count)?,
             memory_mib: NonZeroU32::new(memory_mib)?,
-            storage_gib: None,
-            overlay_gib: None,
         })
     }
 }
@@ -786,8 +768,6 @@ impl Default for SandboxResourceShape {
                 .expect("default sandbox vCPU count must be positive"),
             memory_mib: NonZeroU32::new(DEFAULT_SANDBOX_MEMORY_MIB)
                 .expect("default sandbox memory must be positive"),
-            storage_gib: None,
-            overlay_gib: None,
         }
     }
 }
@@ -802,8 +782,6 @@ pub struct SandboxRecord {
     pub tcp_ports: Vec<u16>,
     /// The harness's recorded running state, not a service health check.
     pub running: bool,
-    /// Whether an external owner controls this attached sandbox's lifecycle.
-    pub attached: bool,
 }
 
 pub(crate) fn canonical_egress_host(host: &str) -> Result<String> {
@@ -1355,6 +1333,12 @@ pub enum SandboxProviderConfig {
         /// is a wrapper script. Omitted derives it from `binary`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boot_binary: Option<PathBuf>,
+        /// Storage disk capacity for OCI layers and container data, in GiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage_gib: Option<NonZeroU32>,
+        /// Disk capacity for persistent root filesystem changes, in GiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overlay_gib: Option<NonZeroU32>,
     },
     Firecracker {
         #[serde(default = "crate::sandbox_provider::default_firecracker_image")]

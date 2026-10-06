@@ -1584,6 +1584,64 @@ async fn provider_errors_explain_how_to_set_context_and_creation_is_offline() ->
 }
 
 #[actix_web::test]
+async fn smolvm_disk_sizes_are_saved_only_on_smolvm_bindings() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.cli(&[
+        "environment",
+        "provider",
+        "create",
+        "--backend",
+        "smolvm",
+        "--smolvm-storage-gib",
+        "64",
+        "--smolvm-overlay-gib",
+        "128",
+    ])
+    .await?;
+    let bindings = f.runtime.exoharness_handle().list_bindings().await?;
+    let config = bindings
+        .into_iter()
+        .find_map(|record| match record.binding {
+            exoharness::Binding::Sandbox {
+                config:
+                    exoharness::SandboxProviderConfig::Smolvm {
+                        storage_gib,
+                        overlay_gib,
+                        ..
+                    },
+                ..
+            } => Some((storage_gib, overlay_gib)),
+            _ => None,
+        })
+        .context("smolvm binding")?;
+    assert_eq!(config.0.map(std::num::NonZeroU32::get), Some(64));
+    assert_eq!(config.1.map(std::num::NonZeroU32::get), Some(128));
+    for (backend, size, expected) in [
+        ("docker", "64", "only valid for smolvm"),
+        ("smolvm", "0", "invalid value"),
+    ] {
+        let output = f
+            .output(
+                &[
+                    "environment",
+                    "provider",
+                    "create",
+                    "--backend",
+                    backend,
+                    "--smolvm-overlay-gib",
+                    size,
+                ],
+                None,
+                None,
+            )
+            .await?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+    f.stop().await
+}
+
+#[actix_web::test]
 async fn sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
     let f = Fixture::new().await?;
     f.cli(&["vault", "create", "team"]).await?;

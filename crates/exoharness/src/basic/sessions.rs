@@ -3,11 +3,14 @@ use std::{collections::HashMap, fs::File, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use tokio::sync::OnceCell;
 
+use super::sandboxes::StoredSandbox;
 use super::{BasicExoHarness, BasicScopedSandboxHandle};
-use crate::{AgentId, ResourceScope};
+use crate::{AgentId, ResourceScope, SandboxId};
 
 /// Process ownership is scoped to the sandbox's thread (or agent scope).
 /// The OS releases each lease on a crash; a new owner then recovers its VMs.
+// TODO: Move execution ownership behind a TurnCoordinator abstraction;
+// local file leases should remain a BasicExoHarness implementation detail.
 pub(super) struct LocalSessions {
     root: PathBuf,
     state: std::sync::Mutex<SessionState>,
@@ -205,7 +208,7 @@ impl BasicExoHarness {
             let mut operator = self.clone();
             operator.caller = None;
             let sandboxes = scope_sandboxes(&operator, scope);
-            if sandboxes.list_sandboxes().await?.iter().any(|s| s.running && !s.attached) {
+            if !owned_running_sandbox_ids(&sandboxes).await?.is_empty() {
                 tracing::info!(target: "exoharness::progress", "Stopping sandboxes left by the previous local session...");
                 stop_owned_sandboxes(&sandboxes).await?;
             }
@@ -214,7 +217,8 @@ impl BasicExoHarness {
         Ok(Some(lease))
     }
 
-    pub(super) async fn finish_local_sessions(&self) -> Result<()> {
+    /// Stop owned local sandboxes and release their leases after execution drains.
+    pub async fn release_local_sessions(&self) -> Result<()> {
         let Some(sessions) = &self.sessions else {
             return Ok(());
         };
@@ -254,12 +258,9 @@ fn scope_sandboxes(
 
 async fn stop_owned_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()> {
     let mut failure = None;
-    for sandbox in scope.list_sandboxes().await? {
-        if sandbox.running
-            && !sandbox.attached
-            && let Err(error) = scope.stop_sandbox(sandbox.id.clone()).await
-        {
-            tracing::error!(%error, sandbox_id = %sandbox.id, "failed to stop sandbox");
+    for sandbox_id in owned_running_sandbox_ids(scope).await? {
+        if let Err(error) = scope.stop_sandbox(sandbox_id.clone()).await {
+            tracing::error!(%error, %sandbox_id, "failed to stop sandbox");
             failure = Some(error);
         }
     }
@@ -267,6 +268,19 @@ async fn stop_owned_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+async fn owned_running_sandbox_ids(scope: &BasicScopedSandboxHandle<'_>) -> Result<Vec<SandboxId>> {
+    Ok(scope
+        .harness
+        .inner
+        .storage
+        .list_json_matching_suffix::<StoredSandbox>(scope.sandboxes_dir(), ".json")
+        .await?
+        .into_iter()
+        .filter(|sandbox| sandbox.running && sandbox.attachment.is_none())
+        .map(|sandbox| sandbox.id)
+        .collect())
 }
 
 #[cfg(test)]
@@ -348,20 +362,19 @@ mod tests {
             .await?;
         let fork = thread.fork(Default::default()).await?;
         assert!(fork.list_sandboxes().await?.is_empty());
-        fork.claim_local_session().await?;
         assert!(thread.list_sandboxes().await?[0].running);
         let inline = harness(temp.path()).await?;
         let other_agent = inline.get_agent(&agent.record().id).await?.unwrap();
         let busy = other_agent.get_thread(&thread.record().id).await?.unwrap();
         assert!(
-            busy.claim_local_session()
+            busy.activate_caller()
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("owned by another local process")
         );
         let fork_elsewhere = other_agent.get_thread(&fork.record().id).await?.unwrap();
-        assert!(fork_elsewhere.claim_local_session().await.is_err());
+        assert!(fork_elsewhere.activate_caller().await.is_err());
         assert!(agent.delete_thread(&fork.record().id).await?);
         assert!(
             !temp
@@ -385,6 +398,25 @@ mod tests {
             .await
             .is_err()
         );
+        let turn = thread.begin_turn(Default::default()).await?;
+        let busy_turn = busy.turn_handle(turn.record().clone()).await?;
+        assert!(
+            busy_turn
+                .add_events(vec![crate::EventData::SessionStarted])
+                .await
+                .is_err()
+        );
+        assert!(
+            busy_turn
+                .write_artifact(WriteArtifactRequest {
+                    path: "turn-config.json".into(),
+                    contents: b"changed".to_vec(),
+                })
+                .await
+                .is_err()
+        );
+        assert!(busy_turn.finish().await.is_err());
+        turn.finish().await?;
         assert!(
             other_agent
                 .delete_thread(&thread.record().id)
@@ -429,7 +461,7 @@ mod tests {
             .with_local_sessions(temp.path().to_owned());
         let agent = recovered.get_agent(&agent_id).await?.unwrap();
         let thread = agent.get_thread(&thread_id).await?.unwrap();
-        tokio::try_join!(thread.claim_local_session(), thread.claim_local_session())
+        tokio::try_join!(thread.activate_caller(), thread.activate_caller())
             .context("recovering the abandoned VM")?;
         assert!(!thread.list_sandboxes().await?[0].running);
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
@@ -458,7 +490,7 @@ mod tests {
         .await??;
         backend.resume_acquisition.notify_one();
         restart.await.context("resuming a sandbox after recovery")?;
-        thread.claim_local_session().await?;
+        thread.activate_caller().await?;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
         assert!(thread.list_sandboxes().await?.iter().any(|s| s.running));
         recovered.release_local_sessions().await?;
@@ -646,7 +678,7 @@ mod tests {
                 .get_thread(&thread.record().id)
                 .await?
                 .unwrap()
-                .claim_local_session()
+                .activate_caller()
                 .await
                 .is_err()
         );

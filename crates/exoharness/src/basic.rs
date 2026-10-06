@@ -407,11 +407,6 @@ impl ExoHarness for BasicExoHarness {
         }))
     }
 
-    #[cfg(feature = "basic-backend")]
-    async fn release_local_sessions(&self) -> Result<()> {
-        self.finish_local_sessions().await
-    }
-
     async fn list_environments(&self) -> Result<Vec<crate::EnvironmentDefinition>> {
         self.check(ResourceScope::Global).await?;
         let mut definitions: Vec<crate::EnvironmentDefinition> = self
@@ -1485,17 +1480,6 @@ impl ConversationHandle for BasicConversationHandle {
         &self.record
     }
 
-    #[cfg(feature = "basic-backend")]
-    async fn claim_local_session(&self) -> Result<()> {
-        self.harness
-            .claim_local_scope(ResourceScope::Thread {
-                agent_id: self.agent_id,
-                thread_id: self.record.id,
-            })
-            .await
-            .map(|_| ())
-    }
-
     async fn activate_caller(&self) -> Result<bool> {
         #[cfg(feature = "basic-backend")]
         let _lease = self
@@ -2198,6 +2182,14 @@ impl BasicConversationHandle {
         expected_head: Option<EventId>,
         data: Vec<EventData>,
     ) -> Result<AddEventsResult> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let conversation_dir = self.conversation_dir();
         let mut record = self.load_record().await?;
@@ -2253,6 +2245,14 @@ impl TurnHandle for BasicTurnHandle {
     }
 
     async fn add_events(&self, data: Vec<EventData>) -> Result<AddEventsResult> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.conversation_id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record =
             load_conversation_record(&self.harness.inner.storage, &self.conversation_dir).await?;
@@ -2277,6 +2277,14 @@ impl TurnHandle for BasicTurnHandle {
     }
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.conversation_id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record =
             load_conversation_record(&self.harness.inner.storage, &self.conversation_dir).await?;
@@ -2310,6 +2318,14 @@ impl TurnHandle for BasicTurnHandle {
     }
 
     async fn finish(&self) -> Result<EventId> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.conversation_id,
+            })
+            .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
         let finished_event_id = {
             let state = self.state.lock().expect("turn state poisoned");

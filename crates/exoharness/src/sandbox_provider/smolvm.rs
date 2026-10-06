@@ -24,6 +24,7 @@ use egress::SmolvmProxy;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, TcpListener};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -113,6 +114,10 @@ pub struct SmolvmBackendConfig {
     pub boot_binary: Option<PathBuf>,
     /// Prepared local images, normally under the harness root. None skips caching.
     pub image_cache: Option<PathBuf>,
+    /// Storage disk capacity for OCI layers and container data, in GiB.
+    pub storage_gib: Option<NonZeroU32>,
+    /// Disk capacity for persistent root filesystem changes, in GiB.
+    pub overlay_gib: Option<NonZeroU32>,
 }
 
 type TcpPortsCell = Arc<OnceCell<BTreeMap<u16, u16>>>;
@@ -130,6 +135,8 @@ pub struct SmolvmSandboxBackend {
     /// `PATH` and stats candidates, and a constructor cannot await.
     boot_binary: Arc<OnceCell<Option<PathBuf>>>,
     mode: SmolvmExecutionMode,
+    storage_gib: Option<NonZeroU32>,
+    overlay_gib: Option<NonZeroU32>,
     #[cfg(target_os = "macos")]
     image_cache: Option<PathBuf>,
     /// Probed once: re-asking per `acquire` would spawn a process per sandbox.
@@ -170,6 +177,8 @@ impl SmolvmSandboxBackend {
             boot_binary_override,
             boot_binary: Arc::new(OnceCell::new()),
             mode: config.mode,
+            storage_gib: config.storage_gib,
+            overlay_gib: config.overlay_gib,
             #[cfg(target_os = "macos")]
             image_cache: config.image_cache,
             capabilities: Arc::new(OnceCell::new()),
@@ -418,7 +427,7 @@ impl SmolvmSandboxBackend {
         create.arg("machine").arg("create").arg("--name").arg(name);
         create.arg("--image").arg(image);
         self.stamp_labels(&mut create, key).await;
-        configure_spec_args(&mut create, spec)?;
+        configure_spec_args(&mut create, spec, self.storage_gib, self.overlay_gib)?;
         let exact_host_policy = exact_host_policy_fingerprint(&spec.policy.networking)?;
         if let Some(policy) = &exact_host_policy {
             create
@@ -705,6 +714,8 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                     binary: binary.clone(),
                     image,
                     boot_binary,
+                    storage_gib: self.storage_gib,
+                    overlay_gib: self.overlay_gib,
                     request,
                 },
             )));
@@ -847,7 +858,12 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         // Preserve sandbox identity when importing a snapshot.
         self.stamp_labels(&mut create, request.sandbox_id.as_str())
             .await;
-        configure_spec_args(&mut create, &request.spec)?;
+        configure_spec_args(
+            &mut create,
+            &request.spec,
+            self.storage_gib,
+            self.overlay_gib,
+        )?;
         let (host_ports, reservations) = self
             .configure_tcp_forwards(&mut create, &request.spec)
             .await?;
@@ -880,6 +896,8 @@ struct SmolvmOneShotHandle {
     image: String,
     binary: PathBuf,
     boot_binary: Option<PathBuf>,
+    storage_gib: Option<NonZeroU32>,
+    overlay_gib: Option<NonZeroU32>,
     request: SandboxRequest,
 }
 
@@ -888,7 +906,12 @@ impl SmolvmOneShotHandle {
         let mut process = Command::new(&self.binary);
         process.arg("machine").arg("run");
         process.arg("--image").arg(&self.image);
-        configure_spec_args(&mut process, &self.request.spec)?;
+        configure_spec_args(
+            &mut process,
+            &self.request.spec,
+            self.storage_gib,
+            self.overlay_gib,
+        )?;
         configure_command_args(&mut process, command, cwd);
         // Arms smolvm's parent-death watchdog so the VM dies with a SIGKILLed CLI
         // rather than reparenting to init. Ephemeral runs only.
@@ -1199,14 +1222,19 @@ fn exact_host_policy_fingerprint(networking: &SandboxNetworkPolicy) -> Result<Op
 }
 
 /// Mounts and network policy, shared by the create/run paths.
-fn configure_spec_args(process: &mut Command, spec: &SandboxSpec) -> Result<()> {
+fn configure_spec_args(
+    process: &mut Command,
+    spec: &SandboxSpec,
+    storage_gib: Option<NonZeroU32>,
+    overlay_gib: Option<NonZeroU32>,
+) -> Result<()> {
     let resources = spec.resources.unwrap_or_default();
     process.arg("--cpus").arg(resources.vcpu_count.to_string());
     process.arg("--mem").arg(resources.memory_mib.to_string());
-    if let Some(storage) = resources.storage_gib {
+    if let Some(storage) = storage_gib {
         process.arg("--storage").arg(storage.to_string());
     }
-    if let Some(overlay) = resources.overlay_gib {
+    if let Some(overlay) = overlay_gib {
         process.arg("--overlay").arg(overlay.to_string());
     }
     if spec.policy.networking_enabled() {
@@ -1565,7 +1593,7 @@ mod tests {
                 "case \"$1 $2 $3\" in\n\
                  '--version  ') printf 'smolvm 1.19.0\\n';;\n\
                  'machine create --help') printf '%s\\n' '--label';;\n\
-                 'machine create '*) printf '%s\\n' \"$@\" > '{}';;\n\
+                 'machine create '*|'machine run '*) printf '%s\\n' \"$@\" > '{}';;\n\
                  'machine start '*) exit 0;;\n\
                  *) exit 23;;\n\
                  esac",
@@ -1574,19 +1602,19 @@ mod tests {
         );
         let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
             binary: Some(binary),
+            storage_gib: NonZeroU32::new(64),
+            overlay_gib: NonZeroU32::new(128),
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
         request.spec.tcp_ports = vec![20_000, 20_001];
-        request.spec.resources = Some(serde_json::from_str(
-            r#"{"vcpu_count":4,"memory_mib":16384,"storage_gib":64,"overlay_gib":64}"#,
-        )?);
+        request.spec.resources = crate::SandboxResourceShape::new(4, 16384);
         let host_ports = backend
             .ensure_machine_started("test", &request.spec, "test", "alpine", None)
             .await?;
-        let args = std::fs::read_to_string(args_file)?;
+        let args = std::fs::read_to_string(&args_file)?;
         assert!(args.contains("--storage\n64\n"));
-        assert!(args.contains("--overlay\n64\n"));
+        assert!(args.contains("--overlay\n128\n"));
         assert!(args.contains("--\n/bin/sh\n-c\ntrap 'kill -TERM -1; wait; exit 0' INT TERM;"));
         for (guest, host) in &host_ports {
             assert!(
@@ -1602,6 +1630,23 @@ mod tests {
         }
         assert_eq!(host_ports.len(), 2);
         assert!(args.contains("--outbound-localhost-only\n"), "{args}");
+        let mut request = test_request(None);
+        request.spec.image = "./rootfs".into();
+        let handle = backend.acquire(request).await?;
+        let output = handle
+            .exec(&SandboxCommand {
+                argv: vec!["true".into()],
+                env: Default::default(),
+                display_argv: None,
+                cwd: None,
+                timeout: None,
+            })
+            .await?;
+        assert!(output.ok, "{output:?}");
+        let args = std::fs::read_to_string(args_file)?;
+        assert!(args.starts_with("machine\nrun\n"), "{args}");
+        assert!(args.contains("--storage\n64\n"), "{args}");
+        assert!(args.contains("--overlay\n128\n"), "{args}");
         Ok(())
     }
 
@@ -2233,7 +2278,7 @@ esac"#,
         };
 
         let mut process = Command::new("smolvm");
-        configure_spec_args(&mut process, &spec).unwrap();
+        configure_spec_args(&mut process, &spec, None, None).unwrap();
         let rendered: Vec<String> = process
             .as_std()
             .get_args()
@@ -2255,7 +2300,7 @@ esac"#,
             allowed_hosts: vec!["Z.example.com".into(), "api.example.com".into()],
         };
         let mut process = Command::new("smolvm");
-        configure_spec_args(&mut process, &spec).unwrap();
+        configure_spec_args(&mut process, &spec, None, None).unwrap();
         let rendered: Vec<String> = process
             .as_std()
             .get_args()
@@ -2281,7 +2326,7 @@ esac"#,
         spec.policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: Vec::new(),
         };
-        let error = configure_spec_args(&mut Command::new("smolvm"), &spec)
+        let error = configure_spec_args(&mut Command::new("smolvm"), &spec, None, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("at least one allowed host"), "{error}");

@@ -76,7 +76,6 @@ impl AgentBackend for LocalProvider {
         thread: &dyn ThreadHandle,
         created: bool,
     ) -> Result<managed::ThreadInfo> {
-        thread.claim_local_session().await?;
         let agent_config = crate::load_agent_config(agent).await?;
         let current_model = crate::get_conversation_model_override(thread).await?;
         let preferred = current_model
