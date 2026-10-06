@@ -1770,7 +1770,7 @@ mod tests {
         let digest = format!("sha256:{}", "a".repeat(64));
         assert_eq!(
             cache_image_dir(Path::new("/cache"), "linux-arm64", &digest).unwrap(),
-            Path::new("/cache/v5/linux-arm64").join("a".repeat(64))
+            Path::new("/cache/v6/linux-arm64").join("a".repeat(64))
         );
         assert!(cache_image_dir(Path::new("/cache"), "linux-arm64", "latest").is_err());
     }

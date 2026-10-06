@@ -51,7 +51,11 @@ async fn routing_uses_current_ports_when_thread_history_cannot_be_read() -> Resu
         .join("conversations")
         .join(thread.record().id.to_string())
         .join("events");
-    std::fs::write(events.join("unreadable.json"), b"invalid event JSON")?;
+    let event_file = std::fs::read_dir(events)?
+        .next()
+        .context("thread has no event files")??
+        .path();
+    std::fs::write(event_file, b"invalid event JSON")?;
     assert!(thread.get_events(None).await.is_err());
 
     assert_eq!(
