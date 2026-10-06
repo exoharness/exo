@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 use exo_managed_agents::AgentBackend;
 use exo_managed_agents::http::{RuntimeClient, protocol::*};
@@ -161,41 +161,23 @@ impl AgentBackend for HttpProvider {
 
 #[async_trait]
 impl Provider for HttpProvider {
-    async fn cancel_turn(&self, key: HarnessTurnKey) -> Result<bool> {
-        let agent_id = *self
-            .transport
-            .threads
-            .lock()
-            .expect("HTTP threads poisoned")
-            .get(&key.thread_id)
-            .context("thread has not been opened")?;
-        Ok(self
-            .transport
+    async fn cancel_turn(&self, _runtime: &crate::Runtime, key: HarnessTurnKey) -> Result<bool> {
+        self.transport
             .client
-            .cancel_turn(agent_id, key.thread_id, key.turn_id)
-            .await?
-            .canceled_active_turn)
+            .cancel_turn(key.agent_id, key.thread_id, key.turn_id)
+            .await
+            .map(|result| result.canceled_active_turn)
     }
+
     fn runtime_host(&self) -> Arc<dyn crate::runtime_host::RuntimeHost> {
         Arc::new(crate::TokioRuntimeHost)
     }
 
-    async fn is_turn_active(
-        &self,
-        thread: &dyn exoharness::ThreadHandle,
-        turn: exoharness::TurnId,
-    ) -> Result<bool> {
-        let agent = *self
-            .transport
-            .threads
-            .lock()
-            .expect("HTTP threads poisoned")
-            .get(&thread.record().id)
-            .context("resolve the thread through this provider before reconnecting it")?;
+    async fn is_turn_active(&self, key: HarnessTurnKey) -> Result<bool> {
         Ok(self
             .transport
             .client
-            .turn_status(agent, thread.record().id, turn)
+            .turn_status(key.agent_id, key.thread_id, key.turn_id)
             .await?
             .active)
     }
@@ -261,14 +243,10 @@ impl Harness<ProviderTurn> for HttpProvider {
                 Ok(())
             }
             HarnessCommand::CancelTurn { key } => {
-                let agent_id = *self
-                    .transport
-                    .threads
-                    .lock()
-                    .expect("HTTP threads poisoned")
-                    .get(&key.thread_id)
-                    .context("resolve the thread through this provider before cancelling it")?;
-                self.cancel(agent_id, key.thread_id, key.turn_id).await
+                self.cancel(key.agent_id, key.thread_id, key.turn_id).await
+            }
+            HarnessCommand::SuspendTurn { .. } | HarnessCommand::ResumeTurn { .. } => {
+                bail!("HTTP providers do not support turn suspension or resumption")
             }
         }
     }

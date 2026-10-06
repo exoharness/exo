@@ -660,7 +660,11 @@ pub async fn turn_status(service: &Service<'_>, path: &TurnPath) -> Result<TurnS
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
     let active = service
         .runtime
-        .is_turn_active(thread.as_ref(), path.turn_id)
+        .is_turn_active(crate::harness::HarnessTurnKey::new(
+            path.agent_id,
+            thread.record().id,
+            path.turn_id,
+        ))
         .await
         .map_err(internal_error)?;
     Ok(TurnStatusResult { active })
@@ -739,12 +743,15 @@ pub async fn submit_turn(
 
 pub async fn cancel_turn(
     runtime: &Runtime,
+    agent_id: AgentId,
     thread_id: ThreadId,
     turn_id: TurnId,
 ) -> Result<CancelTurnResult> {
     Ok(CancelTurnResult {
         canceled_active_turn: runtime
-            .cancel_turn(crate::harness::HarnessTurnKey::new(thread_id, turn_id))
+            .cancel_turn(crate::harness::HarnessTurnKey::new(
+                agent_id, thread_id, turn_id,
+            ))
             .await?,
         finished_event_id: None,
     })

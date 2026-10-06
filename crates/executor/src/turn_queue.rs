@@ -6,8 +6,8 @@ use std::sync::{
 
 use anyhow::{Context, Result, anyhow, ensure};
 use exoharness::turn_coordinator::{
-    CancelAuthority, CancelTurnOutcome, QueuedTurn, StoredTurnCoordinator, TurnAttention,
-    TurnCoordinator, TurnQueueDiscovery, TurnThread,
+    QueuedTurn, TurnAttention, TurnAuthority, TurnControl, TurnControlOutcome, TurnCoordinator,
+    TurnLease, TurnQueueDiscovery, TurnSubmission, TurnThread,
 };
 use exoharness::{
     AgentHandle, EventData, EventQuery, EventQueryDirection, ThreadHandle, TurnRecord, Uuid7,
@@ -32,8 +32,16 @@ pub struct TurnOptions {
     pub attention: TurnAttention,
 }
 
+#[derive(Debug)]
+pub(crate) struct TurnSuspended;
+impl std::fmt::Display for TurnSuspended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("turn suspended")
+    }
+}
+impl std::error::Error for TurnSuspended {}
+
 struct TurnContext {
-    thread: TurnThread,
     runtime: Runtime,
     observers: Vec<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
 }
@@ -46,24 +54,72 @@ type ActiveTurn = (
 pub(crate) struct TurnQueueRuntime {
     pub(crate) admission: tokio::sync::RwLock<()>,
     resolver: Mutex<Option<RecoveryRuntimeResolver>>,
-    pub coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
-    pub discovery: Option<Arc<dyn TurnQueueDiscovery>>,
+    pub(crate) coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
+    pub(crate) discovery: Option<Arc<dyn TurnQueueDiscovery>>,
     contexts: Mutex<HashMap<HarnessTurnKey, TurnContext>>,
     drains: Mutex<HashMap<TurnThread, Uuid7>>,
     pub(crate) active: Mutex<HashMap<TurnThread, ActiveTurn>>,
     tasks: Mutex<TaskGroup>,
     host: Arc<dyn RuntimeHost>,
-    pub draining: AtomicBool,
+    pub(crate) draining: AtomicBool,
 }
 
 impl TurnQueueRuntime {
-    pub fn new(host: Arc<dyn RuntimeHost>) -> Self {
-        let coordinator = Arc::new(StoredTurnCoordinator::in_memory());
+    fn register_observer(
+        &self,
+        key: HarnessTurnKey,
+        runtime: &Runtime,
+        observer: mpsc::UnboundedSender<Result<ExecutionStreamEvent>>,
+    ) {
+        self.contexts
+            .lock()
+            .expect("turn contexts poisoned")
+            .entry(key)
+            .or_insert_with(|| TurnContext {
+                runtime: runtime.clone(),
+                observers: Vec::new(),
+            })
+            .observers
+            .push(observer);
+    }
+
+    fn active_harness(
+        &self,
+        key: HarnessTurnKey,
+    ) -> Option<Arc<crate::harness_adapter::ExecutorHarness>> {
+        self.active
+            .lock()
+            .expect("active queue owners poisoned")
+            .get(&TurnThread {
+                agent_id: key.agent_id,
+                thread_id: key.thread_id,
+            })
+            .filter(|(_, id)| *id == key.turn_id)
+            .map(|(harness, _)| harness.clone())
+    }
+
+    async fn signal(&self, key: HarnessTurnKey, control: TurnControl) -> Result<()> {
+        let command = match control {
+            TurnControl::Run => HarnessCommand::ResumeTurn { key },
+            TurnControl::Cancel => HarnessCommand::CancelTurn { key },
+            TurnControl::Suspend => HarnessCommand::SuspendTurn { key },
+        };
+        if let Some(harness) = self.active_harness(key) {
+            harness.submit(command).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn new(
+        host: Arc<dyn RuntimeHost>,
+        coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
+        discovery: Option<Arc<dyn TurnQueueDiscovery>>,
+    ) -> Self {
         Self {
             admission: Default::default(),
             resolver: Mutex::default(),
-            coordinator: coordinator.clone(),
-            discovery: Some(coordinator),
+            coordinator,
+            discovery,
             contexts: Mutex::default(),
             drains: Mutex::default(),
             active: Mutex::default(),
@@ -75,22 +131,6 @@ impl TurnQueueRuntime {
 
     pub(crate) fn broadcast(&self, key: HarnessTurnKey, event: Result<ExecutionStreamEvent>) {
         let mut contexts = self.contexts.lock().expect("turn contexts poisoned");
-        if matches!(&event, Ok(ExecutionStreamEvent::Completed(_)) | Err(_)) {
-            if let Some(context) = contexts.remove(&key) {
-                for observer in context.observers {
-                    if observer
-                        .send(match &event {
-                            Ok(event) => Ok(event.clone()),
-                            Err(error) => Err(anyhow!(error.to_string())),
-                        })
-                        .is_err()
-                    {
-                        tracing::debug!(?key, "turn observer disconnected");
-                    }
-                }
-            }
-            return;
-        }
         if let Some(context) = contexts.get_mut(&key) {
             context.observers.retain(|observer| {
                 observer
@@ -100,6 +140,29 @@ impl TurnQueueRuntime {
                     })
                     .is_ok()
             });
+        }
+        if matches!(&event, Ok(ExecutionStreamEvent::Completed(_)) | Err(_)) {
+            contexts.remove(&key);
+        }
+    }
+
+    fn stop_observers(&self, key: HarnessTurnKey, error: &anyhow::Error) {
+        if let Some(context) = self
+            .contexts
+            .lock()
+            .expect("turn contexts poisoned")
+            .get_mut(&key)
+        {
+            for observer in context.observers.drain(..) {
+                if observer
+                    .send(Err(anyhow!(
+                        "turn execution stopped; work retained for recovery: {error:#}"
+                    )))
+                    .is_err()
+                {
+                    tracing::debug!(?key, "stopped turn observer disconnected");
+                }
+            }
         }
     }
 
@@ -128,7 +191,10 @@ impl TurnQueueRuntime {
         }
     }
 
-    pub async fn shutdown(&self, root: Arc<crate::harness_adapter::ExecutorHarness>) -> Result<()> {
+    pub(crate) async fn shutdown(
+        &self,
+        root: Arc<crate::harness_adapter::ExecutorHarness>,
+    ) -> Result<()> {
         let mut errors = Vec::new();
         let active: Vec<_> = self
             .active
@@ -197,79 +263,76 @@ impl LocalProvider {
         coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
         discovery: Option<Arc<dyn TurnQueueDiscovery>>,
     ) -> Self {
-        let mut turns = TurnQueueRuntime::new(self.host.clone());
-        turns.coordinator = coordinator;
-        turns.discovery = discovery;
+        let turns = TurnQueueRuntime::new(self.host.clone(), coordinator, discovery);
         self.turns = Arc::new(turns);
         self
     }
 
-    pub(crate) async fn cancel_queued_turn(&self, key: HarnessTurnKey) -> Result<bool> {
-        let thread = {
-            let contexts = self.turns.contexts.lock().expect("turn contexts poisoned");
-            contexts.get(&key).map(|context| TurnThread {
-                agent_id: context.thread.agent_id,
-                thread_id: key.thread_id,
-            })
+    pub(crate) async fn control_queued_turn(
+        &self,
+        key: HarnessTurnKey,
+        control: TurnControl,
+    ) -> Result<bool> {
+        let thread = TurnThread {
+            agent_id: key.agent_id,
+            thread_id: key.thread_id,
         };
-        let thread = thread.or_else(|| {
-            self.turns
-                .drains
-                .lock()
-                .expect("turn drains poisoned")
-                .keys()
-                .find(|scope| scope.thread_id == key.thread_id)
-                .copied()
-        });
-        let thread = match thread {
-            Some(thread) => Some(thread),
-            None => match &self.turns.discovery {
-                Some(discovery) => discovery
-                    .pending_threads()
-                    .await?
-                    .into_iter()
-                    .find(|thread| thread.thread_id == key.thread_id),
-                None => None,
-            },
-        };
-        let Some(thread) = thread else {
-            return Ok(false);
-        };
+        if control == TurnControl::Suspend {
+            let Some(entry) = self.turns.coordinator.get(thread, key.turn_id).await? else {
+                return Ok(false);
+            };
+            if !self.executor.can_suspend_turn(&entry.work.agent_config) {
+                return Ok(false);
+            }
+        }
         let authority = match self.state.caller() {
-            Some(caller) => CancelAuthority::Submitter(caller.principal.clone()),
-            None => CancelAuthority::ThreadOwner,
+            Some(caller) => TurnAuthority::Submitter(caller.principal.clone()),
+            None => TurnAuthority::ThreadOwner,
         };
         match self
             .turns
             .coordinator
-            .cancel(thread, key.turn_id, authority)
+            .control(thread, key.turn_id, authority, control)
             .await?
         {
-            CancelTurnOutcome::Running => {
-                let provider = self
-                    .turns
-                    .active
-                    .lock()
-                    .expect("active queue owners poisoned")
-                    .get(&thread)
-                    .map(|(provider, _)| provider.clone());
-                if let Some(provider) = provider
-                    && provider.is_active(key)
-                {
-                    provider.submit(HarnessCommand::CancelTurn { key }).await?;
-                }
+            TurnControlOutcome::Queued | TurnControlOutcome::Running => {
+                self.turns.signal(key, control).await?;
                 Ok(true)
             }
-            CancelTurnOutcome::Queued => Ok(true),
-            CancelTurnOutcome::NotAccessible => {
-                anyhow::bail!("only the submitter or thread owner may cancel this turn")
+            TurnControlOutcome::NotAccessible => {
+                anyhow::bail!("only the submitter or thread owner may control this turn")
             }
-            CancelTurnOutcome::NotFound => Ok(false),
+            TurnControlOutcome::NotFound => Ok(false),
         }
     }
 }
 
 impl Runtime {
+    pub(crate) async fn control_local_turn(
+        &self,
+        provider: &LocalProvider,
+        key: HarnessTurnKey,
+        control: TurnControl,
+    ) -> Result<bool> {
+        let _admission = provider.turns.admission.read().await;
+        ensure!(
+            !provider.turns.draining.load(Ordering::SeqCst),
+            "runtime is shutting down"
+        );
+        if !provider.control_queued_turn(key, control).await? {
+            return Ok(false);
+        }
+        let scope = TurnThread {
+            agent_id: key.agent_id,
+            thread_id: key.thread_id,
+        };
+        if let Err(error) = self.spawn_queue(provider, scope, None).await {
+            provider.turns.stop_observers(key, &error);
+            tracing::error!(?scope, %error, "controlled turn retained; failed to wake queue");
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn accept_local_turn(
         &self,
         provider: &LocalProvider,
@@ -320,66 +383,104 @@ impl Runtime {
             request,
         };
         let principal = thread.caller().map(|caller| caller.principal.clone());
-        let accepted = provider
+        let turn = TurnRecord {
+            id: Uuid7::now(),
+            session_id: work.request.session_id.unwrap_or_else(Uuid7::now),
+        };
+        let key = HarnessTurnKey::new(scope.agent_id, scope.thread_id, turn.id);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        // Publish the execution identity and observer before the queue entry can
+        // become visible to a live drain.
+        provider.turns.register_observer(key, self, sender.clone());
+        let accepted = match provider
             .turns
             .coordinator
             .enqueue(
                 scope,
-                QueuedTurn {
-                    turn: TurnRecord {
-                        id: Uuid7::now(),
-                        session_id: work.request.session_id.unwrap_or_else(Uuid7::now),
-                    },
+                TurnSubmission {
+                    turn,
                     work,
                     principal,
                     idempotency_key: options.idempotency_key,
                     attention: options.attention,
-                    started: false,
-                    cancelled: false,
                 },
             )
-            .await?;
-        let key = HarnessTurnKey::new(scope.thread_id, accepted.turn.id);
-        let (sender, receiver) = mpsc::unbounded_channel();
+            .await
         {
-            let mut contexts = provider
+            Ok(accepted) => accepted,
+            Err(error) => {
+                provider
+                    .turns
+                    .contexts
+                    .lock()
+                    .expect("turn contexts poisoned")
+                    .remove(&key);
+                return Err(error);
+            }
+        };
+        let accepted_key = HarnessTurnKey::new(scope.agent_id, scope.thread_id, accepted.turn.id);
+        if accepted.duplicate {
+            provider
                 .turns
                 .contexts
                 .lock()
-                .expect("turn contexts poisoned");
-            contexts
-                .entry(key)
-                .or_insert_with(|| TurnContext {
-                    thread: scope,
-                    runtime: self.clone(),
-                    observers: Vec::new(),
-                })
-                .observers
-                .push(sender.clone());
-        }
-        // Attach before checking completion so a racing acknowledgment cannot
-        // leave a duplicate request observing a turn that has already finished.
-        if accepted.duplicate
-            && let JournalStatus::Finished(result) =
-                journal_status(thread.as_ref(), &accepted.turn).await?
-        {
-            provider.turns.replay_completion(
-                key,
-                &sender,
-                result.map(ExecutionStreamEvent::Completed),
-            );
-        }
-        drop(sender);
-        if let Some(turn_id) = accepted.interrupted {
+                .expect("turn contexts poisoned")
+                .remove(&key);
             provider
-                .cancel_queued_turn(HarnessTurnKey::new(scope.thread_id, turn_id))
-                .await?;
+                .turns
+                .register_observer(accepted_key, self, sender.clone());
+            match journal_status(thread.as_ref(), &accepted.turn).await {
+                Ok(JournalStatus::Finished(result)) => provider.turns.replay_completion(
+                    accepted_key,
+                    &sender,
+                    result.map(ExecutionStreamEvent::Completed),
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        ?accepted_key, %error,
+                        "accepted duplicate retained; failed to read completion"
+                    );
+                }
+            }
         }
-        self.spawn_queue(provider, scope, None).await?;
+        // A durable acceptance must not be reported as a failed turn if waking
+        // its worker fails. Hosts must arrange another durable wakeup.
+        if let Err(error) = self.spawn_queue(provider, scope, None).await {
+            provider.turns.stop_observers(accepted_key, &error);
+            tracing::error!(?scope, %error, "accepted turn retained; failed to wake queue");
+        }
         Ok((
             accepted.turn,
             ExecutionStreamHandle::new(UnboundedReceiverStream::new(receiver)),
         ))
+    }
+
+    pub(crate) async fn resume_local_turn(
+        &self,
+        provider: &LocalProvider,
+        key: HarnessTurnKey,
+    ) -> Result<ExecutionStreamHandle> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        provider.turns.register_observer(key, self, sender.clone());
+        match self
+            .control_local_turn(provider, key, TurnControl::Run)
+            .await
+        {
+            Ok(true) => {}
+            result => {
+                provider.turns.replay_completion(
+                    key,
+                    &sender,
+                    Err(anyhow!("turn could not be resumed")),
+                );
+                result?;
+                anyhow::bail!("turn is no longer queued");
+            }
+        }
+        Ok(ExecutionStreamHandle::new(UnboundedReceiverStream::new(
+            receiver,
+        )))
     }
 
     pub(crate) async fn drain_queue(
@@ -416,6 +517,7 @@ impl Runtime {
         let Some(lease) = provider.turns.coordinator.claim(scope).await? else {
             return Ok(());
         };
+        let initial_head = provider.turns.coordinator.peek(&lease).await?;
         provider
             .turns
             .drains
@@ -425,39 +527,49 @@ impl Runtime {
         let runtime = self.clone();
         let provider = provider.clone();
         let turns = provider.turns.clone();
-        let tasks = turns.clone();
-        let mut group = tasks.tasks.lock().expect("turn tasks poisoned");
+        let mut group = turns.tasks.lock().expect("turn tasks poisoned");
         while let Some(result) = group.try_join_next() {
             if let Err(error) = result {
                 tracing::error!(%error, "turn queue task failed");
             }
         }
+        let queue = turns.clone();
         group.spawn(async move {
-            let result = tokio::select! {
-                result = runtime.run_queue(&provider, &lease, resolver) => result,
-                () = lease.revoked() => {
-                    let active = turns.active.lock().expect("active queue owners poisoned").get(&scope).cloned();
-                    if let Some((active, turn_id)) = active {
-                        if active.is_active(HarnessTurnKey::new(scope.thread_id, turn_id))
-                            && let Err(error) = active.submit(HarnessCommand::CancelTurn { key: HarnessTurnKey::new(scope.thread_id, turn_id) }).await {
-                                tracing::error!(%error, "failed to stop turn after losing ownership");
-                        }
-                        active.wait_for_turn(HarnessTurnKey::new(scope.thread_id, turn_id)).await;
-                    }
-                    Err(anyhow!("turn ownership lost"))
-                }
-            };
+            let mut head = initial_head
+                .as_ref()
+                .map(|head| HarnessTurnKey::new(scope.agent_id, scope.thread_id, head.turn.id));
+            let result = runtime
+                .run_queue(&provider, &lease, resolver, initial_head, &mut head)
+                .await;
+            if result.is_err()
+                && let Some(key) = head
             {
-                let mut drains = turns.drains.lock().expect("turn drains poisoned");
-                if drains.get(&scope) == Some(&lease.token()) {
-                    drains.remove(&scope);
-                    turns.active.lock().expect("active queue owners poisoned").remove(&scope);
+                if let Err(stop_error) = queue.signal(key, TurnControl::Suspend).await {
+                    tracing::error!(?key, %stop_error, "failed to stop queue execution");
+                }
+                if let Some(harness) = queue.active_harness(key) {
+                    harness.wait_for_turn(key).await;
                 }
             }
+            {
+                let mut drains = queue.drains.lock().expect("turn drains poisoned");
+                if drains.get(&scope) == Some(&lease.token()) {
+                    drains.remove(&scope);
+                    queue
+                        .active
+                        .lock()
+                        .expect("active queue owners poisoned")
+                        .remove(&scope);
+                }
+            }
+            drop(lease);
             if let Err(error) = result {
-                tracing::error!(?scope, %error, "turn queue drain failed; retained for recovery");
-                let keys: Vec<_> = turns.contexts.lock().expect("turn contexts poisoned").keys().filter(|key| key.thread_id == scope.thread_id).copied().collect();
-                for key in keys { turns.broadcast(key, Err(anyhow!(error.to_string()))); }
+                if let Some(key) = head {
+                    queue.stop_observers(key, &error);
+                }
+                // Storage or ownership failures leave accepted work pending.
+                // Observers of later entries must not see a false terminal error.
+                tracing::error!(?scope, %error, "turn queue drain stopped; retained for recovery");
             }
         });
         Ok(())
@@ -466,52 +578,45 @@ impl Runtime {
     async fn run_queue(
         &self,
         provider: &LocalProvider,
-        lease: &exoharness::turn_coordinator::TurnLease,
+        lease: &TurnLease,
         resolver: Option<RecoveryRuntimeResolver>,
+        initial_head: Option<QueuedTurn<TurnWork>>,
+        current_head: &mut Option<HarnessTurnKey>,
     ) -> Result<()> {
         let turns = &provider.turns;
         let scope = lease.thread;
+        let mut initial_head = Some(initial_head);
         while !turns.draining.load(Ordering::SeqCst) {
-            let Some(head) = turns.coordinator.peek(lease).await? else {
+            let head = match initial_head.take() {
+                Some(head) => head,
+                None => turns.coordinator.peek(lease).await?,
+            };
+            *current_head = head
+                .as_ref()
+                .map(|head| HarnessTurnKey::new(scope.agent_id, scope.thread_id, head.turn.id));
+            if head
+                .as_ref()
+                .is_none_or(|head| head.control == TurnControl::Suspend)
+            {
+                if let Some(head) = &head {
+                    turns.broadcast(
+                        HarnessTurnKey::new(scope.agent_id, scope.thread_id, head.turn.id),
+                        Ok(ExecutionStreamEvent::Suspended(head.turn.clone())),
+                    );
+                }
                 if turns.coordinator.release_if_idle(lease).await? {
                     return Ok(());
                 }
                 continue;
-            };
-            let key = HarnessTurnKey::new(scope.thread_id, head.turn.id);
-            let context = turns
-                .contexts
-                .lock()
-                .expect("turn contexts poisoned")
-                .get(&key)
-                .map(|context| context.runtime.clone());
-            let mut recovery_slot = if context.is_none() {
-                Some(self.claim_recovery_slot().await?)
-            } else {
-                None
-            };
-            let execution = match context {
-                Some(context) => context,
-                None => match &head.principal {
-                    Some(principal) => {
-                        let execution = resolver
-                            .as_ref()
-                            .context("caller-scoped queue recovery is unavailable")?(
-                            principal.clone(),
-                        )?;
-                        ensure!(
-                            execution
-                                .exoharness_handle()
-                                .caller()
-                                .is_some_and(|caller| caller.principal == *principal),
-                            "queue recovery runtime has the wrong caller"
-                        );
-                        execution.as_ref().clone()
-                    }
-                    None => self.clone(),
-                },
-            };
-            let agent = execution
+            }
+            let head = head.expect("runnable head");
+            let was_started = head.started;
+            let started = turns.coordinator.start(lease, head.turn.id).await?;
+            let mut head = started.head;
+            let mut control = started.control;
+            let key = HarnessTurnKey::new(scope.agent_id, scope.thread_id, head.turn.id);
+            let root = self.root_runtime();
+            let agent = root
                 .exoharness_handle()
                 .get_agent(&scope.agent_id)
                 .await?
@@ -520,153 +625,202 @@ impl Runtime {
                 .get_thread(&scope.thread_id)
                 .await?
                 .context("queue thread no longer exists")?;
-            let status = if head.started {
-                journal_status(thread.as_ref(), &head.turn).await?
-            } else {
-                JournalStatus::Unstarted
-            };
-            match status {
-                JournalStatus::Finished(result) => {
-                    turns.broadcast(key, result.map(ExecutionStreamEvent::Completed))
-                }
-                JournalStatus::Running if head.cancelled => {
-                    let turn = thread.turn_handle(head.turn.clone()).await?;
-                    let error = anyhow!("turn cancelled before recovery");
-                    persist_failure(turn.as_ref(), &error).await?;
-                    turns.broadcast(key, Err(error));
-                }
-                JournalStatus::Running => {
-                    let recovery = execution
-                        .recover_local_thread(
-                            provider,
-                            agent,
-                            thread.clone(),
-                            resolver.clone(),
-                            head.turn.id,
-                            recovery_slot.take(),
-                        )
-                        .await;
-                    match journal_status(thread.as_ref(), &head.turn).await? {
-                        JournalStatus::Finished(result) => {
-                            turns.broadcast(key, result.map(ExecutionStreamEvent::Completed))
-                        }
-                        _ => {
-                            recovery?;
-                            return Ok(()); // Graceful shutdown preserves the unfinished head.
-                        }
-                    }
-                }
-                JournalStatus::Unstarted => {
-                    turns.coordinator.start(lease, head.turn.id).await?;
-                    if turns.coordinator.cancelled(lease, head.turn.id).await? {
-                        let turn = thread
-                            .begin_turn(exoharness::BeginTurnRequest {
-                                turn: Some(head.turn.clone()),
-                                session_id: head.work.request.session_id,
-                                input: head.work.request.input.clone(),
-                                initial_events: vec![head.work.event()?],
-                            })
-                            .await?;
-                        let error = anyhow!("turn cancelled before execution");
-                        persist_failure(turn.as_ref(), &error).await?;
-                        turns.broadcast(key, Err(error));
-                    } else {
-                        let execution_result = execution
-                            .execute_accepted_turn(
-                                agent,
-                                thread.clone(),
-                                head.turn.clone(),
-                                head.work.clone(),
-                            )
-                            .await;
-                        let mut stream = match execution_result {
-                            Ok(stream) => stream,
-                            Err(error) => {
-                                if turns.draining.load(Ordering::SeqCst) {
-                                    return Ok(());
-                                }
-                                let turn = match journal_status(thread.as_ref(), &head.turn).await?
-                                {
-                                    JournalStatus::Unstarted => {
-                                        thread
-                                            .begin_turn(exoharness::BeginTurnRequest {
-                                                turn: Some(head.turn.clone()),
-                                                session_id: head.work.request.session_id,
-                                                input: head.work.request.input.clone(),
-                                                initial_events: vec![head.work.event()?],
-                                            })
-                                            .await?
+            head.control = control.next().await.context("turn control watch ended")??;
+            if head.control == TurnControl::Suspend {
+                continue;
+            }
+            let stream = self
+                .open_queue_head(
+                    provider,
+                    thread.clone(),
+                    key,
+                    &head,
+                    was_started,
+                    resolver.as_ref(),
+                )
+                .await;
+            let mut suspended = false;
+            let error = match stream {
+                Err(error) => Some(error),
+                Ok(None) => None,
+                Ok(Some(mut stream)) => {
+                    let mut error = None;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            update = control.next() => {
+                                let update = update.context("turn control watch ended")
+                                    .and_then(|update| update);
+                                match update {
+                                    Ok(control) => {
+                                        suspended |= control == TurnControl::Suspend;
+                                        turns.signal(key, control).await?;
                                     }
-                                    _ => thread.turn_handle(head.turn.clone()).await?,
-                                };
-                                persist_failure(turn.as_ref(), &error).await?;
-                                turns.broadcast(key, Err(error));
-                                turns.coordinator.acknowledge(lease, head.turn.id).await?;
-                                turns
-                                    .contexts
-                                    .lock()
-                                    .expect("turn contexts poisoned")
-                                    .remove(&key);
-                                continue;
-                            }
-                        };
-                        if turns.coordinator.cancelled(lease, head.turn.id).await? {
-                            let active = turns
-                                .active
-                                .lock()
-                                .expect("active queue owners poisoned")
-                                .get(&scope)
-                                .cloned();
-                            if let Some((harness, _)) = active
-                                && harness.is_active(key)
-                            {
-                                harness.submit(HarnessCommand::CancelTurn { key }).await?;
-                            }
-                        }
-                        drop(recovery_slot.take());
-                        let mut finished = false;
-                        while let Some(event) = stream.next().await {
-                            match &event {
-                                Ok(ExecutionStreamEvent::Completed(_)) => finished = true,
-                                Err(_) => {
-                                    finished = matches!(
-                                        journal_status(thread.as_ref(), &head.turn).await?,
-                                        JournalStatus::Finished(_)
-                                    )
+                                    Err(error) => return Err(error),
                                 }
-                                _ => {}
-                            }
-                            turns.broadcast(key, event);
-                        }
-                        if !finished {
-                            return Ok(());
+                            },
+                            event = stream.next() => match event {
+                                Some(Ok(event)) => turns.broadcast(key, Ok(event)),
+                                Some(Err(failure)) => {
+                                    suspended |= failure.is::<TurnSuspended>();
+                                    error = Some(failure);
+                                },
+                                None => break,
+                            },
                         }
                     }
+                    error
                 }
+            };
+            if let Some(harness) = turns.active_harness(key) {
+                harness.wait_for_turn(key).await;
             }
             turns
                 .active
                 .lock()
                 .expect("active queue owners poisoned")
                 .remove(&scope);
-            turns.coordinator.acknowledge(lease, head.turn.id).await?;
-            turns
-                .contexts
-                .lock()
-                .expect("turn contexts poisoned")
-                .remove(&key);
+            match journal_status(thread.as_ref(), &head.turn).await? {
+                JournalStatus::Finished(result) => {
+                    turns.broadcast(key, result.map(ExecutionStreamEvent::Completed))
+                }
+                _ if turns.draining.load(Ordering::SeqCst) => return Ok(()),
+                status => {
+                    let current = turns
+                        .coordinator
+                        .peek(lease)
+                        .await?
+                        .context("queue head disappeared")?;
+                    if current.control == TurnControl::Suspend {
+                        continue;
+                    }
+                    if current.control == TurnControl::Run && suspended {
+                        continue;
+                    }
+                    let error = error
+                        .unwrap_or_else(|| anyhow!("turn execution stopped without completion"));
+                    persist_head_failure(thread.as_ref(), &head, status, &error).await?;
+                    turns.broadcast(key, Err(error));
+                }
+            }
+            initial_head = Some(turns.coordinator.acknowledge(lease, head.turn.id).await?);
         }
         Ok(())
     }
+
+    async fn open_queue_head(
+        &self,
+        provider: &LocalProvider,
+        root_thread: Arc<dyn ThreadHandle>,
+        key: HarnessTurnKey,
+        head: &QueuedTurn<TurnWork>,
+        was_started: bool,
+        resolver: Option<&RecoveryRuntimeResolver>,
+    ) -> Result<Option<ExecutionStreamHandle>> {
+        let turns = &provider.turns;
+        let events = if was_started {
+            root_thread
+                .get_events(Some(crate::harness_executor::recovery_query(key.turn_id)))
+                .await?
+                .events
+        } else {
+            Vec::new()
+        };
+        let status = journal_status_from_events(&events, &head.turn);
+        match status {
+            JournalStatus::Finished(_) => return Ok(None),
+            _ if head.control == TurnControl::Cancel => {
+                anyhow::bail!("turn cancelled")
+            }
+            _ => {}
+        }
+        let context = turns
+            .contexts
+            .lock()
+            .expect("turn contexts poisoned")
+            .get(&key)
+            .map(|context| context.runtime.clone());
+        let mut recovery_slot = if context.is_none() {
+            Some(self.claim_recovery_slot().await?)
+        } else {
+            None
+        };
+        let execution = match context {
+            Some(runtime)
+                if runtime
+                    .exoharness_handle()
+                    .caller()
+                    .map(|caller| &caller.principal)
+                    == head.principal.as_ref() =>
+            {
+                runtime
+            }
+            _ => match &head.principal {
+                Some(principal) => resolver
+                    .context("caller-scoped queue recovery is unavailable")?(
+                    principal.clone()
+                )?
+                .as_ref()
+                .clone(),
+                None => self.root_runtime(),
+            },
+        };
+        ensure!(
+            execution
+                .exoharness_handle()
+                .caller()
+                .map(|caller| &caller.principal)
+                == head.principal.as_ref(),
+            "queue recovery runtime has the wrong caller"
+        );
+        let agent = execution
+            .exoharness_handle()
+            .get_agent(&key.agent_id)
+            .await?
+            .context("queue caller cannot access agent")?;
+        let thread = agent
+            .get_thread(&key.thread_id)
+            .await?
+            .context("queue caller cannot access thread")?;
+        let stream = match status {
+            JournalStatus::Running => {
+                let work = TurnWork::from_events(&events)?;
+                execution
+                    .recover_local_turn(agent, thread, head.turn.clone(), work, events)
+                    .await?
+            }
+            JournalStatus::Unstarted => Some(
+                execution
+                    .execute_accepted_turn(agent, thread, head.turn.clone(), head.work.clone())
+                    .await?,
+            ),
+            JournalStatus::Finished(_) => unreachable!(),
+        };
+        drop(recovery_slot.take());
+        Ok(stream)
+    }
 }
 
-enum JournalStatus {
-    Unstarted,
-    Running,
-    Finished(Result<crate::SendResult>),
-}
-
-async fn persist_failure(turn: &dyn exoharness::TurnHandle, error: &anyhow::Error) -> Result<()> {
+async fn persist_head_failure(
+    thread: &dyn ThreadHandle,
+    head: &QueuedTurn<TurnWork>,
+    status: JournalStatus,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let turn = match status {
+        JournalStatus::Finished(_) => return Ok(()),
+        JournalStatus::Running => thread.turn_handle(head.turn.clone()).await?,
+        JournalStatus::Unstarted => {
+            thread
+                .begin_turn(exoharness::BeginTurnRequest {
+                    turn: Some(head.turn.clone()),
+                    input: head.work.request.input.clone(),
+                    initial_events: vec![head.work.event()?],
+                    session_id: None,
+                })
+                .await?
+        }
+    };
     turn.add_events(vec![EventData::Error {
         message: format!("{error:#}"),
         metadata: None,
@@ -674,6 +828,12 @@ async fn persist_failure(turn: &dyn exoharness::TurnHandle, error: &anyhow::Erro
     .await?;
     turn.finish().await?;
     Ok(())
+}
+
+enum JournalStatus {
+    Unstarted,
+    Running,
+    Finished(Result<crate::SendResult>),
 }
 
 async fn journal_status(thread: &dyn ThreadHandle, turn: &TurnRecord) -> Result<JournalStatus> {
@@ -690,20 +850,22 @@ async fn journal_status(thread: &dyn ThreadHandle, turn: &TurnRecord) -> Result<
         }))
         .await?
         .events;
+    Ok(journal_status_from_events(&events, turn))
+}
+
+fn journal_status_from_events(events: &[exoharness::Event], turn: &TurnRecord) -> JournalStatus {
     let Some(ended) = events
         .iter()
         .find(|event| matches!(event.data, EventData::TurnEnded))
     else {
-        return Ok(
-            if events
-                .iter()
-                .any(|event| matches!(event.data, EventData::TurnStarted { .. }))
-            {
-                JournalStatus::Running
-            } else {
-                JournalStatus::Unstarted
-            },
-        );
+        return if events
+            .iter()
+            .any(|event| matches!(event.data, EventData::TurnStarted { .. }))
+        {
+            JournalStatus::Running
+        } else {
+            JournalStatus::Unstarted
+        };
     };
     let result = match events.iter().find_map(|event| match &event.data {
         EventData::Error { message, .. } => Some(message),
@@ -716,5 +878,5 @@ async fn journal_status(thread: &dyn ThreadHandle, turn: &TurnRecord) -> Result<
             latest_event_id: ended.id,
         }),
     };
-    Ok(JournalStatus::Finished(result))
+    JournalStatus::Finished(result)
 }

@@ -760,10 +760,15 @@ async fn cancel_turn(
     } else {
         service.runtime.clone()
     };
-    crate::managed_agents::service::cancel_turn(&runtime, path.thread_id, path.turn_id)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
+    crate::managed_agents::service::cancel_turn(
+        &runtime,
+        path.agent_id,
+        path.thread_id,
+        path.turn_id,
+    )
+    .await
+    .map(web::Json)
+    .map_err(request_error)
 }
 
 async fn approval_response(

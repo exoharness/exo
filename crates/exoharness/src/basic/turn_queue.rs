@@ -1,5 +1,6 @@
 use super::*;
-use crate::turn_coordinator::{StoredTurnCoordinator, TurnQueueState, TurnQueueStore, TurnThread};
+use crate::turn_coordinator::stored::{TurnQueueState, TurnQueueStore};
+use crate::turn_coordinator::{StoredTurnCoordinator, TurnControl, TurnThread};
 use anyhow::ensure;
 use serde::de::DeserializeOwned;
 use std::marker::PhantomData;
@@ -46,6 +47,7 @@ impl<Work: Clone + Serialize + DeserializeOwned + Send + Sync + 'static> TurnQue
     async fn load(&self, thread: TurnThread) -> Result<TurnQueueState<Work>> {
         #[cfg(feature = "basic-backend")]
         let _lease = self.harness.claim_local_scope(scope(thread)).await?;
+        #[cfg(not(feature = "basic-backend"))]
         self.harness.check(scope(thread)).await?;
         Ok(self
             .harness
@@ -62,7 +64,11 @@ impl<Work: Clone + Serialize + DeserializeOwned + Send + Sync + 'static> TurnQue
     }
 
     async fn save(&self, thread: TurnThread, state: &TurnQueueState<Work>) -> Result<()> {
-        let _guard = self.harness.inner.write_lock.lock().await;
+        let _resources = self
+            .harness
+            .inner
+            .lock_thread_resources(thread.agent_id, thread.thread_id)
+            .await;
         let directory = self.harness.owner_dir(scope(thread));
         ensure!(
             self.harness
@@ -97,7 +103,13 @@ impl<Work: Clone + Serialize + DeserializeOwned + Send + Sync + 'static> TurnQue
             )
             .await?
             .into_iter()
-            .filter(|queue| !queue.state.pending.is_empty())
+            .filter(|queue| {
+                queue
+                    .state
+                    .pending
+                    .front()
+                    .is_some_and(|head| head.control != TurnControl::Suspend)
+            })
             .map(|queue| queue.thread)
             .collect())
     }

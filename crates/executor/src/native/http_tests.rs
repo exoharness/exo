@@ -581,7 +581,7 @@ async fn local_and_http_providers_use_the_same_runtime_contract() -> Result<()> 
             .start_turn(agent, thread.clone(), request, true, None)
             .await?;
         runtime
-            .cancel(HarnessTurnKey::new(thread.record().id, turn.id))
+            .cancel_turn(HarnessTurnKey::new(f.agent_id, thread.record().id, turn.id))
             .await?;
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(event) = stream.next().await {
@@ -838,7 +838,7 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                 if remote {
                     drop(stream);
                     let (_, resumed) = runtime
-                        .reconnect_turn(thread.as_ref())
+                        .reconnect_turn(agent.record().id, thread.as_ref())
                         .await?
                         .context("saved active turn")?;
                     stream = resumed;
@@ -876,7 +876,7 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                 );
                 if action == "cancel" {
                     runtime
-                        .cancel(HarnessTurnKey::new(thread.record().id, turn.id))
+                        .cancel_turn(HarnessTurnKey::new(f.agent_id, thread.record().id, turn.id))
                         .await?;
                     assert!(
                         runtime
@@ -915,7 +915,12 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                 f.release.available_permits(),
                 permits - usize::from(matches!(action, "allow_session" | "already_allowed"))
             );
-            assert!(runtime.reconnect_turn(thread.as_ref()).await?.is_none());
+            assert!(
+                runtime
+                    .reconnect_turn(agent.record().id, thread.as_ref())
+                    .await?
+                    .is_none()
+            );
         }
         if remote {
             runtime.shutdown().await?;
@@ -1055,7 +1060,7 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
             assert!(
                 tokio::time::timeout(
                     Duration::from_secs(5),
-                    runtime.reconnect_turn(thread.as_ref())
+                    runtime.reconnect_turn(agent.record().id, thread.as_ref())
                 )
                 .await??
                 .is_none()
@@ -1077,7 +1082,10 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
             // Acceptance precedes execution; reconnect follows the executing turn.
             let (reconnected, mut events) = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
-                    if let Some(reconnected) = runtime.reconnect_turn(thread.as_ref()).await? {
+                    if let Some(reconnected) = runtime
+                        .reconnect_turn(agent.record().id, thread.as_ref())
+                        .await?
+                    {
                         return Ok::<_, anyhow::Error>(reconnected);
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1098,7 +1106,12 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
             })
             .await??;
             drop(original);
-            assert!(runtime.reconnect_turn(thread.as_ref()).await?.is_none());
+            assert!(
+                runtime
+                    .reconnect_turn(agent.record().id, thread.as_ref())
+                    .await?
+                    .is_none()
+            );
         }
     }
     remote.shutdown().await?;

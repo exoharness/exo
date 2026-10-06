@@ -24,7 +24,31 @@ pub trait Provider: AgentBackend {
     }
 
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
-    async fn cancel_turn(&self, key: crate::harness::HarnessTurnKey) -> Result<bool>;
+    fn can_resume_pending_approval(&self, _config: &AgentConfig) -> bool {
+        false
+    }
+    fn can_reconcile_unresolved_tool_call(&self, _config: &AgentConfig) -> bool {
+        false
+    }
+    async fn cancel_turn(
+        &self,
+        runtime: &Runtime,
+        key: crate::harness::HarnessTurnKey,
+    ) -> Result<bool>;
+    async fn suspend_turn(
+        &self,
+        _runtime: &Runtime,
+        _key: crate::harness::HarnessTurnKey,
+    ) -> Result<bool> {
+        anyhow::bail!("this provider does not support turn suspension")
+    }
+    async fn resume_suspended_turn(
+        &self,
+        _runtime: &Runtime,
+        _key: crate::harness::HarnessTurnKey,
+    ) -> Result<ExecutionStreamHandle> {
+        anyhow::bail!("this provider does not support turn resumption")
+    }
     async fn execute_accepted_turn(
         &self,
         _runtime: &Runtime,
@@ -50,18 +74,12 @@ pub trait Provider: AgentBackend {
         _agent: Arc<dyn AgentHandle>,
         _thread: Arc<dyn ThreadHandle>,
         _turn: TurnRecord,
-        _request: SendRequest,
-        _agent_config: AgentConfig,
-        _thread_config: crate::ConversationConfig,
+        _work: crate::TurnWork,
     ) -> Result<ExecutionStreamHandle> {
         anyhow::bail!("this provider does not support turn recovery")
     }
 
-    async fn is_turn_active(
-        &self,
-        thread: &dyn ThreadHandle,
-        turn: exoharness::TurnId,
-    ) -> Result<bool>;
+    async fn is_turn_active(&self, key: crate::harness::HarnessTurnKey) -> Result<bool>;
 
     async fn approval_response(
         &self,
@@ -116,7 +134,15 @@ impl LocalProvider {
             host: host.clone(),
             approval_responses: Default::default(),
             live_turns: Arc::default(),
-            turns: Arc::new(crate::turn_queue::TurnQueueRuntime::new(host.clone())),
+            turns: {
+                let coordinator =
+                    Arc::new(exoharness::turn_coordinator::StoredTurnCoordinator::in_memory());
+                Arc::new(crate::turn_queue::TurnQueueRuntime::new(
+                    host.clone(),
+                    coordinator.clone(),
+                    Some(coordinator),
+                ))
+            },
         }
     }
 
@@ -137,6 +163,12 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
+    fn can_resume_pending_approval(&self, config: &AgentConfig) -> bool {
+        self.executor.can_resume_pending_approval(config)
+    }
+    fn can_reconcile_unresolved_tool_call(&self, config: &AgentConfig) -> bool {
+        self.executor.can_reconcile_unresolved_tool_call(config)
+    }
     async fn execute_accepted_turn(
         &self,
         runtime: &Runtime,
@@ -159,17 +191,34 @@ impl Provider for LocalProvider {
             .await
             .map(|(_, stream)| stream)
     }
-    async fn cancel_turn(&self, key: crate::harness::HarnessTurnKey) -> Result<bool> {
-        if self.cancel_queued_turn(key).await? {
-            return Ok(true);
-        }
-        if self.harness.is_active(key) {
-            self.harness
-                .submit(HarnessCommand::CancelTurn { key })
-                .await?;
-            return Ok(true);
-        }
-        Ok(false)
+    async fn cancel_turn(
+        &self,
+        runtime: &Runtime,
+        key: crate::harness::HarnessTurnKey,
+    ) -> Result<bool> {
+        runtime
+            .control_local_turn(self, key, exoharness::turn_coordinator::TurnControl::Cancel)
+            .await
+    }
+    async fn suspend_turn(
+        &self,
+        runtime: &Runtime,
+        key: crate::harness::HarnessTurnKey,
+    ) -> Result<bool> {
+        runtime
+            .control_local_turn(
+                self,
+                key,
+                exoharness::turn_coordinator::TurnControl::Suspend,
+            )
+            .await
+    }
+    async fn resume_suspended_turn(
+        &self,
+        runtime: &Runtime,
+        key: crate::harness::HarnessTurnKey,
+    ) -> Result<ExecutionStreamHandle> {
+        runtime.resume_local_turn(self, key).await
     }
     fn runtime_host(&self) -> Arc<dyn RuntimeHost> {
         self.host.clone()
@@ -189,19 +238,17 @@ impl Provider for LocalProvider {
         agent: Arc<dyn AgentHandle>,
         thread: Arc<dyn ThreadHandle>,
         turn: TurnRecord,
-        request: SendRequest,
-        agent_config: AgentConfig,
-        thread_config: crate::ConversationConfig,
+        work: crate::TurnWork,
     ) -> Result<ExecutionStreamHandle> {
         runtime
             .start_local_turn(
                 self,
                 agent,
                 thread,
-                request,
-                false,
-                Some(agent_config),
-                Some((turn, thread_config)),
+                work.request,
+                work.streaming,
+                Some(work.agent_config),
+                Some((turn, work.thread_config)),
                 None,
             )
             .await
@@ -219,20 +266,13 @@ impl Provider for LocalProvider {
         Ok(Arc::new(provider))
     }
 
-    async fn is_turn_active(
-        &self,
-        thread: &dyn ThreadHandle,
-        turn: exoharness::TurnId,
-    ) -> Result<bool> {
+    async fn is_turn_active(&self, key: crate::harness::HarnessTurnKey) -> Result<bool> {
         Ok(self
             .live_turns
             .read()
             .await
-            .get(&crate::harness::HarnessTurnKey::new(
-                thread.record().id,
-                turn,
-            ))
-            .is_some_and(|turn| turn.strong_count() > 0))
+            .get(&key)
+            .is_some_and(|turn_state| turn_state.strong_count() > 0))
     }
 
     async fn approval_response(
@@ -264,7 +304,7 @@ impl Provider for LocalProvider {
         let _guard = self.approval_responses.lock().await;
         anyhow::ensure!(
             self.harness
-                .is_active(crate::harness::HarnessTurnKey::new(thread, turn)),
+                .is_active(crate::harness::HarnessTurnKey::new(agent, thread, turn)),
             "turn is not active"
         );
         let agent = self
@@ -347,9 +387,10 @@ impl Harness<ProviderTurn> for LocalProvider {
                 }
                 Ok(())
             }
-            HarnessCommand::CancelTurn { key } => {
-                Provider::cancel_turn(self, key).await?;
-                Ok(())
+            HarnessCommand::CancelTurn { .. }
+            | HarnessCommand::SuspendTurn { .. }
+            | HarnessCommand::ResumeTurn { .. } => {
+                anyhow::bail!("use the Runtime API to control queued turns")
             }
         }
     }

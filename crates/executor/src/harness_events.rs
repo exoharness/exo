@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -8,7 +8,7 @@ use exoharness::{
     SnapshotHandle, SnapshotId, StartSandboxRequest, TurnHandle, TurnRecord, WriteArtifactRequest,
 };
 use futures::StreamExt;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard, Notify, mpsc, oneshot};
 
 use crate::ExecutionStreamEvent;
 use crate::harness::{
@@ -20,6 +20,8 @@ pub(crate) struct HarnessTurn {
     inner: Arc<dyn TurnHandle>,
     events: HarnessEventSink,
     key: HarnessTurnKey,
+    pending_tools: AsyncMutex<HashSet<String>>,
+    tools_finished: Notify,
 }
 
 impl HarnessTurn {
@@ -28,7 +30,48 @@ impl HarnessTurn {
         events: HarnessEventSink,
         key: HarnessTurnKey,
     ) -> Self {
-        Self { inner, events, key }
+        Self {
+            inner,
+            events,
+            key,
+            pending_tools: AsyncMutex::default(),
+            tools_finished: Notify::new(),
+        }
+    }
+
+    pub(crate) async fn restore_pending_tools(&self, events: Vec<Event>) {
+        let mut pending = self.pending_tools.lock().await;
+        for event in events {
+            update_pending_tools(&mut pending, &event.data);
+        }
+    }
+
+    /// Hold the guard until the execution future has been dropped, so it cannot
+    /// journal another tool request between reaching this boundary and stopping.
+    pub(crate) async fn suspension_boundary(&self) -> MutexGuard<'_, HashSet<String>> {
+        loop {
+            let ready = self.tools_finished.notified();
+            tokio::pin!(ready);
+            ready.as_mut().enable();
+            let pending = self.pending_tools.lock().await;
+            if pending.is_empty() {
+                return pending;
+            }
+            drop(pending);
+            ready.await;
+        }
+    }
+}
+
+fn update_pending_tools(pending: &mut HashSet<String>, event: &EventData) {
+    match event {
+        EventData::ToolRequested { tool_call_id, .. } => {
+            pending.insert(tool_call_id.clone());
+        }
+        EventData::ToolResult { tool_call_id, .. } => {
+            pending.remove(tool_call_id);
+        }
+        _ => {}
     }
 }
 
@@ -53,6 +96,7 @@ impl TurnHandle for HarnessTurn {
         if data.is_empty() {
             return self.inner.add_events(data).await;
         }
+        let mut pending = self.pending_tools.lock().await;
         let acknowledgement = self
             .events
             .emit(HarnessEvent::TurnEvents {
@@ -60,6 +104,12 @@ impl TurnHandle for HarnessTurn {
                 events: data,
             })
             .await?;
+        for event in &acknowledgement.events {
+            update_pending_tools(&mut pending, &event.data);
+        }
+        if pending.is_empty() {
+            self.tools_finished.notify_waiters();
+        }
         Ok(AddEventsResult {
             latest_event_id: acknowledgement
                 .events
@@ -99,11 +149,13 @@ pub(crate) struct HarnessEvents {
 impl HarnessEvents {
     pub(crate) fn register(
         &self,
+        agent_id: exoharness::AgentId,
         thread: Arc<dyn ConversationHandle>,
         turn: Arc<dyn TurnHandle>,
         stream: Option<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
     ) -> Result<oneshot::Receiver<HarnessTurnOutcome>> {
         let key = HarnessTurnKey {
+            agent_id,
             thread_id: thread.record().id,
             turn_id: turn.record().id,
         };

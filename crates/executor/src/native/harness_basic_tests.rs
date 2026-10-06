@@ -30,7 +30,7 @@ use crate::{
     BasicToolRuntime, ConversationModelConfig, CreateAgentRequest, CreateConversationRequest,
     LocalProvider, Runtime,
     harness_executor::{ExecutorStreamMode, HarnessExecutor, RecoveryRuntimeResolver},
-    harness_executor::{RUNTIME_TURN_COMPLETED, RecoverableTurn},
+    harness_executor::{RUNTIME_TURN_COMPLETED, TurnWork},
     harness_tool::ensure_shell_sandbox,
     http_service::{RuntimeHttpService, server},
 };
@@ -39,11 +39,19 @@ struct RecoveryPolicy(Uuid7);
 
 async fn wait_for_active_turn(
     runtime: &Runtime,
+    agent: exoharness::AgentId,
     thread: &dyn ConversationHandle,
     turn: exoharness::TurnId,
 ) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(3), async {
-        while !runtime.is_turn_active(thread, turn).await? {
+        while !runtime
+            .is_turn_active(crate::harness::HarnessTurnKey::new(
+                agent,
+                thread.record().id,
+                turn,
+            ))
+            .await?
+        {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         Ok::<_, anyhow::Error>(())
@@ -168,7 +176,7 @@ async fn recovery_leaves_threads_owned_by_another_process_untouched() -> Result<
     thread
         .create_sandbox(exoharness::test_support::sandbox_request())
         .await?;
-    let work = RecoverableTurn {
+    let work = TurnWork {
         streaming: false,
         agent_config: serde_json::from_str(
             r#"{"model":"unused","instructions":[],"sandbox":{"provider":"local_process"}}"#,
@@ -249,7 +257,7 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
     };
     let mut agent_config = runtime.get_agent_config(agent.as_ref()).await?;
     agent_config.model = "recovery-model".into();
-    let work = RecoverableTurn {
+    let work = TurnWork {
         streaming: false,
         agent_config,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
@@ -294,7 +302,7 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         )
         .await?;
     let completed_thread_id = completed_thread.record().id;
-    let completed_work = RecoverableTurn {
+    let completed_work = TurnWork {
         streaming: false,
         request: SendRequest {
             input: vec![user_message("already answered")],
@@ -551,7 +559,7 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
         input: vec![user_message("run the tool")],
         session_id: None,
     };
-    let work = RecoverableTurn {
+    let work = TurnWork {
         streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
@@ -657,38 +665,37 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
     let agent = state.get_agent(&agent_id).await?.unwrap();
     let thread = agent.get_thread(&thread_id).await?.unwrap();
     let answered_thread = agent.get_thread(&answered_thread_id).await?.unwrap();
-    let events = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let events = thread
-                .get_events(Some(EventQuery {
-                    turn_id: Some(turn_id),
-                    ..Default::default()
-                }))
-                .await?
-                .events;
-            if events
-                .iter()
-                .any(|event| matches!(event.data, EventData::TurnEnded))
-            {
-                return Ok::<_, anyhow::Error>(events);
+    let wait = |thread: Arc<dyn ConversationHandle>, turn_id| async move {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let events = thread
+                    .get_events(Some(EventQuery {
+                        turn_id: Some(turn_id),
+                        ..Default::default()
+                    }))
+                    .await?
+                    .events;
+                if events
+                    .iter()
+                    .any(|event| matches!(event.data, EventData::TurnEnded))
+                {
+                    return Ok::<_, anyhow::Error>(events);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await??;
+        })
+        .await?
+    };
+    let (events, answered_events) = tokio::try_join!(
+        wait(thread.clone(), turn_id),
+        wait(answered_thread.clone(), answered_turn_id),
+    )?;
     assert!(events.iter().any(|event| matches!(
         &event.data,
         EventData::Error { message, .. }
             if message.contains("cannot safely resume unresolved tool call `call-1` (`side_effect`)")
     )));
     assert!(model.requests().is_empty());
-    let answered_events = answered_thread
-        .get_events(Some(EventQuery {
-            turn_id: Some(answered_turn_id),
-            ..Default::default()
-        }))
-        .await?
-        .events;
     assert!(answered_events.iter().any(|event| matches!(
         &event.data,
         EventData::Error { message, .. }
@@ -743,7 +750,7 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
         exo_managed_agents::permissions::PermissionPolicy::AlwaysAsk {};
     let mut agent_config = runtime.get_agent_config(agent.as_ref()).await?;
     agent_config.max_tool_round_trips = Some(1);
-    let work = RecoverableTurn {
+    let work = TurnWork {
         streaming: false,
         agent_config,
         thread_config,
@@ -873,7 +880,7 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     runtime.recover_unfinished_turns().await?;
     let agent = state.get_agent(&agent_id).await?.unwrap();
     let thread = agent.get_thread(&thread_id).await?.unwrap();
-    wait_for_active_turn(&runtime, thread.as_ref(), turn_id).await?;
+    wait_for_active_turn(&runtime, agent_id, thread.as_ref(), turn_id).await?;
     assert_eq!(tools.0.load(Ordering::SeqCst), 0);
     assert!(model.requests().is_empty());
     runtime
@@ -1065,7 +1072,7 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
     runtime.recover_unfinished_turns().await?;
     let agent = state.get_agent(&agent_id).await?.unwrap();
     let thread = agent.get_thread(&thread_id).await?.unwrap();
-    wait_for_active_turn(&runtime, thread.as_ref(), turn.id).await?;
+    wait_for_active_turn(&runtime, agent_id, thread.as_ref(), turn.id).await?;
     runtime
         .approval_response(
             agent_id,
@@ -1261,7 +1268,7 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
         input: vec![user_message("older")],
         session_id: None,
     };
-    let work = RecoverableTurn {
+    let work = TurnWork {
         streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
@@ -1592,7 +1599,7 @@ async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
         input: vec![user_message("needs approval")],
         session_id: None,
     };
-    let work = RecoverableTurn {
+    let work = TurnWork {
         streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
@@ -1679,7 +1686,7 @@ async fn recovered_turn_uses_its_original_caller() -> Result<()> {
         input: vec![user_message("resume as alice")],
         session_id: None,
     };
-    let work = RecoverableTurn {
+    let work = TurnWork {
         streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,

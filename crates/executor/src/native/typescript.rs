@@ -73,6 +73,10 @@ where
         config.typescript.is_some()
     }
 
+    fn can_suspend_turn(&self, config: &AgentConfig) -> bool {
+        config.typescript.is_some()
+    }
+
     async fn cancel_turn(
         &self,
         thread: &dyn ConversationHandle,
@@ -937,7 +941,7 @@ export default {
             "typescript": { "module_path": module },
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
-        let work = crate::harness_executor::RecoverableTurn {
+        let work = crate::harness_executor::TurnWork {
             streaming: false,
             agent_config: config,
             thread_config: ConversationConfig::default(),
@@ -1057,7 +1061,7 @@ export default {
             "typescript": { "module_path": module },
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
-        let work = crate::harness_executor::RecoverableTurn {
+        let work = crate::harness_executor::TurnWork {
             streaming: false,
             agent_config: config,
             thread_config: ConversationConfig::default(),

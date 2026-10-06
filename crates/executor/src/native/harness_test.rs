@@ -208,6 +208,7 @@ async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Resul
         .begin_turn(BeginTurnRequest::default())
         .await?;
     let key = HarnessTurnKey {
+        agent_id: fixture.agent.record().id,
         thread_id: fixture.thread.record().id,
         turn_id: turn.record().id,
     };
@@ -349,7 +350,8 @@ async fn queued_turn_waits_for_cancelled_execution_cleanup() -> Result<()> {
     executor.started.notified().await;
     drop(first);
     runtime
-        .cancel(HarnessTurnKey::new(
+        .cancel_turn(HarnessTurnKey::new(
+            fixture.agent.record().id,
             fixture.thread.record().id,
             first_turn.id,
         ))
@@ -387,11 +389,17 @@ async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() ->
         .begin_turn(BeginTurnRequest::default())
         .await?;
     let key = HarnessTurnKey {
+        agent_id: fixture.agent.record().id,
         thread_id: fixture.thread.record().id,
         turn_id: turn.record().id,
     };
     let events = HarnessEvents::default();
-    let mut completion = events.register(Arc::clone(&fixture.thread), turn, None)?;
+    let mut completion = events.register(
+        fixture.agent.record().id,
+        Arc::clone(&fixture.thread),
+        turn,
+        None,
+    )?;
     let ack = events
         .emit(HarnessEvent::TurnEvents {
             key,
@@ -459,10 +467,19 @@ async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() ->
 async fn harness_turn_publishes_canonical_tools_after_persistence() -> Result<()> {
     let fixture = Fixture::new().await?;
     let turn = fixture.thread.begin_turn(Default::default()).await?;
-    let key = HarnessTurnKey::new(fixture.thread.record().id, turn.record().id);
+    let key = HarnessTurnKey::new(
+        fixture.agent.record().id,
+        fixture.thread.record().id,
+        turn.record().id,
+    );
     let events = Arc::new(HarnessEvents::default());
     let (stream, mut receiver) = mpsc::unbounded_channel();
-    let completion = events.register(fixture.thread.clone(), turn.clone(), Some(stream))?;
+    let completion = events.register(
+        fixture.agent.record().id,
+        fixture.thread.clone(),
+        turn.clone(),
+        Some(stream),
+    )?;
     let turn = HarnessTurn::new(turn, HarnessEventSink::new(events.clone()), key);
     let result = turn
         .add_events(vec![

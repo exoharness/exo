@@ -414,10 +414,22 @@ appends its replacement atomically. Idempotency keys are scoped to the submitter
 the stored implementation keeps receipts for 24 hours after acceptance.
 
 `TurnCoordinator<Work>` is a separate trait in `exoharness`. It defines ordering,
-ownership, cancellation, and acknowledgment. `TurnQueueDiscovery` is a separate
-extension for startup scans and worker pools. A host that knows its thread can
+ownership, cancellation, suspension, and acknowledgment. `TurnQueueDiscovery`
+is a separate extension for startup scans and worker pools. A host that knows its thread can
 call `LocalProvider::wake_turn_queue()` after a wakeup without global discovery.
 Timed ownership renewal and worker scheduling belong to the deployment backend.
+
+`Runtime::suspend_turn()` persists a pause and stops execution without ending the
+turn. A suspended head holds queue order across restart. `Runtime::resume_turn()`
+returns a new progress stream and recovers the same turn and session IDs;
+existing observers receive one nonterminal `Suspended` event. `send()` and the
+TUI stop waiting at suspension; stream observers may stay attached for resume.
+Cancellation ends a suspended turn. Executors that cannot reconcile unresolved
+tools defer suspension until their outstanding tool requests have results,
+including approvals. Unsupported suspension returns `false` without saving a
+pause. Resuming during that wait clears the pending suspension.
+The coordinator's control watch delivers changes during execution, including
+writes from another backend worker.
 
 The CLI explicitly supplies `BasicExoHarness::turn_coordinator()`, which persists
 `turn_queue.json` in each thread's directory. Embedded `LocalProvider` constructors
@@ -425,16 +437,20 @@ use a volatile queue unless configured through `with_turn_coordinator()`. The
 stored implementation requires one host owner; Basic's local session leases
 enforce this across processes and separately protect thread mutations and VMs.
 
+Durable Object hosts must explicitly install a persistent coordinator with
+`with_turn_coordinator()` and schedule their alarm before reporting acceptance.
+An account object serving several threads needs discovery; a host given a thread
+ID can wake that thread directly.
+
 On restart, the runtime reconciles the saved queue head with its recovery journal.
 It retains the accepted ID if execution never started, resumes unfinished work,
 and acknowledges completed work without running it again. Existing journaled
 turns are imported before draining. Sandbox ownership and shutdown remain with
 the state implementation.
 
-A Durable Object coordinator must persist a recovery alarm before reporting
-successful acceptance. A competing-worker coordinator must implement atomic
-storage mutations and revoke ownership when renewal fails; the runtime stops its
-execution on revocation. Queue ownership does not itself fence event or tool writes,
+A competing-worker coordinator must implement atomic storage mutations and
+report lost ownership through the control watch when renewal fails; the runtime
+then stops execution. Queue ownership does not itself fence event or tool writes,
 and recovery does not guarantee exactly-once external side effects.
 
 The actual turn runner is a `HarnessExecutor` implementation. Current executor

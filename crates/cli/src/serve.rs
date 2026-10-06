@@ -57,7 +57,7 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
     runtime.set_recovery_concurrency(
         args.recovery_agent_concurrency,
         args.recovery_thread_concurrency,
-    );
+    )?;
     anyhow::ensure!(
         args.adapters_only || args.bind.ip().is_loopback() || args.auth_file.is_some(),
         "non-loopback serving requires --auth-file"
