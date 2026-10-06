@@ -145,6 +145,12 @@ struct FirecrackerArgs {
     /// Maximum number of Firecracker VMs this Exo process may own.
     #[arg(long = "firecracker-max-machines", value_name = "COUNT")]
     max_machines: Option<NonZeroUsize>,
+    /// Disable sudo and other privilege elevation inside Firecracker guests.
+    #[arg(
+        long = "firecracker-disable-guest-root",
+        env = "EXO_FIRECRACKER_DISABLE_GUEST_ROOT"
+    )]
+    disable_guest_root: bool,
     /// Firecracker VMM executable.
     #[arg(
         long = "firecracker-binary",
@@ -277,6 +283,7 @@ impl FirecrackerArgs {
             dns_server: self.dns_server,
             allowed_egress_cidrs,
             network_device_policy: Default::default(),
+            allow_guest_root: !self.disable_guest_root,
             allowed_local_images,
             allowed_registries: self.allowed_registries.clone(),
             network_bytes_per_second: self.network_bytes_per_second,
