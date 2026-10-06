@@ -185,6 +185,10 @@ pub struct FirecrackerConfig {
     pub allowed_egress_cidrs: Vec<Ipv4Net>,
     #[serde(default)]
     pub network_device_policy: FirecrackerNetworkDevicePolicy,
+    /// Permit workload processes to elevate to root inside the guest, for
+    /// example through sudo. Enabled by default; workloads start as UID 10001.
+    #[serde(default = "default_allow_guest_root")]
+    pub allow_guest_root: bool,
     pub allowed_local_images: Vec<PathBuf>,
     // Registry entry points the root-run materializer may contact; empty =
     // unrestricted. Permitted registries are trusted for process availability
@@ -216,12 +220,17 @@ impl Default for FirecrackerConfig {
             dns_server: Ipv4Addr::new(1, 1, 1, 1),
             allowed_egress_cidrs: Vec::new(),
             network_device_policy: FirecrackerNetworkDevicePolicy::default(),
+            allow_guest_root: default_allow_guest_root(),
             allowed_local_images: vec![PathBuf::from(super::default_firecracker_image())],
             allowed_registries: Vec::new(),
             network_bytes_per_second: DEFAULT_NETWORK_BYTES_PER_SECOND,
             max_machines: None,
         }
     }
+}
+
+fn default_allow_guest_root() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -251,6 +260,8 @@ struct FirecrackerRuntimeFingerprint {
     network_device_policy: FirecrackerNetworkDevicePolicy,
     #[serde(default)]
     template_resource_slots: u8,
+    #[serde(default)]
+    allow_guest_root: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,6 +275,7 @@ struct FirecrackerHostFingerprint {
     initramfs_sha256: String,
     network_device_policy: FirecrackerNetworkDevicePolicy,
     template_resource_slots: u8,
+    allow_guest_root: bool,
 }
 
 impl FirecrackerHostFingerprint {
@@ -280,6 +292,7 @@ impl FirecrackerHostFingerprint {
             memory_mib: resources.memory_mib.get(),
             network_device_policy: self.network_device_policy.clone(),
             template_resource_slots: self.template_resource_slots,
+            allow_guest_root: self.allow_guest_root,
         }
     }
 }
@@ -2584,6 +2597,7 @@ fn firecracker_host_fingerprint(
         initramfs_sha256: super::firecracker_image::sha256_hex_of_file(&config.initramfs)?,
         network_device_policy: config.network_device_policy.clone(),
         template_resource_slots: config.template_resource_slots,
+        allow_guest_root: config.allow_guest_root,
     })
 }
 
@@ -2883,6 +2897,7 @@ fn hash_runtime_fingerprint(hasher: &mut Sha256, runtime: &FirecrackerRuntimeFin
     hash_snapshot_string(hasher, &runtime.initramfs_sha256);
     hasher.update(runtime.vcpu_count.to_le_bytes());
     hasher.update(runtime.memory_mib.to_le_bytes());
+    hasher.update([u8::from(runtime.allow_guest_root)]);
     hash_snapshot_string(
         hasher,
         match runtime.network_device_policy {
@@ -4061,10 +4076,14 @@ fn spawn_jailed_firecracker(
         record
             .runtime
             .memory_mib
-            .checked_add(256)
+            .checked_add(1024)
             .context("Firecracker cgroup memory limit overflow")?,
     ) * 1024
         * 1024;
+    // Guest RAM is anonymous memory in the VMM. Block-device page cache and
+    // kernel allocations also count against this cgroup. Start reclaim before
+    // the hard limit, with room for disk writeback to complete at full guest RAM.
+    let memory_high = (u64::from(record.runtime.memory_mib) + 256) * 1024 * 1024;
     let cpu_max = format!("{} 100000", u32::from(record.runtime.vcpu_count) * 100_000);
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
@@ -4092,6 +4111,8 @@ fn spawn_jailed_firecracker(
         .arg("2")
         .arg("--cgroup")
         .arg(format!("memory.max={memory_max}"))
+        .arg("--cgroup")
+        .arg(format!("memory.high={memory_high}"))
         .arg("--cgroup")
         .arg(format!("cpu.max={cpu_max}"));
     // The API socket path is injected here, next to the constant that
@@ -4147,6 +4168,9 @@ fn firecracker_vm_configuration(
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md#8250-serial-device
     let mut boot_args =
         String::from("reboot=k panic=1 pci=off rdinit=/init 8250.nr_uarts=0 quiet loglevel=1");
+    if record.runtime.allow_guest_root {
+        boot_args.push_str(" exo_allow_guest_root=1");
+    }
     if record.network_enabled {
         boot_args.push_str(&format!(
             " exo_guest_ip={} exo_gateway={} exo_prefix=30 exo_dns={}",
