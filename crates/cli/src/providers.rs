@@ -19,6 +19,7 @@ pub(crate) async fn runtime(
     client: Option<RuntimeClient>,
     definition: Option<&exo_managed_agents::AgentDefinition>,
     env: &crate::env::CliEnvironment,
+    state_root: Option<&Path>,
 ) -> Result<std::sync::Arc<executor::Runtime>> {
     use crate::{AgentCommands, Commands, HarnessSelection, managed_agents};
     use executor::managed_agents::LocalAgentSetup;
@@ -56,8 +57,10 @@ pub(crate) async fn runtime(
             .map(managed_agents::harness_selection)
             .transpose()?,
     };
-    let config = crate::build_exo_config(cli)?;
-    let env_vars = env.clone().into_vars();
+    let state_root = state_root.context("local provider requires a state root")?;
+    let config = crate::build_exo_config(cli, state_root)?;
+    let mut env_vars = env.clone().into_vars();
+    env_vars.insert("EXO_HOME".into(), state_root.to_string_lossy().into_owned());
     let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
     if let Some(reference) = thread.and_then(|args| args.agent.as_deref())
         && let Some(selection) = selection.as_ref()
@@ -85,7 +88,14 @@ pub(crate) async fn runtime(
             .unwrap_or_default(),
     };
     let pricing = Arc::new(match execution {
-        Some(args) => cost::load(args.pricing_path.clone(), args.pricing_url.clone()).await,
+        Some(args) => {
+            cost::load(
+                args.pricing_path.clone(),
+                args.pricing_url.clone(),
+                &state_root.join("cache/litellm_prices.json"),
+            )
+            .await
+        }
         None => cost::PricingTable::empty(),
     });
     let provider = executor::LocalProvider::managed(state, config, env_vars, pricing)?

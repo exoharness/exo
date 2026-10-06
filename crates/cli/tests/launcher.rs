@@ -46,11 +46,10 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
     executable(
         &wrapper,
         &format!(
-            "#!/usr/bin/env bash\nexec {} \"$@\" --root {} --config-dir {} --home {} --secret-backend file --master-key-path {}\n",
+            "#!/usr/bin/env bash\nexec {} \"$@\" --root {} --config-dir {} --secret-backend file --master-key-path {}\n",
             quote(Path::new(env!("CARGO_BIN_EXE_exo")))?,
             quote(&temp.path().join("state"))?,
             quote(&temp.path().join("profiles"))?,
-            quote(&temp.path().join("home"))?,
             quote(&temp.path().join("master.key"))?,
         ),
     )?;
