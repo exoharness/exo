@@ -36,10 +36,6 @@ async fn setup(provider: &str) -> Result<Fixture> {
     Ok(f)
 }
 
-async fn open_session(f: &Fixture, thread: &str) -> Result<Child> {
-    open_session_on(f, thread, None).await
-}
-
 async fn open_session_on(f: &Fixture, thread: &str, provider: Option<&str>) -> Result<Child> {
     let agent =
         exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "dev").await?;
@@ -170,17 +166,19 @@ async fn server_and_inline_threads_share_a_root_without_sharing_ownership() -> R
     // HTTP clients leave ownership with the server, while an inline exit
     // releases only that inline process's thread.
     close_session(local).await?;
-    f.cli(&[
-        "--provider",
-        "local",
-        "agent",
-        "run",
-        "--agent",
-        agent_id.as_str(),
-        "--thread",
-        "inline",
-    ])
-    .await?;
+    let resumed = f
+        .cli(&[
+            "--provider",
+            "local",
+            "agent",
+            "run",
+            "--agent",
+            agent_id.as_str(),
+            "--thread",
+            "inline",
+        ])
+        .await?;
+    assert_eq!(support::thread_slug(&resumed)?, "inline");
     f.runtime.shutdown().await?;
     assert!(served.list_sandboxes().await?.iter().all(|s| !s.running));
     f.cli(&[
