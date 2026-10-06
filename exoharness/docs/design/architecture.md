@@ -414,8 +414,8 @@ appends its replacement atomically. Idempotency keys are scoped to the submitter
 the stored implementation keeps receipts for 24 hours after acceptance.
 
 `TurnCoordinator<Work>` is a separate trait in `exoharness`. It defines ordering,
-ownership, cancellation, suspension, and acknowledgment. `TurnQueueDiscovery`
-is a separate extension for startup scans and worker pools. A host that knows its thread can
+ownership, cancellation, suspension, and acknowledgment. Its `pending_threads()`
+method supports startup discovery. A host that knows its thread can
 call `LocalProvider::wake_turn_queue()` after a wakeup without global discovery.
 Timed ownership renewal and worker scheduling belong to the deployment backend.
 
@@ -433,7 +433,8 @@ writes from another backend worker.
 
 The CLI explicitly supplies `BasicExoHarness::turn_coordinator()`, which persists
 `turn_queue.json` in each thread's directory. Embedded `LocalProvider` constructors
-use a volatile queue unless configured through `with_turn_coordinator()`. The
+use a volatile queue with no recovery across process restarts. Durable recovery
+requires a persistent coordinator supplied through `with_turn_coordinator()`. The
 stored implementation requires one host owner; Basic's local session leases
 enforce this across processes and separately protect thread mutations and VMs.
 
@@ -444,9 +445,9 @@ ID can wake that thread directly.
 
 On restart, the runtime reconciles the saved queue head with its recovery journal.
 It retains the accepted ID if execution never started, resumes unfinished work,
-and acknowledges completed work without running it again. Existing journaled
-turns are imported before draining. Sandbox ownership and shutdown remain with
-the state implementation.
+and acknowledges completed work without running it again. The queue is the sole
+source of pending work; new turns queue behind it without waiting for a startup
+scan. Sandbox ownership and shutdown remain with the state implementation.
 
 A competing-worker coordinator must implement atomic storage mutations and
 report lost ownership through the control watch when renewal fails; the runtime

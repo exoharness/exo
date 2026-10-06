@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow, bail};
@@ -189,18 +189,7 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
             let reconciles_tools = executor.can_reconcile_unresolved_tool_call(&work.agent_config);
             let execution = async {
                 if work.recovering && !reconciles_tools {
-                    let events = work.thread
-                        .get_events(Some(exoharness::EventQuery {
-                            turn_id: Some(key.turn_id),
-                            types: Some(vec![
-                                exoharness::EventKind::TOOL_REQUESTED,
-                                exoharness::EventKind::TOOL_RESULT,
-                            ]),
-                            direction: Some(exoharness::EventQueryDirection::Asc),
-                            ..Default::default()
-                        }))
-                        .await?.events;
-                    turn.restore_pending_tools(events).await;
+                    restore_recovery_tools(executor.as_ref(), &work, turn.as_ref()).await?;
                 }
                 let stream = work
                     .stream
@@ -332,4 +321,87 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
         }));
         Ok(())
     }
+}
+
+async fn restore_recovery_tools(
+    executor: &dyn HarnessExecutor,
+    work: &ExecutorTurn,
+    turn: &HarnessTurn,
+) -> Result<()> {
+    use exoharness::{EventData, EventKind, EventQuery, EventQueryDirection};
+    let events = work
+        .thread
+        .get_events(Some(EventQuery {
+            turn_id: Some(work.turn.record().id),
+            types: Some(vec![
+                EventKind::TOOL_REQUESTED,
+                EventKind::TOOL_RESULT,
+                EventKind::custom(crate::basic::BASIC_TOOL_ROUND),
+                EventKind::custom(crate::permissions::APPROVAL_REQUESTED),
+                EventKind::custom(crate::permissions::APPROVAL_RESPONSE),
+            ]),
+            direction: Some(EventQueryDirection::Asc),
+            ..Default::default()
+        }))
+        .await?
+        .events;
+    let mut tool_round = None;
+    let mut pending = Vec::new();
+    let mut approvals = Vec::new();
+    let mut responses = HashSet::new();
+    for event in events {
+        match event.data {
+            EventData::Custom {
+                event_type,
+                payload,
+            } if event_type == crate::basic::BASIC_TOOL_ROUND => {
+                tool_round =
+                    Some(serde_json::from_value::<crate::basic::BasicToolRound>(payload)?.round);
+            }
+            EventData::Custom {
+                event_type,
+                payload,
+            } if event_type == crate::permissions::APPROVAL_REQUESTED => {
+                approvals
+                    .push(serde_json::from_value::<crate::permissions::ApprovalRequest>(payload)?);
+            }
+            EventData::Custom {
+                event_type,
+                payload,
+            } if event_type == crate::permissions::APPROVAL_RESPONSE => {
+                responses.insert(
+                    serde_json::from_value::<crate::permissions::ApprovalResponse>(payload)?
+                        .approval_id,
+                );
+            }
+            EventData::ToolRequested {
+                tool_call_id,
+                request,
+                ..
+            } => pending.push((tool_round, tool_call_id, request)),
+            EventData::ToolResult { tool_call_id, .. } => {
+                pending.retain(|(_, id, _)| *id != tool_call_id)
+            }
+            _ => {}
+        }
+    }
+    if let Some((round, tool_call_id, request)) = pending.first() {
+        let pending_approval = executor.can_resume_pending_approval(&work.agent_config)
+            && approvals.iter().any(|approval| {
+                approval.tool_call_id.as_deref() == Some(tool_call_id.as_str())
+                    && approval.round == *round
+                    && round.is_some()
+                    && approval.request == *request
+                    && !responses.contains(&approval.approval_id)
+            });
+        anyhow::ensure!(
+            pending_approval,
+            "cannot safely resume unresolved tool call `{tool_call_id}` (`{}`) for turn {}",
+            request.function_name,
+            work.turn.record().id
+        );
+    }
+    turn.restore_pending_tools(pending.into_iter().map(|(_, id, _)| id).collect())
+        .await;
+    Ok(())
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::Uuid7;
 
 fn queued(principal: &str, attention: TurnAttention) -> TurnSubmission<u32> {
     TurnSubmission {
@@ -60,7 +61,7 @@ async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head()
     assert!(coordinator.release_if_idle(&lease).await?);
     assert!(coordinator.peek(&lease).await.is_err());
     let next = coordinator.claim(thread).await?.unwrap();
-    assert_ne!(next.token(), lease.token());
+    assert!(!Arc::ptr_eq(&next.identity, &lease.identity));
     Ok(())
 }
 
@@ -120,7 +121,7 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
     assert!(coordinator.release_if_idle(&lease).await?);
     drop(control);
     drop(lease);
-    coordinator.import(thread, first.clone()).await?;
+    assert!(coordinator.enqueue(thread, first.clone()).await?.duplicate);
     let lease = coordinator.claim(thread).await?.unwrap();
     assert_eq!(
         coordinator.peek(&lease).await?.unwrap().control,

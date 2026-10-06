@@ -7,7 +7,7 @@ use std::sync::{
 use anyhow::{Context, Result, anyhow, ensure};
 use exoharness::turn_coordinator::{
     QueuedTurn, TurnAttention, TurnAuthority, TurnControl, TurnControlOutcome, TurnCoordinator,
-    TurnLease, TurnQueueDiscovery, TurnSubmission, TurnThread,
+    TurnLease, TurnSubmission, TurnThread,
 };
 use exoharness::{
     AgentHandle, EventData, EventQuery, EventQueryDirection, ThreadHandle, TurnRecord, Uuid7,
@@ -17,7 +17,6 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::harness::{Harness, HarnessCommand, HarnessTurnKey};
-use crate::harness_executor::RecoveryRuntimeResolver;
 use crate::runtime_host::{RuntimeHost, TaskGroup};
 use crate::{
     ExecutionStreamEvent, ExecutionStreamHandle, LocalProvider, Runtime, SendRequest, TurnWork,
@@ -53,11 +52,8 @@ type ActiveTurn = (
 
 pub(crate) struct TurnQueueRuntime {
     pub(crate) admission: tokio::sync::RwLock<()>,
-    resolver: Mutex<Option<RecoveryRuntimeResolver>>,
     pub(crate) coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
-    pub(crate) discovery: Option<Arc<dyn TurnQueueDiscovery>>,
     contexts: Mutex<HashMap<HarnessTurnKey, TurnContext>>,
-    drains: Mutex<HashMap<TurnThread, Uuid7>>,
     pub(crate) active: Mutex<HashMap<TurnThread, ActiveTurn>>,
     tasks: Mutex<TaskGroup>,
     host: Arc<dyn RuntimeHost>,
@@ -113,15 +109,11 @@ impl TurnQueueRuntime {
     pub(crate) fn new(
         host: Arc<dyn RuntimeHost>,
         coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
-        discovery: Option<Arc<dyn TurnQueueDiscovery>>,
     ) -> Self {
         Self {
             admission: Default::default(),
-            resolver: Mutex::default(),
             coordinator,
-            discovery,
             contexts: Mutex::default(),
-            drains: Mutex::default(),
             active: Mutex::default(),
             tasks: Mutex::new(TaskGroup::new(host.clone())),
             host,
@@ -196,24 +188,19 @@ impl TurnQueueRuntime {
         root: Arc<crate::harness_adapter::ExecutorHarness>,
     ) -> Result<()> {
         let mut errors = Vec::new();
-        let active: Vec<_> = self
+        let mut active: Vec<_> = self
             .active
             .lock()
             .expect("active queue owners poisoned")
             .values()
             .map(|(provider, _)| provider.clone())
             .collect();
-        let mut active = active;
-        if !active.iter().any(|harness| Arc::ptr_eq(harness, &root)) {
-            active.push(root);
-        }
-        let mut seen: Vec<Arc<crate::harness_adapter::ExecutorHarness>> = Vec::new();
+        active.push(root);
+        active.sort_unstable_by_key(Arc::as_ptr);
+        active.dedup_by(|left, right| Arc::ptr_eq(left, right));
         for harness in active {
-            if !seen.iter().any(|previous| Arc::ptr_eq(previous, &harness)) {
-                if let Err(error) = harness.shutdown().await {
-                    errors.push(error);
-                }
-                seen.push(harness);
+            if let Err(error) = harness.shutdown().await {
+                errors.push(error);
             }
         }
         let mut tasks = std::mem::replace(
@@ -253,7 +240,7 @@ impl LocalProvider {
     /// Drain a known thread after a host wakeup, such as a Durable Object alarm.
     /// Global queue discovery is unnecessary when the host already knows it.
     pub async fn wake_turn_queue(&self, runtime: &Runtime, thread: TurnThread) -> Result<()> {
-        runtime.drain_queue(self, thread, None).await
+        runtime.drain_queue(self, thread).await
     }
 
     /// Select queue persistence explicitly. Caller-scoped providers share this
@@ -261,9 +248,8 @@ impl LocalProvider {
     pub fn with_turn_coordinator(
         mut self,
         coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
-        discovery: Option<Arc<dyn TurnQueueDiscovery>>,
     ) -> Self {
-        let turns = TurnQueueRuntime::new(self.host.clone(), coordinator, discovery);
+        let turns = TurnQueueRuntime::new(self.host.clone(), coordinator);
         self.turns = Arc::new(turns);
         self
     }
@@ -326,7 +312,7 @@ impl Runtime {
             agent_id: key.agent_id,
             thread_id: key.thread_id,
         };
-        if let Err(error) = self.spawn_queue(provider, scope, None).await {
+        if let Err(error) = self.spawn_queue(provider, scope).await {
             provider.turns.stop_observers(key, &error);
             tracing::error!(?scope, %error, "controlled turn retained; failed to wake queue");
         }
@@ -347,7 +333,6 @@ impl Runtime {
             !provider.turns.draining.load(Ordering::SeqCst),
             "runtime is shutting down"
         );
-        self.wait_for_recovery(thread.record().id).await;
         let _admission = provider.turns.admission.read().await;
         ensure!(
             !provider.turns.draining.load(Ordering::SeqCst),
@@ -446,7 +431,7 @@ impl Runtime {
         }
         // A durable acceptance must not be reported as a failed turn if waking
         // its worker fails. Hosts must arrange another durable wakeup.
-        if let Err(error) = self.spawn_queue(provider, scope, None).await {
+        if let Err(error) = self.spawn_queue(provider, scope).await {
             provider.turns.stop_observers(accepted_key, &error);
             tracing::error!(?scope, %error, "accepted turn retained; failed to wake queue");
         }
@@ -469,11 +454,19 @@ impl Runtime {
         {
             Ok(true) => {}
             result => {
-                provider.turns.replay_completion(
-                    key,
-                    &sender,
-                    Err(anyhow!("turn could not be resumed")),
-                );
+                let mut contexts = provider
+                    .turns
+                    .contexts
+                    .lock()
+                    .expect("turn contexts poisoned");
+                if let Some(context) = contexts.get_mut(&key) {
+                    context
+                        .observers
+                        .retain(|observer| !observer.same_channel(&sender));
+                    if context.observers.is_empty() {
+                        contexts.remove(&key);
+                    }
+                }
                 result?;
                 anyhow::bail!("turn is no longer queued");
             }
@@ -487,43 +480,20 @@ impl Runtime {
         &self,
         provider: &LocalProvider,
         scope: TurnThread,
-        resolver: Option<RecoveryRuntimeResolver>,
     ) -> Result<()> {
         let _admission = provider.turns.admission.read().await;
         ensure!(
             !provider.turns.draining.load(Ordering::SeqCst),
             "runtime is shutting down"
         );
-        self.spawn_queue(provider, scope, resolver).await
+        self.spawn_queue(provider, scope).await
     }
 
-    async fn spawn_queue(
-        &self,
-        provider: &LocalProvider,
-        scope: TurnThread,
-        resolver: Option<RecoveryRuntimeResolver>,
-    ) -> Result<()> {
-        let resolver = {
-            let mut saved = provider
-                .turns
-                .resolver
-                .lock()
-                .expect("queue resolver poisoned");
-            if resolver.is_some() {
-                *saved = resolver.clone();
-            }
-            resolver.or_else(|| saved.clone())
-        };
+    async fn spawn_queue(&self, provider: &LocalProvider, scope: TurnThread) -> Result<()> {
         let Some(lease) = provider.turns.coordinator.claim(scope).await? else {
             return Ok(());
         };
         let initial_head = provider.turns.coordinator.peek(&lease).await?;
-        provider
-            .turns
-            .drains
-            .lock()
-            .expect("turn drains poisoned")
-            .insert(scope, lease.token());
         let runtime = self.clone();
         let provider = provider.clone();
         let turns = provider.turns.clone();
@@ -539,7 +509,7 @@ impl Runtime {
                 .as_ref()
                 .map(|head| HarnessTurnKey::new(scope.agent_id, scope.thread_id, head.turn.id));
             let result = runtime
-                .run_queue(&provider, &lease, resolver, initial_head, &mut head)
+                .run_queue(&provider, &lease, initial_head, &mut head)
                 .await;
             if result.is_err()
                 && let Some(key) = head
@@ -551,16 +521,12 @@ impl Runtime {
                     harness.wait_for_turn(key).await;
                 }
             }
-            {
-                let mut drains = queue.drains.lock().expect("turn drains poisoned");
-                if drains.get(&scope) == Some(&lease.token()) {
-                    drains.remove(&scope);
-                    queue
-                        .active
-                        .lock()
-                        .expect("active queue owners poisoned")
-                        .remove(&scope);
-                }
+            if result.is_err() {
+                queue
+                    .active
+                    .lock()
+                    .expect("active queue owners poisoned")
+                    .remove(&scope);
             }
             drop(lease);
             if let Err(error) = result {
@@ -579,7 +545,6 @@ impl Runtime {
         &self,
         provider: &LocalProvider,
         lease: &TurnLease,
-        resolver: Option<RecoveryRuntimeResolver>,
         initial_head: Option<QueuedTurn<TurnWork>>,
         current_head: &mut Option<HarnessTurnKey>,
     ) -> Result<()> {
@@ -630,14 +595,7 @@ impl Runtime {
                 continue;
             }
             let stream = self
-                .open_queue_head(
-                    provider,
-                    thread.clone(),
-                    key,
-                    &head,
-                    was_started,
-                    resolver.as_ref(),
-                )
+                .open_queue_head(provider, thread.clone(), key, &head, was_started)
                 .await;
             let mut suspended = false;
             let error = match stream {
@@ -715,7 +673,6 @@ impl Runtime {
         key: HarnessTurnKey,
         head: &QueuedTurn<TurnWork>,
         was_started: bool,
-        resolver: Option<&RecoveryRuntimeResolver>,
     ) -> Result<Option<ExecutionStreamHandle>> {
         let turns = &provider.turns;
         let events = if was_started {
@@ -733,6 +690,18 @@ impl Runtime {
                 anyhow::bail!("turn cancelled")
             }
             _ => {}
+        }
+        if events.iter().any(|event| {
+            matches!(&event.data, EventData::Error { .. })
+                || matches!(&event.data, EventData::Custom { event_type, .. }
+                    if event_type == crate::harness_executor::RUNTIME_TURN_COMPLETED)
+        }) {
+            root_thread
+                .turn_handle(head.turn.clone())
+                .await?
+                .finish()
+                .await?;
+            return Ok(None);
         }
         let context = turns
             .contexts
@@ -756,7 +725,9 @@ impl Runtime {
                 runtime
             }
             _ => match &head.principal {
-                Some(principal) => resolver
+                Some(principal) => self
+                    .recovery_resolver
+                    .get()
                     .context("caller-scoped queue recovery is unavailable")?(
                     principal.clone()
                 )?
@@ -786,12 +757,13 @@ impl Runtime {
             JournalStatus::Running => {
                 let work = TurnWork::from_events(&events)?;
                 execution
-                    .recover_local_turn(agent, thread, head.turn.clone(), work, events)
-                    .await?
+                    .execute_turn(agent, thread, head.turn.clone(), work, true)
+                    .await
+                    .map(Some)?
             }
             JournalStatus::Unstarted => Some(
                 execution
-                    .execute_accepted_turn(agent, thread, head.turn.clone(), head.work.clone())
+                    .execute_turn(agent, thread, head.turn.clone(), head.work.clone(), false)
                     .await?,
             ),
             JournalStatus::Finished(_) => unreachable!(),

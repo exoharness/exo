@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 use crate::harness::{Harness, HarnessCommand};
 use crate::harness_adapter::ExecutorHarness;
-use crate::harness_executor::{HarnessExecutor, RecoveryRuntimeResolver};
+use crate::harness_executor::HarnessExecutor;
 use crate::runtime_host::{RuntimeHost, TaskGroup};
 use crate::{AgentConfig, ExecutionStreamHandle, Runtime, SendRequest};
 
@@ -24,12 +24,6 @@ pub trait Provider: AgentBackend {
     }
 
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
-    fn can_resume_pending_approval(&self, _config: &AgentConfig) -> bool {
-        false
-    }
-    fn can_reconcile_unresolved_tool_call(&self, _config: &AgentConfig) -> bool {
-        false
-    }
     async fn cancel_turn(
         &self,
         runtime: &Runtime,
@@ -49,34 +43,20 @@ pub trait Provider: AgentBackend {
     ) -> Result<ExecutionStreamHandle> {
         anyhow::bail!("this provider does not support turn resumption")
     }
-    async fn execute_accepted_turn(
+    async fn execute_turn(
         &self,
         _runtime: &Runtime,
         _agent: Arc<dyn AgentHandle>,
         _thread: Arc<dyn ThreadHandle>,
         _turn: TurnRecord,
         _work: crate::TurnWork,
+        _recovering: bool,
     ) -> Result<ExecutionStreamHandle> {
         anyhow::bail!("this provider does not execute accepted queue entries")
     }
 
-    async fn recover_unfinished_turns(
-        &self,
-        _runtime: Runtime,
-        _resolver: Option<RecoveryRuntimeResolver>,
-    ) -> Result<()> {
+    async fn recover_unfinished_turns(&self, _runtime: Runtime) -> Result<()> {
         Ok(())
-    }
-
-    async fn resume_turn(
-        &self,
-        _runtime: &Runtime,
-        _agent: Arc<dyn AgentHandle>,
-        _thread: Arc<dyn ThreadHandle>,
-        _turn: TurnRecord,
-        _work: crate::TurnWork,
-    ) -> Result<ExecutionStreamHandle> {
-        anyhow::bail!("this provider does not support turn recovery")
     }
 
     async fn is_turn_active(&self, key: crate::harness::HarnessTurnKey) -> Result<bool>;
@@ -120,6 +100,8 @@ pub struct LocalProvider {
 }
 
 impl LocalProvider {
+    /// Use an in-memory turn queue. To recover across process restarts, supply
+    /// a persistent coordinator with `with_turn_coordinator()`.
     pub fn with_host(
         state: Arc<dyn ExoHarness>,
         executor: Arc<dyn HarnessExecutor>,
@@ -139,8 +121,7 @@ impl LocalProvider {
                     Arc::new(exoharness::turn_coordinator::StoredTurnCoordinator::in_memory());
                 Arc::new(crate::turn_queue::TurnQueueRuntime::new(
                     host.clone(),
-                    coordinator.clone(),
-                    Some(coordinator),
+                    coordinator,
                 ))
             },
         }
@@ -163,33 +144,18 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
-    fn can_resume_pending_approval(&self, config: &AgentConfig) -> bool {
-        self.executor.can_resume_pending_approval(config)
-    }
-    fn can_reconcile_unresolved_tool_call(&self, config: &AgentConfig) -> bool {
-        self.executor.can_reconcile_unresolved_tool_call(config)
-    }
-    async fn execute_accepted_turn(
+    async fn execute_turn(
         &self,
         runtime: &Runtime,
         agent: Arc<dyn AgentHandle>,
         thread: Arc<dyn ThreadHandle>,
         turn: TurnRecord,
         work: crate::TurnWork,
+        recovering: bool,
     ) -> Result<ExecutionStreamHandle> {
         runtime
-            .start_local_turn(
-                self,
-                agent,
-                thread,
-                work.request,
-                work.streaming,
-                Some(work.agent_config),
-                None,
-                Some((turn, work.thread_config)),
-            )
+            .start_local_turn(self, agent, thread, turn, work, recovering)
             .await
-            .map(|(_, stream)| stream)
     }
     async fn cancel_turn(
         &self,
@@ -224,35 +190,8 @@ impl Provider for LocalProvider {
         self.host.clone()
     }
 
-    async fn recover_unfinished_turns(
-        &self,
-        runtime: Runtime,
-        resolver: Option<RecoveryRuntimeResolver>,
-    ) -> Result<()> {
-        runtime.recover_local_turns(self, resolver).await
-    }
-
-    async fn resume_turn(
-        &self,
-        runtime: &Runtime,
-        agent: Arc<dyn AgentHandle>,
-        thread: Arc<dyn ThreadHandle>,
-        turn: TurnRecord,
-        work: crate::TurnWork,
-    ) -> Result<ExecutionStreamHandle> {
-        runtime
-            .start_local_turn(
-                self,
-                agent,
-                thread,
-                work.request,
-                work.streaming,
-                Some(work.agent_config),
-                Some((turn, work.thread_config)),
-                None,
-            )
-            .await
-            .map(|(_, stream)| stream)
+    async fn recover_unfinished_turns(&self, runtime: Runtime) -> Result<()> {
+        runtime.recover_local_turns(self).await
     }
 
     fn with_caller(&self, caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {

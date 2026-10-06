@@ -97,19 +97,16 @@ impl RuntimeHttpService {
     }
 
     pub fn spawn_recovery(&self) {
-        self.runtime.begin_recovery_scan();
+        // Incoming turns can wake older queue entries before discovery finishes.
+        if self.auth.is_some() {
+            let service = self.clone();
+            self.runtime.recovery_resolver.get_or_init(|| {
+                Arc::new(move |principal: String| service.caller_runtime(principal))
+            });
+        }
         let service = self.clone();
         tokio::spawn(async move {
-            let resolver = service.auth.as_ref().map(|_| {
-                let service = service.clone();
-                Arc::new(move |principal: String| service.caller_runtime(principal))
-                    as crate::harness_executor::RecoveryRuntimeResolver
-            });
-            if let Err(error) = service
-                .runtime
-                .recover_unfinished_turns_with_resolver(resolver)
-                .await
-            {
+            if let Err(error) = service.runtime.recover_unfinished_turns().await {
                 tracing::error!(%error, "failed to recover unfinished turns");
             }
         });

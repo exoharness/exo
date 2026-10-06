@@ -56,7 +56,7 @@ struct ThreadState {
 
 #[derive(Default)]
 struct ThreadMutation {
-    owner: Weak<Uuid7>,
+    owner: Weak<()>,
     control: Option<(TurnId, watch::Sender<TurnControl>)>,
 }
 
@@ -126,12 +126,18 @@ impl<Work: Clone + Send + Sync + 'static> StoredTurnCoordinator<Work> {
             Arc::default(),
         )
     }
+}
 
-    async fn insert(
+#[async_trait]
+impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<Work> for StoredTurnCoordinator<Work> {
+    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
+        self.store.pending_threads().await
+    }
+
+    async fn enqueue(
         &self,
         thread: TurnThread,
         turn: TurnSubmission<Work>,
-        imported: bool,
     ) -> Result<AcceptedTurn> {
         let state_lock = self.locks.thread(thread);
         let mutation = state_lock.mutation.lock().await;
@@ -153,22 +159,12 @@ impl<Work: Clone + Send + Sync + 'static> StoredTurnCoordinator<Work> {
                 })
             });
         if let Some(record) = duplicate {
-            if imported
-                && let Some(entry) = state
-                    .pending
-                    .iter_mut()
-                    .find(|entry| entry.turn.id == record.id)
-                && !entry.started
-            {
-                entry.started = true;
-                self.store.save(thread, &state).await?;
-            }
             return Ok(AcceptedTurn {
                 turn: record,
                 duplicate: true,
             });
         }
-        let interrupted = if !imported && turn.attention == TurnAttention::Interrupt {
+        let interrupted = if turn.attention == TurnAttention::Interrupt {
             state
                 .pending
                 .front_mut()
@@ -193,19 +189,10 @@ impl<Work: Clone + Send + Sync + 'static> StoredTurnCoordinator<Work> {
             turn: turn.turn,
             work: turn.work,
             principal: turn.principal,
-            started: imported,
+            started: false,
             control: TurnControl::Run,
         };
-        if imported {
-            let offset = state
-                .pending
-                .iter()
-                .position(|entry| entry.turn.id > record.id)
-                .unwrap_or(state.pending.len());
-            state.pending.insert(offset, entry);
-        } else {
-            state.pending.push_back(entry);
-        }
+        state.pending.push_back(entry);
         self.store.save(thread, &state).await?;
         if let Some(id) = interrupted {
             mutation.notify(id, TurnControl::Cancel);
@@ -214,21 +201,6 @@ impl<Work: Clone + Send + Sync + 'static> StoredTurnCoordinator<Work> {
             turn: record,
             duplicate: false,
         })
-    }
-}
-
-#[async_trait]
-impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<Work> for StoredTurnCoordinator<Work> {
-    async fn enqueue(
-        &self,
-        thread: TurnThread,
-        turn: TurnSubmission<Work>,
-    ) -> Result<AcceptedTurn> {
-        self.insert(thread, turn, false).await
-    }
-    async fn import(&self, thread: TurnThread, turn: TurnSubmission<Work>) -> Result<()> {
-        self.insert(thread, turn, true).await?;
-        Ok(())
     }
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>> {
         let state = self.locks.thread(thread);
@@ -359,13 +331,6 @@ impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<Work> for StoredTurnCo
         mutation.owner = Weak::new();
         mutation.control.take();
         Ok(true)
-    }
-}
-
-#[async_trait]
-impl<Work: Clone + Send + Sync + 'static> TurnQueueDiscovery for StoredTurnCoordinator<Work> {
-    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
-        self.store.pending_threads().await
     }
 }
 

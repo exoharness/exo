@@ -130,8 +130,7 @@ impl Fixture {
             cleanup: Mutex::default(),
         });
         let runtime = Runtime::new(
-            LocalProvider::new(state.clone(), executor.clone())
-                .with_turn_coordinator(queue.clone(), Some(queue)),
+            LocalProvider::new(state.clone(), executor.clone()).with_turn_coordinator(queue),
             None,
         );
         let (agent, thread) = match scope {
@@ -325,7 +324,10 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
     let scope = f.scope();
     let queue = f.state.turn_coordinator();
     let completed = f.submission().await?;
-    queue.import(scope, completed.clone()).await?;
+    queue.enqueue(scope, completed.clone()).await?;
+    let lease = queue.claim(scope).await?.unwrap();
+    queue.start(&lease, completed.turn.id).await?;
+    drop(lease);
     let turn = f
         .thread
         .begin_turn(exoharness::BeginTurnRequest {
@@ -336,9 +338,8 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
         .await?;
     turn.finish().await?;
     drop(turn);
-    let admitted = f.submission().await?; // Admission persisted before its journal.
     let cancelled = f.submission().await?;
-    queue.import(scope, cancelled.clone()).await?;
+    queue.enqueue(scope, cancelled.clone()).await?;
     let turn = f
         .thread
         .begin_turn(exoharness::BeginTurnRequest {
@@ -356,7 +357,8 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
             TurnControl::Cancel,
         )
         .await?;
-    queue.import(scope, admitted.clone()).await?;
+    let admitted = f.submission().await?; // Admission persisted before its journal.
+    queue.enqueue(scope, admitted.clone()).await?;
     let pending = f.submission().await?;
     queue.enqueue(scope, pending.clone()).await?;
     f.runtime.shutdown().await?;
@@ -388,10 +390,11 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
 async fn recovery_uses_prepared_work_instead_of_the_acceptance_snapshot() -> Result<()> {
     let (_temp, mut f) = fixture().await?;
     let submission = f.submission().await?;
-    f.state
-        .turn_coordinator()
-        .enqueue(f.scope(), submission.clone())
-        .await?;
+    let queue = f.state.turn_coordinator();
+    queue.enqueue(f.scope(), submission.clone()).await?;
+    let lease = queue.claim(f.scope()).await?.unwrap();
+    queue.start(&lease, submission.turn.id).await?;
+    drop(lease);
     let mut prepared = submission.work;
     prepared.agent_config.model = "prepared-model".into();
     prepared.streaming = true;
@@ -416,6 +419,62 @@ async fn recovery_uses_prepared_work_instead_of_the_acceptance_snapshot() -> Res
         journal_status(f.thread.as_ref(), &submission.turn).await?,
         JournalStatus::Finished(Ok(_))
     ));
+    f.runtime.shutdown().await
+}
+
+#[tokio::test]
+async fn restart_after_queue_start_before_journal_preserves_the_accepted_identity() -> Result<()> {
+    let (temp, f) = fixture().await?;
+    let scope = f.scope();
+    let submission = f.submission().await?;
+    let queue = f.state.turn_coordinator();
+    queue.enqueue(scope, submission.clone()).await?;
+    let lease = queue.claim(scope).await?.unwrap();
+    queue.start(&lease, submission.turn.id).await?;
+    drop(lease);
+    f.runtime.shutdown().await?;
+    drop(queue);
+    drop(f);
+
+    let mut f = Fixture::open(temp.path(), Some(scope)).await?;
+    f.runtime.recover_unfinished_turns().await?;
+    f.started(submission.turn.id).await?;
+    assert!(f.executor.resumed.lock().unwrap().is_empty());
+    f.executor.release.add_permits(1);
+    f.wait_idle().await?;
+    assert_eq!(
+        f.journal(&submission.turn).await?,
+        vec![EventKind::TURN_STARTED, EventKind::TURN_ENDED]
+    );
+    f.runtime.shutdown().await
+}
+
+#[tokio::test]
+async fn default_queue_does_not_recover_work_from_the_journal_after_restart() -> Result<()> {
+    let (_temp, mut f) = fixture().await?;
+    f.runtime.shutdown().await?;
+    f.runtime = Runtime::new(
+        LocalProvider::new(f.state.clone(), f.executor.clone()),
+        None,
+    );
+    let (old, old_stream) = f.start().await?;
+    f.started(old.id).await?;
+    f.runtime.shutdown().await?;
+    drop(old_stream);
+
+    f.runtime = Runtime::new(
+        LocalProvider::new(f.state.clone(), f.executor.clone()),
+        None,
+    );
+    f.runtime.recover_unfinished_turns().await?;
+    assert!(f.started.try_recv().is_err());
+    assert!(f.executor.resumed.lock().unwrap().is_empty());
+    assert_eq!(f.journal(&old).await?, vec![EventKind::TURN_STARTED]);
+    let (new, stream) = f.start().await?;
+    f.started(new.id).await?;
+    f.executor.release.add_permits(1);
+    finish(stream).await?;
+    assert_eq!(f.journal(&old).await?, vec![EventKind::TURN_STARTED]);
     f.runtime.shutdown().await
 }
 
@@ -533,8 +592,8 @@ async fn rejected_submission_is_finalized_exactly_once() -> Result<()> {
     let (_temp, f) = fixture().await?;
     f.runtime.shutdown().await?;
     let queue = f.state.turn_coordinator();
-    let provider = LocalProvider::new(f.state.clone(), f.executor.clone())
-        .with_turn_coordinator(queue.clone(), Some(queue));
+    let provider =
+        LocalProvider::new(f.state.clone(), f.executor.clone()).with_turn_coordinator(queue);
     provider.harness.shutdown().await?;
     let runtime = Runtime::new(provider, None);
     let (turn, stream) = runtime
@@ -572,6 +631,9 @@ struct TestCoordinator {
 
 #[async_trait]
 impl TurnCoordinator<TurnWork> for TestCoordinator {
+    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
+        self.inner.pending_threads().await
+    }
     async fn enqueue(
         &self,
         thread: TurnThread,
@@ -589,9 +651,6 @@ impl TurnCoordinator<TurnWork> for TestCoordinator {
             release.acquire().await?.forget();
         }
         Ok(accepted)
-    }
-    async fn import(&self, thread: TurnThread, turn: TurnSubmission<TurnWork>) -> Result<()> {
-        self.inner.import(thread, turn).await
     }
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>> {
         self.inner.claim(thread).await
@@ -676,8 +735,7 @@ async fn live_drain_can_finish_before_enqueue_returns_without_losing_the_observe
         },
     });
     f.runtime = Runtime::new(
-        LocalProvider::new(f.state.clone(), f.executor.clone())
-            .with_turn_coordinator(held, Some(queue)),
+        LocalProvider::new(f.state.clone(), f.executor.clone()).with_turn_coordinator(held),
         None,
     );
     let (first, first_stream) = f.start().await?;
@@ -736,13 +794,12 @@ async fn cancellation_during_admission_never_executes_the_turn() -> Result<()> {
     f.runtime.shutdown().await?;
     let queue = f.state.turn_coordinator();
     f.runtime = Runtime::new(
-        LocalProvider::new(f.state.clone(), f.executor.clone()).with_turn_coordinator(
-            Arc::new(TestCoordinator {
+        LocalProvider::new(f.state.clone(), f.executor.clone()).with_turn_coordinator(Arc::new(
+            TestCoordinator {
                 inner: queue.clone(),
                 fault: QueueTestFault::CancelOnStart,
-            }),
-            Some(queue),
-        ),
+            },
+        )),
         None,
     );
     let (turn, stream) = f.start().await?;
@@ -773,16 +830,15 @@ async fn failed_control_watch_detaches_only_the_head_and_stops_before_recovery()
     let queue = f.state.turn_coordinator();
     let failure = Arc::new(Semaphore::new(0));
     f.runtime = Runtime::new(
-        LocalProvider::new(f.state.clone(), f.executor.clone()).with_turn_coordinator(
-            Arc::new(TestCoordinator {
+        LocalProvider::new(f.state.clone(), f.executor.clone()).with_turn_coordinator(Arc::new(
+            TestCoordinator {
                 inner: queue.clone(),
                 fault: QueueTestFault::WatchFailure {
                     once: AtomicBool::new(true),
                     release: failure.clone(),
                 },
-            }),
-            Some(queue),
-        ),
+            },
+        )),
         None,
     );
     let (first, first_stream) = f.start().await?;

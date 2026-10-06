@@ -39,11 +39,8 @@ impl HarnessTurn {
         }
     }
 
-    pub(crate) async fn restore_pending_tools(&self, events: Vec<Event>) {
-        let mut pending = self.pending_tools.lock().await;
-        for event in events {
-            update_pending_tools(&mut pending, &event.data);
-        }
+    pub(crate) async fn restore_pending_tools(&self, pending: HashSet<String>) {
+        *self.pending_tools.lock().await = pending;
     }
 
     /// Hold the guard until the execution future has been dropped, so it cannot

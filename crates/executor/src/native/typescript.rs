@@ -924,8 +924,8 @@ export default {
 "#,
         )?;
         let state_path = temp.path().join("state");
-        let state: Arc<dyn ExoHarness> =
-            Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let state = Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let queue = state.turn_coordinator::<crate::TurnWork>();
         let agent = state
             .new_agent(NewAgentRequest {
                 slug: "typescript-recovery".into(),
@@ -950,8 +950,12 @@ export default {
                 session_id: None,
             },
         };
-        let turn = thread
-            .begin_turn(BeginTurnRequest {
+        let turn = crate::test_support::begin_queued_turn(
+            queue.as_ref(),
+            agent.record().id,
+            thread.as_ref(),
+            &work,
+            BeginTurnRequest {
                 turn: None,
                 session_id: None,
                 input: vec![],
@@ -967,23 +971,25 @@ export default {
                         },
                     },
                 ],
-            })
-            .await?;
+            },
+        )
+        .await?;
         let turn_id = turn.record().id;
         drop(turn);
         drop(thread);
         drop(agent);
         drop(state);
 
-        let state: Arc<dyn ExoHarness> =
-            Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let state = Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let queue = state.turn_coordinator::<crate::TurnWork>();
         let runtime = Runtime::new(
             LocalProvider::typescript(
-                Arc::clone(&state),
+                state.clone(),
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
                 HashMap::new(),
                 Arc::new(BasicToolRuntime),
-            ),
+            )
+            .with_turn_coordinator(queue.clone()),
             None,
         );
         runtime.recover_unfinished_turns().await?;
@@ -1046,8 +1052,9 @@ export default {
 };
 "#,
         )?;
-        let state: Arc<dyn ExoHarness> =
+        let state =
             Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+        let queue = state.turn_coordinator::<crate::TurnWork>();
         let agent = state
             .new_agent(NewAgentRequest {
                 slug: "typescript-no-tool-recovery".into(),
@@ -1070,8 +1077,12 @@ export default {
                 session_id: None,
             },
         };
-        let turn = thread
-            .begin_turn(BeginTurnRequest {
+        let turn = crate::test_support::begin_queued_turn(
+            queue.as_ref(),
+            agent.record().id,
+            thread.as_ref(),
+            &work,
+            BeginTurnRequest {
                 turn: None,
                 session_id: None,
                 input: vec![],
@@ -1087,8 +1098,9 @@ export default {
                         },
                     },
                 ],
-            })
-            .await?;
+            },
+        )
+        .await?;
         let turn_id = turn.record().id;
         let runtime = Runtime::new(
             LocalProvider::typescript(
@@ -1096,7 +1108,8 @@ export default {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
                 HashMap::new(),
                 Arc::new(BasicToolRuntime),
-            ),
+            )
+            .with_turn_coordinator(queue.clone()),
             None,
         );
         runtime.recover_unfinished_turns().await?;

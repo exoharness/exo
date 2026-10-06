@@ -94,7 +94,7 @@ impl Fixture {
                     HashMap::new(),
                     Arc::new(cost::PricingTable::empty()),
                 )?
-                .with_turn_coordinator(turns.clone(), Some(turns)),
+                .with_turn_coordinator(turns),
                 None,
             )
             .with_shutdown_hook(move || {

@@ -25,7 +25,7 @@ use lingua::{Message, UniversalStreamChunk, UniversalUsage};
 use serde_json::{Map, Value};
 use tempfile::TempDir;
 
-use crate::test_support::{create_test_credential, local_test_config};
+use crate::test_support::{begin_queued_turn, create_test_credential, local_test_config};
 use crate::{
     BasicToolRuntime, ConversationModelConfig, CreateAgentRequest, CreateConversationRequest,
     LocalProvider, Runtime,
@@ -187,8 +187,12 @@ async fn recovery_leaves_threads_owned_by_another_process_untouched() -> Result<
             input: Vec::new(),
         },
     };
-    thread
-        .begin_turn(BeginTurnRequest {
+    begin_queued_turn(
+        inline.turn_coordinator().as_ref(),
+        agent.record().id,
+        thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             initial_events: vec![
                 work.event()?,
                 EventData::Custom {
@@ -197,22 +201,25 @@ async fn recovery_leaves_threads_owned_by_another_process_untouched() -> Result<
                 },
             ],
             ..Default::default()
-        })
-        .await?;
+        },
+    )
+    .await?;
     // Recovery would normally finalize this completed-but-unfinished turn.
     // Its owner must be allowed to finish it without another process writing.
     let before = serde_json::to_vec(&thread.get_events(None).await?.events)?;
+    let state = Arc::new(
+        BasicExoHarness::new(config)
+            .await?
+            .with_local_sessions(temp.path().to_owned()),
+    );
     let server = Runtime::new(
         LocalProvider::basic(
-            Arc::new(
-                BasicExoHarness::new(config)
-                    .await?
-                    .with_local_sessions(temp.path().to_owned()),
-            ),
+            state.clone(),
             Arc::new(FakeModelClient::default()),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(state.turn_coordinator()),
         None,
     );
     server.recover_unfinished_turns().await?;
@@ -229,15 +236,16 @@ async fn recovery_leaves_threads_owned_by_another_process_untouched() -> Result<
 async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::new(FakeModelClient::default()),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     create_test_credential(state.as_ref()).await;
@@ -263,14 +271,19 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
-    let turn = thread
-        .begin_turn(BeginTurnRequest {
+    let turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let turn_id = turn.record().id;
     turn.add_events(vec![
         EventData::Custom {
@@ -310,14 +323,19 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         },
         ..work.clone()
     };
-    let completed_turn = completed_thread
-        .begin_turn(BeginTurnRequest {
+    let completed_turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        completed_thread.as_ref(),
+        &completed_work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: completed_work.request.input.clone(),
             initial_events: vec![completed_work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let completed_turn_id = completed_turn.record().id;
     completed_turn
         .add_events(vec![
@@ -342,14 +360,19 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         )
         .await?;
     let failed_thread_id = failed_thread.record().id;
-    let failed_turn = failed_thread
-        .begin_turn(BeginTurnRequest {
+    let failed_turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        failed_thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: vec![user_message("already failed")],
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let failed_turn_id = failed_turn.record().id;
     failed_turn
         .add_events(vec![EventData::Error {
@@ -367,8 +390,12 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         )
         .await?;
     let invalid_thread_id = invalid_thread.record().id;
-    let invalid_turn = invalid_thread
-        .begin_turn(BeginTurnRequest {
+    let invalid_turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        invalid_thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: vec![user_message("invalid work")],
@@ -376,8 +403,9 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
                 event_type: crate::harness_executor::RUNTIME_TURN_WORK.into(),
                 payload: Value::Null,
             }],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let invalid_turn_id = invalid_turn.record().id;
     drop(invalid_turn);
     drop(invalid_thread);
@@ -391,8 +419,8 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
         provider_cost_usd: None,
         response_id: None,
@@ -409,7 +437,8 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
             Arc::clone(&model),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     ));
     runtime.recover_unfinished_turns().await?;
@@ -533,15 +562,16 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
 async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::new(FakeModelClient::default()),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     create_test_credential(state.as_ref()).await;
@@ -565,14 +595,19 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
-    let turn = thread
-        .begin_turn(BeginTurnRequest {
+    let turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let turn_id = turn.record().id;
     turn.add_events(vec![EventData::ToolRequested {
         tool_call_id: "call-1".into(),
@@ -594,14 +629,19 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
         )
         .await?;
     let answered_thread_id = answered_thread.record().id;
-    let answered_turn = answered_thread
-        .begin_turn(BeginTurnRequest {
+    let answered_turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        answered_thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: vec![user_message("approval was answered before crash")],
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let answered_turn_id = answered_turn.record().id;
     let answered_request = ToolRequest {
         namespace: None,
@@ -649,16 +689,17 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(FakeModelClient::default());
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::clone(&model),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     runtime.recover_unfinished_turns().await?;
@@ -719,15 +760,16 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
 async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::new(FakeModelClient::default()),
             Arc::new(CountingToolRuntime::default()),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     create_test_credential(state.as_ref()).await;
@@ -756,14 +798,19 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
         thread_config,
         request: request.clone(),
     };
-    let turn = thread
-        .begin_turn(BeginTurnRequest {
+    let turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let turn_id = turn.record().id;
     let session_id = turn.record().session_id;
     let tool_request = ToolRequest {
@@ -855,8 +902,8 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
         provider_cost_usd: None,
         response_id: None,
@@ -870,11 +917,12 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     let tools = Arc::new(CountingToolRuntime::default());
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::clone(&model),
             Arc::clone(&tools),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     runtime.recover_unfinished_turns().await?;
@@ -940,8 +988,8 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
 async fn completed_tool_result_survives_restart_before_next_tool_approval() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     create_test_credential(state.as_ref()).await;
     let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
         provider_cost_usd: None,
@@ -973,11 +1021,12 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
     let first_tools = Arc::new(CountingToolRuntime::default());
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             model,
             Arc::clone(&first_tools),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     let agent = runtime
@@ -1047,8 +1096,8 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
         provider_cost_usd: None,
         response_id: None,
@@ -1062,11 +1111,12 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
     let second_tools = Arc::new(CountingToolRuntime::default());
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::clone(&model),
             Arc::clone(&second_tools),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     runtime.recover_unfinished_turns().await?;
@@ -1124,133 +1174,19 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
 }
 
 #[tokio::test]
-async fn thread_created_during_recovery_can_send_immediately() -> Result<()> {
-    let tempdir = TempDir::new()?;
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(tempdir.path().join("exoharness"))).await?);
-    create_test_credential(state.as_ref()).await;
-    let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
-        provider_cost_usd: None,
-        response_id: None,
-        messages: vec![assistant_message("ready")],
-        tool_calls: Vec::new(),
-        usage: None,
-        model: None,
-        ttft: None,
-        duration: None,
-    }]));
-    let runtime = Runtime::new(
-        LocalProvider::basic(
-            state,
-            model,
-            Arc::new(BasicToolRuntime),
-            Arc::new(cost::PricingTable::empty()),
-        ),
-        None,
-    );
-    let agent = runtime
-        .create_agent(CreateAgentRequest {
-            ..crate::test_support::agent_request(
-                "new-during-recovery",
-                crate::AgentHarnessKind::Basic,
-            )
-        })
-        .await?;
-    runtime.begin_recovery_scan();
-    let thread = runtime
-        .create_conversation(agent.as_ref(), CreateConversationRequest::default())
-        .await?;
-    let (_, mut stream) = tokio::time::timeout(
-        Duration::from_secs(3),
-        runtime.start_turn(
-            agent,
-            thread,
-            SendRequest {
-                input: vec![user_message("hello")],
-                session_id: None,
-            },
-            false,
-            None,
-        ),
-    )
-    .await??;
-    while let Some(event) = stream.next().await {
-        event?;
-    }
-    runtime.recover_unfinished_turns().await?;
-    runtime.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn recovery_clears_marker_for_deleted_thread() -> Result<()> {
+async fn new_turn_queues_behind_older_work_before_startup_recovery() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
-    let agent = state
-        .new_agent(exoharness::NewAgentRequest {
-            slug: "deleted-recovery-thread".to_string(),
-            name: "Deleted recovery thread".to_string(),
-            vaults: Vec::new(),
-        })
-        .await?;
-    let agent_id = agent.record().id;
-    let thread = agent.new_thread(Default::default()).await?;
-    let turn = thread.begin_turn(BeginTurnRequest::default()).await?;
-    let unfinished = exoharness::ListThreadsRequest {
-        unfinished_only: true,
-        ..Default::default()
-    };
-    assert_eq!(
-        agent.list_threads(unfinished.clone()).await?.threads.len(),
-        1
-    );
-    agent.delete_thread(&thread.record().id).await?;
-    drop(turn);
-    drop(thread);
-    drop(agent);
-    drop(state);
-
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::new(FakeModelClient::default()),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
-        None,
-    );
-    runtime.recover_unfinished_turns().await?;
-    assert!(
-        state
-            .get_agent(&agent_id)
-            .await?
-            .expect("agent exists")
-            .list_threads(unfinished)
-            .await?
-            .threads
-            .is_empty()
-    );
-    runtime.shutdown().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
-    let tempdir = TempDir::new()?;
-    let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
-    let runtime = Runtime::new(
-        LocalProvider::basic(
-            Arc::clone(&state),
-            Arc::new(FakeModelClient::default()),
-            Arc::new(BasicToolRuntime),
-            Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     create_test_credential(state.as_ref()).await;
@@ -1274,14 +1210,19 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
-    let old_turn = thread
-        .begin_turn(BeginTurnRequest {
+    let old_turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let old_turn_id = old_turn.record().id;
     drop(old_turn);
     drop(thread);
@@ -1289,8 +1230,8 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(FakeModelClient::new(
         ["old", "new"]
             .into_iter()
@@ -1308,16 +1249,16 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
     ));
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::clone(&model),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     let agent = state.get_agent(&agent_id).await?.unwrap();
     let thread = agent.get_thread(&thread_id).await?.unwrap();
-    runtime.begin_recovery_scan();
     let new_turn = runtime.start_turn(
         Arc::clone(&agent),
         Arc::clone(&thread),
@@ -1328,14 +1269,8 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
         false,
         None,
     );
-    tokio::pin!(new_turn);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut new_turn)
-            .await
-            .is_err()
-    );
-    runtime.recover_unfinished_turns().await?;
     let (new_record, mut stream) = tokio::time::timeout(Duration::from_secs(3), new_turn).await??;
+    runtime.recover_unfinished_turns().await?;
     while let Some(event) = stream.next().await {
         event?;
     }
@@ -1363,16 +1298,17 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
 async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     create_test_credential(state.as_ref()).await;
     let blocked_model = Arc::new(BlockingModelClient::default());
     let runtime = Runtime::new(
         LocalProvider::rlm(
-            Arc::clone(&state),
+            state.clone(),
             Arc::clone(&blocked_model),
             Arc::new(BasicToolRuntime),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     let agent = runtime
@@ -1405,15 +1341,16 @@ async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(FakeModelClient::default());
     let runtime = Runtime::new(
         LocalProvider::rlm(
-            Arc::clone(&state),
+            state.clone(),
             Arc::clone(&model),
             Arc::new(BasicToolRuntime),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     runtime.recover_unfinished_turns().await?;
@@ -1450,16 +1387,17 @@ async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<
 async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let blocked_model = Arc::new(BlockingModelClient::default());
     let runtime = Arc::new(Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::clone(&blocked_model),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     ));
     create_test_credential(state.as_ref()).await;
@@ -1508,8 +1446,8 @@ async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(FakeModelClient::new(vec![ModelResponse {
         provider_cost_usd: None,
         response_id: None,
@@ -1526,7 +1464,8 @@ async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
             Arc::clone(&model),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     ));
     runtime.recover_unfinished_turns().await?;
@@ -1575,15 +1514,16 @@ async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
 async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::new(FakeModelClient::default()),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     create_test_credential(state.as_ref()).await;
@@ -1605,21 +1545,26 @@ async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
-    thread
-        .begin_turn(BeginTurnRequest {
+    begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     drop(thread);
     drop(agent);
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let model = Arc::new(BlockingModelClient::default());
     let runtime = Arc::new(Runtime::new(
         LocalProvider::basic(
@@ -1627,7 +1572,8 @@ async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
             Arc::clone(&model),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     ));
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -1648,15 +1594,16 @@ async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
 async fn recovered_turn_uses_its_original_caller() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let runtime = Runtime::new(
         LocalProvider::basic(
-            Arc::clone(&state),
+            state.clone(),
             Arc::new(FakeModelClient::default()),
             Arc::new(BasicToolRuntime),
             Arc::new(cost::PricingTable::empty()),
-        ),
+        )
+        .with_turn_coordinator(queue.clone()),
         None,
     );
     create_test_credential(state.as_ref()).await;
@@ -1692,14 +1639,19 @@ async fn recovered_turn_uses_its_original_caller() -> Result<()> {
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
-    let turn = caller_thread
-        .begin_turn(BeginTurnRequest {
+    let turn = begin_queued_turn(
+        queue.as_ref(),
+        agent.record().id,
+        caller_thread.as_ref(),
+        &work,
+        BeginTurnRequest {
             turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
-        })
-        .await?;
+        },
+    )
+    .await?;
     let turn_id = turn.record().id;
     drop(turn);
     drop(caller_thread);
@@ -1710,26 +1662,29 @@ async fn recovered_turn_uses_its_original_caller() -> Result<()> {
     drop(runtime);
     drop(state);
 
-    let state: Arc<dyn ExoHarness> =
-        Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let state = Arc::new(BasicExoHarness::new(local_test_config(&root)).await?);
+    let queue = state.turn_coordinator::<TurnWork>();
     let recorder = CallerRecordingExecutor::default();
     let runtime = Runtime::new(
-        LocalProvider::new(Arc::clone(&state), Arc::new(recorder.clone())),
+        LocalProvider::new(state.clone(), Arc::new(recorder.clone()))
+            .with_turn_coordinator(queue.clone()),
         None,
     );
     let scoped_runtimes: Arc<Mutex<Vec<Arc<Runtime>>>> = Arc::default();
     let resolver: RecoveryRuntimeResolver = {
-        let state = Arc::clone(&state);
+        let state = state.clone();
         let policy = Arc::clone(&policy);
         let recorder = recorder.clone();
         let scoped_runtimes = Arc::clone(&scoped_runtimes);
+        let queue = queue.clone();
         Arc::new(move |principal| {
             let scoped_state = state.with_caller(Caller {
                 principal,
                 policy: Arc::clone(&policy),
             })?;
             let scoped = Arc::new(Runtime::new(
-                LocalProvider::new(scoped_state, Arc::new(recorder.clone())),
+                LocalProvider::new(scoped_state, Arc::new(recorder.clone()))
+                    .with_turn_coordinator(queue.clone()),
                 None,
             ));
             scoped_runtimes

@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentId, Result, ThreadId, TurnId, TurnRecord, Uuid7};
+use crate::{AgentId, Result, ThreadId, TurnId, TurnRecord};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TurnThread {
@@ -79,7 +79,7 @@ pub enum TurnAuthority {
 #[derive(Clone)]
 pub struct TurnLease {
     pub thread: TurnThread,
-    pub(crate) identity: Arc<Uuid7>,
+    pub(crate) identity: Arc<()>,
     _guard: Arc<dyn Send + Sync>,
 }
 
@@ -87,26 +87,24 @@ impl TurnLease {
     pub fn new(thread: TurnThread, guard: impl Send + Sync + 'static) -> Self {
         Self {
             thread,
-            identity: Arc::new(Uuid7::now()),
+            identity: Arc::new(()),
             _guard: Arc::new(guard),
         }
-    }
-
-    pub fn token(&self) -> Uuid7 {
-        *self.identity
     }
 }
 
 #[async_trait]
 pub trait TurnCoordinator<Work: Send + Sync>: Send + Sync {
+    /// Startup discovery for hosts serving multiple threads. Hosts waking a
+    /// known thread can use the default and drain that thread directly.
+    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
+        Ok(Vec::new())
+    }
     /// Preserve queue order and atomically apply interruption and deduplication.
     /// The host owns durable wakeups (for example, setting a DO alarm) and must
     /// arrange one before reporting acceptance to its caller.
     async fn enqueue(&self, thread: TurnThread, turn: TurnSubmission<Work>)
     -> Result<AcceptedTurn>;
-    /// Import an already-journaled unfinished turn without applying attention.
-    /// Re-importing must preserve existing control state and queue position.
-    async fn import(&self, thread: TurnThread, turn: TurnSubmission<Work>) -> Result<()>;
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>>;
     /// Read a pending turn's accepted work and control state.
     async fn get(&self, thread: TurnThread, turn: TurnId) -> Result<Option<QueuedTurn<Work>>>;
@@ -136,13 +134,6 @@ pub trait TurnCoordinator<Work: Send + Sync>: Send + Sync {
     /// must race with this operation without losing a wakeup. Suspension retains
     /// queue order, the unfinished journal, and the original turn identity.
     async fn release_if_idle(&self, lease: &TurnLease) -> Result<bool>;
-}
-
-/// Startup discovery for hosts serving multiple threads, including an account
-/// Durable Object. A host waking a known thread can omit global discovery.
-#[async_trait]
-pub trait TurnQueueDiscovery: Send + Sync {
-    async fn pending_threads(&self) -> Result<Vec<TurnThread>>;
 }
 
 #[cfg(feature = "store")]

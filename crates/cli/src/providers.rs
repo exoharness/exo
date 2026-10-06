@@ -105,7 +105,7 @@ pub(crate) async fn runtime(
     let turns = state.turn_coordinator();
     let provider = executor::LocalProvider::managed(state.clone(), config, env_vars, pricing)?
         .with_managed_agents(setup)
-        .with_turn_coordinator(turns.clone(), Some(turns));
+        .with_turn_coordinator(turns);
     Ok(Arc::new(
         executor::Runtime::new(
             provider,
