@@ -114,8 +114,10 @@ EOF
 ./target/debug/exo agent run --agent sandbox-example --thread local-dev
 ```
 
-The CLI stores state under `.exo` by default. Pass `--root <path>` to use a
-different state directory.
+The CLI defaults Exo home to `$HOME/.exo`, shared across working directories.
+Pass `--root <path>` or set `EXO_HOME` to use a different home. Provider profiles
+live in `<root>/config`, runtime state in `<root>/exoharness`, and pricing caches
+in `<root>/cache`. See [Managed agents](../exoharness/docs/managed-agents.md).
 
 ## TypeScript Harnesses
 

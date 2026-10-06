@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 
 import { computeCostUsd, lookup, parseTable } from "./cost";
 
@@ -21,6 +24,23 @@ const FIXTURE = `{
 }`;
 
 const table = parseTable(FIXTURE);
+
+it("loads the cache under the Exo home supplied by the host", async () => {
+  const home = mkdtempSync(join(tmpdir(), "exo-pricing-"));
+  try {
+    mkdirSync(join(home, "cache"));
+    writeFileSync(join(home, "cache", "litellm_prices.json"), FIXTURE);
+    vi.stubEnv("EXO_HOME", home);
+    vi.stubEnv("EXO_LITELLM_PRICES_PATH", "");
+    vi.stubEnv("EXO_LITELLM_PRICES_URL", "invalid://unused");
+    vi.resetModules();
+    const { ensureTable } = await import("./cost");
+    expect((await ensureTable())?.get("claude-sonnet-4-6")).toBeDefined();
+  } finally {
+    vi.unstubAllEnvs();
+    rmSync(home, { recursive: true });
+  }
+});
 
 describe("cost", () => {
   it("skips sample_spec", () => {

@@ -7,12 +7,13 @@ use crate::sandbox::{LocalProcessSandboxBackend, ManagedSandboxBackend};
 use crate::secrets::AppleKeychainSecretKeyProvider;
 use crate::secrets::{
     EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher, SecretKeyProvider,
-    StaticSecretKeyProvider, default_master_key_path,
+    StaticSecretKeyProvider,
 };
 use crate::vault::SecretReference;
 
 pub(super) struct NativeState {
     pub(super) cache_root: PathBuf,
+    pub(super) durable_file_system_root: PathBuf,
     pub(super) resources: crate::resources::ResourceStore,
     pub(super) secret_cipher: SecretCipher,
 }
@@ -25,6 +26,15 @@ pub enum SecretBackendChoice {
         path: Option<PathBuf>,
     },
     Static([u8; 32]),
+}
+
+impl SecretBackendChoice {
+    fn master_key_path(&self, root: &Path) -> Option<PathBuf> {
+        match self {
+            Self::File { path } => Some(path.clone().unwrap_or_else(|| root.join("master.key"))),
+            _ => None,
+        }
+    }
 }
 
 impl SandboxBackendRegistration {
@@ -47,17 +57,28 @@ impl SandboxBackendRegistration {
     }
 
     pub fn apple_container() -> Self {
-        Self::from_backend(
-            SandboxProvider::AppleContainer,
-            Arc::new(crate::CliContainerSandboxBackend::apple_container()),
-        )
+        Self::from_factory(SandboxProvider::AppleContainer, true, |inner| {
+            Box::pin(async move {
+                Ok(Arc::new(
+                    crate::CliContainerSandboxBackend::apple_container()
+                        .with_durable_file_system_root(
+                            inner.native.durable_file_system_root.clone(),
+                        ),
+                ) as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
     }
 
     pub fn docker() -> Self {
-        Self::from_backend(
-            SandboxProvider::Docker,
-            Arc::new(crate::CliContainerSandboxBackend::docker()),
-        )
+        Self::from_factory(SandboxProvider::Docker, true, |inner| {
+            Box::pin(async move {
+                Ok(Arc::new(
+                    crate::CliContainerSandboxBackend::docker().with_durable_file_system_root(
+                        inner.native.durable_file_system_root.clone(),
+                    ),
+                ) as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
     }
 
     #[cfg(feature = "firecracker")]
@@ -808,21 +829,13 @@ impl BasicExoHarness {
             cache.insert(sandbox_default.clone(), backend);
         }
 
-        let resource_master_key = match &secret_backend {
-            SecretBackendChoice::File { path } => Some(
-                path.clone()
-                    .map(Ok)
-                    .unwrap_or_else(crate::secrets::default_master_key_path)?,
-            ),
-            _ => None,
-        };
+        let resource_master_key = secret_backend.master_key_path(&root);
         let secret_backend = if in_memory {
             SecretBackendChoice::Static(crate::secrets::random_master_key())
         } else {
             secret_backend
         };
-        let secret_cipher =
-            build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
+        let secret_cipher = build_secret_cipher(secret_backend, &root);
         let vaults = BasicVaultStore::new(
             (!in_memory).then(|| root.join("vaults")),
             secret_cipher.clone(),
@@ -845,6 +858,7 @@ impl BasicExoHarness {
                 native: NativeState {
                     secret_cipher,
                     cache_root: root.join("cache"),
+                    durable_file_system_root: root.join("durable-filesystems"),
                     resources: crate::resources::ResourceStore::new(&root)?
                         .excluding_master_key(resource_master_key)?,
                 },
@@ -859,28 +873,20 @@ pub(super) struct StoredSecret {
     pub(super) secret: EncryptedSecret,
 }
 
-pub(crate) fn build_secret_cipher(
-    choice: SecretBackendChoice,
-    keychain_account: String,
-) -> Result<SecretCipher> {
-    #[cfg(not(feature = "apple-keychain"))]
-    drop(keychain_account);
-
+pub(crate) fn build_secret_cipher(choice: SecretBackendChoice, root: &Path) -> SecretCipher {
+    let master_key_path = choice.master_key_path(root);
     let provider: Arc<dyn SecretKeyProvider> = match choice {
         #[cfg(feature = "apple-keychain")]
-        SecretBackendChoice::AppleKeychain => {
-            Arc::new(AppleKeychainSecretKeyProvider::new(keychain_account))
-        }
-        SecretBackendChoice::File { path } => {
-            let path = match path {
-                Some(path) => path,
-                None => default_master_key_path()?,
-            };
-            Arc::new(FileBackedSecretKeyProvider::new(path))
-        }
+        SecretBackendChoice::AppleKeychain => Arc::new(AppleKeychainSecretKeyProvider::new(
+            root.to_string_lossy().into_owned(),
+            root.join("master.keychain.lock"),
+        )),
+        SecretBackendChoice::File { .. } => Arc::new(FileBackedSecretKeyProvider::new(
+            master_key_path.expect("file master key path"),
+        )),
         SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
     };
-    Ok(SecretCipher::new(provider))
+    SecretCipher::new(provider)
 }
 
 #[cfg(test)]
@@ -1031,12 +1037,8 @@ impl BasicExoHarnessConfig {
     pub fn validate_secret_mount(&self, host_path: &Path) -> Result<()> {
         let host_path = host_path.canonicalize()?;
         let mut protected = vec![self.root.join("vaults")];
-        if let SecretBackendChoice::File { path } = &self.secret_backend {
-            protected.push(
-                path.clone()
-                    .map(Ok)
-                    .unwrap_or_else(crate::secrets::default_master_key_path)?,
-            );
+        if let Some(path) = self.secret_backend.master_key_path(&self.root) {
+            protected.push(path);
         }
         for path in protected {
             let path = std::path::absolute(path)?;

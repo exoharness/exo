@@ -1438,7 +1438,7 @@ function codexSandboxCommand(context: TurnContext, version: string): string[] {
   const shell = context.conversationConfig.shellProgram ?? "/bin/bash";
   const command = [
     "set -e;",
-    'mkdir -p "${HOME:-/tmp/exo-home}" "${CODEX_HOME:-/tmp/exo-codex-home}";',
+    'mkdir -p "$HOME" "${CODEX_HOME:-$HOME/.codex}";',
     `test "$(codex --version)" = "codex-cli ${version}" || { echo "Expected Codex ${version}; rebuild the Codex sandbox image" >&2; exit 1; };`,
     "exec codex app-server --listen stdio://",
   ].join(" ");

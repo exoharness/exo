@@ -40,6 +40,16 @@ and query parameters without interpreting them.
 
 ## Setup
 
+Exo home defaults to `$HOME/.exo`, shared across working directories. `--root`
+or `EXO_HOME` selects a different home; the flag takes precedence. Provider profiles
+and authentication default to `<root>/config`, runtime state to `<root>/exoharness`,
+and the pricing cache to `<root>/cache`. Docker and Apple container durable filesystems
+live in `<root>/exoharness/durable-filesystems`; `EXO_DURABLE_FILE_SYSTEM_ROOT`
+overrides that location. Local TypeScript harnesses receive the
+resolved home as `EXO_HOME`. `--config-dir` overrides the profile directory;
+`--master-key-path` overrides the file encryption key, which otherwise lives at
+`<root>/exoharness/master.key`. Explicit provider selections and saved
+remote aliases continue to select their configured state or server.
 From this checkout:
 
 ```bash

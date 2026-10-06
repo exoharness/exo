@@ -29,7 +29,7 @@ describe("Codex history replay", () => {
       server,
       "thread",
       codexReplayItems([
-        { role: "user", content: "a".repeat(64_000) },
+        { role: "user", content: "a".repeat(256_000) },
         { role: "assistant", content: "reply" },
       ]),
     );
@@ -61,12 +61,41 @@ describe("Codex history replay", () => {
         server,
         "thread",
         codexReplayItems([
-          { role: "user", content: "a".repeat(64_000) },
+          { role: "user", content: "a".repeat(256_000) },
           { role: "assistant", content: "reply" },
         ]),
       ),
     ).rejects.toThrow("invalid credentials");
     expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows compaction to finish after two minutes", async () => {
+    vi.useFakeTimers();
+    try {
+      const server = {
+        async request(_method: string, _params: JsonValue) {},
+        async *events() {
+          await new Promise((resolve) => setTimeout(resolve, 121_000));
+          yield {
+            method: "turn/completed",
+            params: { threadId: "thread", turn: { status: "completed" } },
+          };
+        },
+      };
+      const replay = replayCodexHistory(
+        server,
+        "thread",
+        codexReplayItems([
+          { role: "user", content: "a".repeat(256_000) },
+          { role: "assistant", content: "reply" },
+        ]),
+      );
+      const completed = expect(replay).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(121_000);
+      await completed;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps long messages and tool calls structured", () => {
