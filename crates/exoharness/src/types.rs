@@ -45,12 +45,6 @@ impl ResourceScope {
 
 #[async_trait]
 pub trait ExoHarness: VaultContext {
-    /// Release process-owned local sandboxes after all execution has stopped.
-    /// Remote providers retain their own sandbox lifetime.
-    async fn release_local_sessions(&self) -> Result<()> {
-        Ok(())
-    }
-
     fn with_caller(&self, _caller: crate::access::Caller) -> Result<Arc<dyn ExoHarness>> {
         anyhow::bail!("this provider does not support caller-scoped execution")
     }
@@ -204,14 +198,6 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
 
 #[async_trait]
 pub trait ThreadHandle: SandboxHandle + VaultContext {
-    /// Claim this thread for local execution or configuration. Provider servers
-    /// and inline runtimes use the same ownership; remote handles delegate it.
-    // TODO: Move execution ownership behind a TurnCoordinator abstraction;
-    // local file leases should remain a BasicExoHarness implementation detail.
-    async fn claim_local_session(&self) -> Result<()> {
-        Ok(())
-    }
-
     async fn activate_caller(&self) -> Result<bool> {
         Ok(false)
     }

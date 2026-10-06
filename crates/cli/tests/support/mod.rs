@@ -85,15 +85,21 @@ impl Fixture {
                 .await?
                 .with_local_sessions(root.clone()),
         );
-        let runtime = Arc::new(Runtime::new(
-            LocalProvider::managed(
-                state,
-                config.clone(),
-                HashMap::new(),
-                Arc::new(cost::PricingTable::empty()),
-            )?,
-            None,
-        ));
+        let runtime = Arc::new(
+            Runtime::new(
+                LocalProvider::managed(
+                    state.clone(),
+                    config.clone(),
+                    HashMap::new(),
+                    Arc::new(cost::PricingTable::empty()),
+                )?,
+                None,
+            )
+            .with_shutdown_hook(move || {
+                let state = state.clone();
+                async move { state.release_local_sessions().await }
+            }),
+        );
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let endpoint = format!("http://{}/exo", listener.local_addr()?);
         let service = Arc::new(RuntimeHttpService::new(

@@ -820,13 +820,17 @@ async fn caller_shutdown_keeps_thread_ownership_until_server_shutdown() -> Resul
     let state = Arc::new(f.harness.as_ref().clone().with_local_sessions(root.clone()));
     let server = crate::Runtime::new(
         crate::LocalProvider::managed(
-            state,
+            state.clone(),
             config.clone(),
             Default::default(),
             Arc::new(cost::PricingTable::empty()),
         )?,
         None,
-    );
+    )
+    .with_shutdown_hook(move || {
+        let state = state.clone();
+        async move { state.release_local_sessions().await }
+    });
     let caller = server.with_caller(f.auth.caller(principal, false))?;
     let agent =
         exoharness::test_support::new_test_agent(caller.exoharness_handle().as_ref(), "shutdown")
@@ -848,10 +852,10 @@ async fn caller_shutdown_keeps_thread_ownership_until_server_shutdown() -> Resul
         .get_thread(&thread.record().id)
         .await?
         .unwrap();
-    assert!(busy.claim_local_session().await.is_err());
+    assert!(busy.activate_caller().await.is_err());
     server.shutdown().await?;
     assert!(!thread.list_sandboxes().await?[0].running);
-    busy.claim_local_session().await?;
+    busy.activate_caller().await?;
     contender.release_local_sessions().await
 }
 

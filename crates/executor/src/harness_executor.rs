@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -11,6 +12,7 @@ use exoharness::{
     TurnHandle, TurnRecord,
 };
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use tokio::sync::{Notify, OnceCell, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
@@ -285,6 +287,8 @@ pub trait HarnessExecutor: Send + Sync + 'static {
     }
 }
 
+type ShutdownHook = Arc<dyn Fn() -> BoxFuture<'static, Result<()>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Runtime {
     provider: Arc<dyn Provider>,
@@ -296,6 +300,7 @@ pub struct Runtime {
     recovery_gate: Arc<RecoveryGate>,
     recovery_agent_concurrency: Arc<AtomicUsize>,
     recovery_thread_concurrency: Arc<AtomicUsize>,
+    shutdown_hook: Option<ShutdownHook>,
 }
 
 impl Runtime {
@@ -307,6 +312,8 @@ impl Runtime {
             scoped.provider.runtime_host(),
         )));
         scoped.recovery = Arc::default();
+        // The root runtime owns cleanup shared with caller-scoped runtimes.
+        scoped.shutdown_hook = None;
         Ok(scoped)
     }
 
@@ -325,7 +332,19 @@ impl Runtime {
             recovery_gate: Arc::default(),
             recovery_agent_concurrency: Arc::new(AtomicUsize::new(4)),
             recovery_thread_concurrency: Arc::new(AtomicUsize::new(4)),
+            shutdown_hook: None,
         }
+    }
+
+    /// Run cleanup after execution and finalizers have drained. Caller-scoped
+    /// runtimes leave this hook with their root runtime.
+    pub fn with_shutdown_hook<F, Fut>(mut self, hook: F) -> Self
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.shutdown_hook = Some(Arc::new(move || Box::pin(hook())));
+        self
     }
 
     pub fn set_recovery_concurrency(&self, agents: NonZeroUsize, threads: NonZeroUsize) {
@@ -518,7 +537,6 @@ impl Runtime {
         thread: Arc<dyn ConversationHandle>,
         resolver: Option<RecoveryRuntimeResolver>,
     ) -> Result<()> {
-        thread.claim_local_session().await?;
         let events = thread
             .get_events(Some(EventQuery {
                 direction: Some(EventQueryDirection::Asc),
@@ -821,7 +839,6 @@ impl Runtime {
         if recovery.is_none() {
             self.recovery_gate.wait(thread.record().id).await;
         }
-        thread.claim_local_session().await?;
         self.initialized
             .get_or_try_init(|| {
                 provider
@@ -1148,19 +1165,16 @@ impl Runtime {
         }
         drop(finalizers);
         let flush = self.tracer.flush().await;
-        // Caller runtimes share the server's ownership. The root runtime
-        // releases it after every caller's execution has drained.
-        let stopped = if self.provider.exoharness().caller().is_none() {
-            self.provider.exoharness().release_local_sessions().await
-        } else {
-            Ok(())
+        let cleanup = match &self.shutdown_hook {
+            Some(hook) => hook().await,
+            None => Ok(()),
         };
         shutdown?;
         if let Some(error) = finalizer_error {
             return Err(error);
         }
         flush?;
-        stopped
+        cleanup
     }
 }
 

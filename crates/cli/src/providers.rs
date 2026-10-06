@@ -23,7 +23,7 @@ pub(crate) async fn runtime(
 ) -> Result<std::sync::Arc<executor::Runtime>> {
     use crate::{AgentCommands, Commands, HarnessSelection, managed_agents};
     use executor::managed_agents::LocalAgentSetup;
-    use exoharness::{BasicExoHarness, ExoHarness};
+    use exoharness::BasicExoHarness;
     use std::sync::Arc;
 
     let thread = match &cli.command {
@@ -61,7 +61,7 @@ pub(crate) async fn runtime(
     let config = crate::build_exo_config(cli, state_root)?;
     let mut env_vars = env.clone().into_vars();
     env_vars.insert("EXO_HOME".into(), state_root.to_string_lossy().into_owned());
-    let state: Arc<dyn ExoHarness> = Arc::new(
+    let state = Arc::new(
         BasicExoHarness::new(config.clone())
             .await?
             .with_local_sessions(state_root.to_owned()),
@@ -102,18 +102,24 @@ pub(crate) async fn runtime(
         }
         None => cost::PricingTable::empty(),
     });
-    let provider = executor::LocalProvider::managed(state, config, env_vars, pricing)?
+    let provider = executor::LocalProvider::managed(state.clone(), config, env_vars, pricing)?
         .with_managed_agents(setup);
-    Ok(Arc::new(executor::Runtime::new(
-        provider,
-        execution.and_then(|args| {
-            env.braintrust_runtime_config(
-                args.braintrust_api_key.clone(),
-                args.braintrust_app_url.clone(),
-                args.braintrust_api_url.clone(),
-            )
+    Ok(Arc::new(
+        executor::Runtime::new(
+            provider,
+            execution.and_then(|args| {
+                env.braintrust_runtime_config(
+                    args.braintrust_api_key.clone(),
+                    args.braintrust_app_url.clone(),
+                    args.braintrust_api_url.clone(),
+                )
+            }),
+        )
+        .with_shutdown_hook(move || {
+            let state = state.clone();
+            async move { state.release_local_sessions().await }
         }),
-    )))
+    ))
 }
 
 pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
