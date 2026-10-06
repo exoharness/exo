@@ -931,7 +931,7 @@ async fn main() -> Result<(), CliError> {
             ..
         }
     ) {
-        turn_display::init_progress().map_err(|error| CliError { error, verbose })?;
+        turn_display::init_progress(verbose).map_err(|error| CliError { error, verbose })?;
     }
     run(cli).await.map_err(|error| CliError { error, verbose })
 }

@@ -20,9 +20,7 @@ pub(crate) use native::validate_durable_file_systems;
 #[cfg(feature = "basic-backend")]
 pub use native::*;
 #[cfg(feature = "basic-backend")]
-pub(crate) use native::{
-    WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_OWNER_PID_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL,
-};
+pub(crate) use native::{WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxLifecycleConfig {
@@ -374,6 +372,17 @@ pub trait ManagedSandboxBackend: Send + Sync {
 
     fn is_local(&self) -> bool;
 
+    /// Whether stopping leaves provider-owned disks that deletion must reclaim.
+    fn retains_disk_when_stopped(&self) -> bool {
+        false
+    }
+
+    /// Whether stopping an uncached sandbox needs persisted provider state.
+    /// Backends addressing resources directly by sandbox ID can skip loading it.
+    fn stop_requires_provider_state(&self) -> bool {
+        true
+    }
+
     /// Formats this backend can consume in `acquire_from_snapshot`.
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat];
 
@@ -384,6 +393,22 @@ pub trait ManagedSandboxBackend: Send + Sync {
     /// Enforce `request.spec.policy` before returning a usable handle. Attach,
     /// restore, and fork must provide the same guarantee or reject the policy.
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
+
+    /// Connect to a published port. Backends whose acquisition changes lifecycle
+    /// ownership should inspect the existing sandbox without restarting it.
+    async fn connect_tcp(
+        &self,
+        request: SandboxRequest,
+        port: u16,
+    ) -> Result<Option<BoxSandboxTcpStream>> {
+        self.acquire(request).await?.connect_tcp(port).await
+    }
+
+    /// Stop a persisted sandbox when no in-process handle is available. Backends
+    /// with stable resource IDs can override this to avoid starting it first.
+    async fn stop(&self, request: SandboxRequest) -> Result<()> {
+        self.acquire(request).await?.stop().await
+    }
 
     /// Reconnect to an existing sandbox without provisioning a replacement.
     /// `request` is available when the caller retained the acquisition context;

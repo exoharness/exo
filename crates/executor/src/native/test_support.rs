@@ -1,18 +1,5 @@
-use std::path::PathBuf;
-
-use exoharness::{
-    BasicExoHarnessConfig, SandboxBackendRegistration, SandboxProvider, SecretBackendChoice,
-};
-
-pub(crate) fn local_test_config(root: impl Into<PathBuf>) -> BasicExoHarnessConfig {
-    BasicExoHarnessConfig {
-        root: root.into(),
-        secret_backend: SecretBackendChoice::Static([7u8; 32]),
-        sandbox_default: SandboxProvider::LocalProcess,
-        sandbox_policy: None,
-        sandbox_backends: vec![SandboxBackendRegistration::local_process()],
-    }
-}
+use exoharness::SandboxProvider;
+pub(crate) use exoharness::test_support::local_test_config;
 
 pub(crate) fn agent_request(
     slug: impl Into<String>,

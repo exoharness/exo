@@ -165,7 +165,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            tcp_ports: vec![],
+            tcp_ports: vec![3000, 8000],
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -179,10 +179,9 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         })
         .await
         .expect("sandbox");
-    assert_eq!(
-        conversation.list_sandboxes().await.expect("list sandboxes")[0].id,
-        sandbox_id
-    );
+    let sandboxes = conversation.list_sandboxes().await.expect("list sandboxes");
+    assert_eq!(sandboxes[0].id, sandbox_id);
+    assert_eq!(sandboxes[0].tcp_ports, vec![3000, 8000]);
     let process = conversation
         .run_in_sandbox(RunInSandboxRequest {
             id: sandbox_id.clone(),
@@ -416,7 +415,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
         .expect("turn snapshot");
     turn.start_sandbox(StartSandboxRequest {
         id: sandbox_id.clone(),
-        snapshot_id,
+        snapshot_id: Some(snapshot_id),
         idle_seconds: Some(60),
         provider: None,
     })

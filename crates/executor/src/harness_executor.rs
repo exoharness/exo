@@ -518,6 +518,7 @@ impl Runtime {
         thread: Arc<dyn ConversationHandle>,
         resolver: Option<RecoveryRuntimeResolver>,
     ) -> Result<()> {
+        thread.claim_local_session().await?;
         let events = thread
             .get_events(Some(EventQuery {
                 direction: Some(EventQueryDirection::Asc),
@@ -820,6 +821,7 @@ impl Runtime {
         if recovery.is_none() {
             self.recovery_gate.wait(thread.record().id).await;
         }
+        thread.claim_local_session().await?;
         self.initialized
             .get_or_try_init(|| {
                 provider
@@ -1137,12 +1139,28 @@ impl Runtime {
     pub async fn shutdown(&self) -> Result<()> {
         let shutdown = self.provider.harness().shutdown().await;
         let mut finalizers = self.finalizers.lock().await;
+        let mut finalizer_error = None;
         while let Some(result) = finalizers.join_next().await {
-            result?;
+            if let Err(error) = result {
+                tracing::error!(?error, "runtime finalizer failed");
+                finalizer_error = Some(error);
+            }
         }
+        drop(finalizers);
         let flush = self.tracer.flush().await;
+        // Caller runtimes share the server's ownership. The root runtime
+        // releases it after every caller's execution has drained.
+        let stopped = if self.provider.exoharness().caller().is_none() {
+            self.provider.exoharness().release_local_sessions().await
+        } else {
+            Ok(())
+        };
         shutdown?;
-        flush
+        if let Some(error) = finalizer_error {
+            return Err(error);
+        }
+        flush?;
+        stopped
     }
 }
 

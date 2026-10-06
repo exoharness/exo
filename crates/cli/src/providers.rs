@@ -61,7 +61,11 @@ pub(crate) async fn runtime(
     let config = crate::build_exo_config(cli, state_root)?;
     let mut env_vars = env.clone().into_vars();
     env_vars.insert("EXO_HOME".into(), state_root.to_string_lossy().into_owned());
-    let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
+    let state: Arc<dyn ExoHarness> = Arc::new(
+        BasicExoHarness::new(config.clone())
+            .await?
+            .with_local_sessions(state_root.to_owned()),
+    );
     if let Some(reference) = thread.and_then(|args| args.agent.as_deref())
         && let Some(selection) = selection.as_ref()
     {

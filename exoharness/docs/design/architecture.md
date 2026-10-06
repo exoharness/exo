@@ -145,6 +145,7 @@ environment:
 - `fork(ForkConversationRequest) -> ConversationHandle`
 - `list_artifacts()`, `write_artifact()`, `read_artifact()`
 - `create_sandbox(CreateSandboxRequest) -> SandboxId`
+- `list_sandboxes() -> Vec<SandboxRecord>`
 - `snapshot_sandbox(sandbox_id) -> SnapshotId`
 - `start_sandbox(StartSandboxRequest)`
 - `stop_sandbox(sandbox_id)`

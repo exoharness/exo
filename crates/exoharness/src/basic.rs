@@ -58,6 +58,11 @@ use vault_context::ScopedVaultContext;
 mod egress;
 #[cfg(feature = "basic-backend")]
 use egress::LocalEgressResolver;
+#[cfg(feature = "basic-backend")]
+#[path = "basic/sessions.rs"]
+mod sessions;
+#[cfg(feature = "basic-backend")]
+use sessions::LocalSessions;
 
 #[cfg(all(test, feature = "basic-backend"))]
 #[path = "basic/resource_tests.rs"]
@@ -192,6 +197,8 @@ fn unfinished_thread_markers_dir(agent_id: AgentId, thread_id: ConversationId) -
 
 #[derive(Clone)]
 pub struct BasicExoHarness {
+    #[cfg(feature = "basic-backend")]
+    sessions: Option<Arc<LocalSessions>>,
     inner: Arc<BasicExoHarnessInner>,
     caller: Option<crate::access::Caller>,
 }
@@ -394,8 +401,15 @@ impl ExoHarness for BasicExoHarness {
             .get_or_init(|| caller.policy.clone());
         Ok(Arc::new(Self {
             inner: self.inner.clone(),
+            #[cfg(feature = "basic-backend")]
+            sessions: self.sessions.clone(),
             caller: Some(caller),
         }))
+    }
+
+    #[cfg(feature = "basic-backend")]
+    async fn release_local_sessions(&self) -> Result<()> {
+        self.finish_local_sessions().await
     }
 
     async fn list_environments(&self) -> Result<Vec<crate::EnvironmentDefinition>> {
@@ -543,18 +557,37 @@ impl ExoHarness for BasicExoHarness {
         if self.inner.storage.list_keys(&agent_dir).await?.is_empty() {
             return Ok(false);
         }
+        #[cfg(feature = "basic-backend")]
+        let _namespace = self.agent_change(*id).await?;
+        #[cfg(feature = "basic-backend")]
+        let _leases = if let Some(sessions) = &self.sessions {
+            let mut scopes = vec![ResourceScope::Agent { agent_id: *id }];
+            for thread_id in agent_conversation_ids(self, &agent_dir).await? {
+                scopes.push(ResourceScope::Thread {
+                    agent_id: *id,
+                    thread_id,
+                });
+            }
+            sessions.claim_all(&scopes)?;
+            scopes
+                .into_iter()
+                .map(|scope| sessions.claimed(scope))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
         // Deleting the agent's prefix erases every sandbox record it and its
         // conversations own; without terminating those sandboxes first their
         // VMs (and registered in-process handles) would keep running with no
         // record left that could ever find them. Same protocol as
         // delete_conversation: terminate outside the write lock, since
         // terminate_sandbox takes that lock itself, then delete only after a
-        // locked re-check sees nothing running — bounded, so racing sandbox
+        // locked re-check sees no managed sandboxes — bounded, so racing sandbox
         // creation yields an error instead of a leaked VM.
         for _ in 0..5 {
-            terminate_running_sandboxes(&BasicScopedSandboxHandle::agent(self, *id)).await?;
+            terminate_managed_sandboxes(&BasicScopedSandboxHandle::agent(self, *id)).await?;
             for conversation_id in agent_conversation_ids(self, &agent_dir).await? {
-                terminate_running_sandboxes(&BasicScopedSandboxHandle::conversation(
+                terminate_managed_sandboxes(&BasicScopedSandboxHandle::conversation(
                     self,
                     *id,
                     conversation_id,
@@ -605,6 +638,10 @@ impl ExoHarness for BasicExoHarness {
                 .storage
                 .delete_prefix(Path::new(UNFINISHED_TURNS_DIR).join(id.to_string()))
                 .await?;
+            #[cfg(feature = "basic-backend")]
+            if let Some(sessions) = &self.sessions {
+                sessions.release_agent(*id)?;
+            }
             return Ok(true);
         }
         bail!("agent {id} kept acquiring sandboxes while it was being deleted")
@@ -686,6 +723,8 @@ impl ExoHarness for BasicExoHarness {
         let _guard = self.inner.write_lock.lock().await;
         let operator = Self {
             inner: self.inner.clone(),
+            #[cfg(feature = "basic-backend")]
+            sessions: self.sessions.clone(),
             caller: None,
         };
         for agent in operator.list_agents().await? {
@@ -725,11 +764,17 @@ where
     T: BasicSandboxScope + Send + Sync,
 {
     async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        self.sandbox_handle().snapshot_sandbox(id).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.snapshot_sandbox(id).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
-        self.sandbox_handle().start_sandbox(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.start_sandbox(request).await
     }
 }
 
@@ -746,31 +791,52 @@ where
     }
 
     async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
-        self.sandbox_handle().create_sandbox(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.create_sandbox(request).await
     }
 
     async fn fork_sandbox(&self, request: ForkSandboxRequest) -> Result<SandboxId> {
-        self.sandbox_handle().fork_sandbox(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.fork_sandbox(request).await
     }
 
     async fn restore_sandbox(&self, request: RestoreSandboxRequest) -> Result<SandboxId> {
-        self.sandbox_handle().restore_sandbox(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.restore_sandbox(request).await
     }
 
     async fn terminate_sandbox(&self, id: SandboxId) -> Result<()> {
-        self.sandbox_handle().terminate_sandbox(id).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.terminate_sandbox(id).await
     }
 
     async fn attach_sandbox(&self, request: AttachSandboxRequest) -> Result<SandboxId> {
-        self.sandbox_handle().attach_sandbox(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.attach_sandbox(request).await
     }
 
     async fn detach_sandbox(&self, id: SandboxId) -> Result<SandboxAttachment> {
-        self.sandbox_handle().detach_sandbox(id).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.detach_sandbox(id).await
     }
 
     async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
-        self.sandbox_handle().stop_sandbox(id).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.stop_sandbox(id).await
     }
 
     #[cfg(feature = "basic-backend")]
@@ -791,25 +857,30 @@ where
         &self,
         request: StartSandboxProcessRequest,
     ) -> Result<SandboxProcessRecord> {
-        self.sandbox_handle().start_sandbox_process(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.start_sandbox_process(request).await
     }
 
     async fn write_sandbox_process_input(
         &self,
         request: WriteSandboxProcessInputRequest,
     ) -> Result<()> {
-        self.sandbox_handle()
-            .write_sandbox_process_input(request)
-            .await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.write_sandbox_process_input(request).await
     }
 
     async fn close_sandbox_process_input(
         &self,
         request: CloseSandboxProcessInputRequest,
     ) -> Result<()> {
-        self.sandbox_handle()
-            .close_sandbox_process_input(request)
-            .await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.close_sandbox_process_input(request).await
     }
 
     async fn get_sandbox_process_events(
@@ -832,14 +903,20 @@ where
         &self,
         request: CancelSandboxProcessRequest,
     ) -> Result<SandboxProcessStatus> {
-        self.sandbox_handle().cancel_sandbox_process(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.cancel_sandbox_process(request).await
     }
 
     async fn run_in_sandbox(
         &self,
         request: RunInSandboxRequest,
     ) -> Result<Box<dyn SandboxProcess>> {
-        self.sandbox_handle().run_in_sandbox(request).await
+        let scope = self.sandbox_handle();
+        #[cfg(feature = "basic-backend")]
+        let _lease = scope.harness.claim_local_scope(scope.owner).await?;
+        scope.run_in_sandbox(request).await
     }
 }
 
@@ -970,6 +1047,17 @@ impl AgentHandle for BasicAgentHandle {
                 agent_id: self.record.id,
             })
             .await?;
+        #[cfg(feature = "basic-backend")]
+        let _namespace = self.harness.agent_change(self.record.id).await?;
+        anyhow::ensure!(
+            self.harness
+                .inner
+                .storage
+                .get_bytes_if_exists(self.agent_dir().join("record.json"))
+                .await?
+                .is_some(),
+            "agent no longer exists"
+        );
         let _guard = self.harness.inner.write_lock.lock().await;
         let existing = self
             .list_conversation_records(ListConversationsRequest::default())
@@ -1027,6 +1115,13 @@ impl AgentHandle for BasicAgentHandle {
             .storage
             .put_json(conversation_dir.join("record.json"), &record)
             .await?;
+        #[cfg(feature = "basic-backend")]
+        if let Some(sessions) = &self.harness.sessions {
+            sessions.claim(ResourceScope::Thread {
+                agent_id: self.record.id,
+                thread_id: record.id,
+            })?;
+        }
         Ok(Arc::new(BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.record.id,
@@ -1064,17 +1159,32 @@ impl AgentHandle for BasicAgentHandle {
             return Ok(false);
         }
 
+        #[cfg(feature = "basic-backend")]
+        let _namespace = self.harness.agent_change(self.record.id).await?;
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .sessions
+            .as_ref()
+            .map(|sessions| {
+                sessions.claim(ResourceScope::Thread {
+                    agent_id: self.record.id,
+                    thread_id: *id,
+                })
+            })
+            .transpose()?;
+
         let sandbox_handle =
             BasicScopedSandboxHandle::conversation(&self.harness, self.record.id, *id);
         // Sandbox creation persists its record under the write lock, so the
         // only way to guarantee no VM outlives its conversation record is to
-        // observe "no running sandboxes" while holding that lock and delete
+        // observe "no managed sandboxes" while holding that lock and delete
         // without releasing it. terminate_sandbox takes the write lock itself,
         // so terminations run outside it and the locked check loops until it
         // finds nothing new — bounded, so a caller racing sandbox creation
         // against deletion gets an error instead of a silently leaked VM.
         for _ in 0..5 {
-            terminate_running_sandboxes(&sandbox_handle).await?;
+            terminate_managed_sandboxes(&sandbox_handle).await?;
 
             let _guard = self.harness.inner.write_lock.lock().await;
             if self
@@ -1122,6 +1232,13 @@ impl AgentHandle for BasicAgentHandle {
                 .storage
                 .delete_prefix(unfinished_thread_markers_dir(self.record.id, *id))
                 .await?;
+            #[cfg(feature = "basic-backend")]
+            if let Some(sessions) = &self.harness.sessions {
+                sessions.release(ResourceScope::Thread {
+                    agent_id: self.record.id,
+                    thread_id: *id,
+                })?;
+            }
             return Ok(true);
         }
         bail!("conversation {id} kept acquiring sandboxes while it was being deleted")
@@ -1292,8 +1409,34 @@ fn paginate_conversation_records(
 }
 
 // Deletion helpers shared by delete_agent and delete_conversation: an owner's
-// storage prefix must never be removed while sandboxes it owns are running,
-// or their VMs would outlive every record that could find them.
+// storage prefix must never be removed while it owns running sandboxes or
+// retained disks. Other stopped providers keep their existing deletion
+// behavior: deleting metadata does not require that provider's credentials.
+fn requires_sandbox_termination(harness: &BasicExoHarness, sandbox: &StoredSandbox) -> bool {
+    sandbox.attachment.is_none()
+        && (sandbox.running
+            || harness
+                .inner
+                .sandbox_registry
+                .get(&sandbox.provider)
+                .is_some_and(|registration| registration.retains_disk_when_stopped))
+}
+
+async fn terminate_managed_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()> {
+    for sandbox in scope
+        .harness
+        .inner
+        .storage
+        .list_json_matching_suffix::<StoredSandbox>(scope.sandboxes_dir(), ".json")
+        .await?
+    {
+        if requires_sandbox_termination(scope.harness, &sandbox) {
+            scope.terminate_sandbox(sandbox.id).await?;
+        }
+    }
+    Ok(())
+}
+
 // Called under the write lock immediately before deleting these scopes. The
 // check happens for every scope before any handles are released, so a racing
 // sandbox creation retries the whole deletion. Attached sandboxes keep
@@ -1338,7 +1481,30 @@ struct BasicConversationHandle {
 
 #[async_trait]
 impl ConversationHandle for BasicConversationHandle {
+    fn record(&self) -> &ConversationRecord {
+        &self.record
+    }
+
+    #[cfg(feature = "basic-backend")]
+    async fn claim_local_session(&self) -> Result<()> {
+        self.harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await
+            .map(|_| ())
+    }
+
     async fn activate_caller(&self) -> Result<bool> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         let Some(caller) = &self.harness.caller else {
             return Ok(false);
         };
@@ -1355,12 +1521,14 @@ impl ConversationHandle for BasicConversationHandle {
         }
         let operator = BasicExoHarness {
             inner: self.harness.inner.clone(),
+            #[cfg(feature = "basic-backend")]
+            sessions: self.harness.sessions.clone(),
             caller: None,
         };
         let scope =
             BasicScopedSandboxHandle::conversation(&operator, self.agent_id, self.record.id);
         let reset = active.is_some() || !scope.list_sandboxes().await?.is_empty();
-        terminate_running_sandboxes(&scope).await?;
+        terminate_managed_sandboxes(&scope).await?;
         self.harness
             .inner
             .storage
@@ -1373,6 +1541,14 @@ impl ConversationHandle for BasicConversationHandle {
         &self,
         environment: crate::EnvironmentDefinition,
     ) -> Result<Arc<dyn ConversationHandle>> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         self.harness
             .check(ResourceScope::Thread {
                 agent_id: self.agent_id,
@@ -1389,13 +1565,19 @@ impl ConversationHandle for BasicConversationHandle {
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         if record.environment.as_ref() != Some(&environment) {
-            #[cfg(feature = "basic-backend")]
-            self.check_resource_environment(&environment.config.provider)?;
-            let scope = self.sandbox_handle();
-            for sandbox in scope.list_sandboxes().await? {
-                scope.terminate_sandbox_locked(sandbox.id).await?;
+            let replace_sandboxes = record
+                .environment
+                .as_ref()
+                .is_none_or(|previous| previous.config != environment.config);
+            if replace_sandboxes {
+                #[cfg(feature = "basic-backend")]
+                self.check_resource_environment(&environment.config.provider)?;
+                let scope = self.sandbox_handle();
+                for sandbox in scope.list_sandboxes().await? {
+                    scope.terminate_sandbox_locked(sandbox.id).await?;
+                }
+                record = self.load_record().await?;
             }
-            record = self.load_record().await?;
             record.environment = Some(environment);
             self.harness
                 .inner
@@ -1403,15 +1585,23 @@ impl ConversationHandle for BasicConversationHandle {
                 .put_json(self.conversation_dir().join("record.json"), &record)
                 .await?;
         }
-        Ok(Arc::new(Self {
+        Ok(Arc::new(BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.agent_id,
             record,
-            event_batch_index: Arc::clone(&self.event_batch_index),
+            event_batch_index: self.event_batch_index.clone(),
         }))
     }
 
     async fn attach_vaults(&self, vaults: Vec<VaultId>) -> Result<Arc<dyn ConversationHandle>> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         self.harness
             .check(ResourceScope::Thread {
                 agent_id: self.agent_id,
@@ -1431,11 +1621,11 @@ impl ConversationHandle for BasicConversationHandle {
             .storage
             .put_json(self.conversation_dir().join("record.json"), &record)
             .await?;
-        Ok(Arc::new(Self {
+        Ok(Arc::new(BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.agent_id,
             record,
-            event_batch_index: Arc::clone(&self.event_batch_index),
+            event_batch_index: self.event_batch_index.clone(),
         }))
     }
 
@@ -1446,7 +1636,15 @@ impl ConversationHandle for BasicConversationHandle {
     ) -> Result<Vec<FileSystemMount>> {
         #[cfg(feature = "basic-backend")]
         {
-            self.materialize_resources_impl(resources, provider).await
+            let lease = self
+                .harness
+                .claim_local_scope(ResourceScope::Thread {
+                    agent_id: self.agent_id,
+                    thread_id: self.record.id,
+                })
+                .await?;
+            self.materialize_resources_impl(resources, provider, lease)
+                .await
         }
         #[cfg(not(feature = "basic-backend"))]
         {
@@ -1464,9 +1662,6 @@ impl ConversationHandle for BasicConversationHandle {
         }
     }
 
-    fn record(&self) -> &ConversationRecord {
-        &self.record
-    }
     async fn start_session(&self) -> Result<SessionId> {
         self.harness
             .check(ResourceScope::Thread {
@@ -1498,6 +1693,14 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn begin_turn(&self, request: BeginTurnRequest) -> Result<Arc<dyn TurnHandle>> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         self.harness
             .check(ResourceScope::Thread {
                 agent_id: self.agent_id,
@@ -1551,15 +1754,15 @@ impl ConversationHandle for BasicConversationHandle {
             &mut record,
         )
         .await?;
-        remember_appended_batch(&self.event_batch_index, &conversation_dir, &add_result);
 
+        remember_appended_batch(&self.event_batch_index, &conversation_dir, &add_result);
         Ok(Arc::new(BasicTurnHandle {
             harness: self.harness.clone(),
             agent_id: self.agent_id,
             conversation_dir,
             conversation_id: self.record.id,
             record: turn_record,
-            event_batch_index: Arc::clone(&self.event_batch_index),
+            event_batch_index: self.event_batch_index.clone(),
             state: Mutex::new(BasicTurnState {
                 latest_event_id: Some(add_result.latest_event_id),
                 finished: false,
@@ -1746,6 +1949,8 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn fork(&self, request: ForkConversationRequest) -> Result<Arc<dyn ConversationHandle>> {
+        #[cfg(feature = "basic-backend")]
+        let _namespace = self.harness.agent_change(self.agent_id).await?;
         self.harness
             .check(ResourceScope::Thread {
                 agent_id: self.agent_id,
@@ -1814,11 +2019,6 @@ impl ConversationHandle for BasicConversationHandle {
             .storage
             .copy_prefix(self.artifacts_dir(), conversation_dir.join("artifacts"))
             .await?;
-        self.harness
-            .inner
-            .storage
-            .copy_prefix(self.sandboxes_dir(), conversation_dir.join("sandboxes"))
-            .await?;
 
         let mut latest_event_id = None;
         for mut event in events {
@@ -1860,6 +2060,13 @@ impl ConversationHandle for BasicConversationHandle {
             .storage
             .put_json(conversation_dir.join("record.json"), &fork_record)
             .await?;
+        #[cfg(feature = "basic-backend")]
+        if let Some(sessions) = &self.harness.sessions {
+            sessions.claim(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: record.id,
+            })?;
+        }
         Ok(Arc::new(BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.agent_id,
@@ -1869,6 +2076,14 @@ impl ConversationHandle for BasicConversationHandle {
     }
 
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion> {
+        #[cfg(feature = "basic-backend")]
+        let _lease = self
+            .harness
+            .claim_local_scope(ResourceScope::Thread {
+                agent_id: self.agent_id,
+                thread_id: self.record.id,
+            })
+            .await?;
         self.harness
             .check(ResourceScope::Thread {
                 agent_id: self.agent_id,
@@ -1970,10 +2185,6 @@ impl BasicConversationHandle {
 
     fn artifacts_dir(&self) -> PathBuf {
         self.conversation_dir().join("artifacts")
-    }
-
-    fn sandboxes_dir(&self) -> PathBuf {
-        self.conversation_dir().join("sandboxes")
     }
 
     async fn load_record(&self) -> Result<ConversationRecord> {

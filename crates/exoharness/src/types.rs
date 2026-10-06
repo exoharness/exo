@@ -45,6 +45,12 @@ impl ResourceScope {
 
 #[async_trait]
 pub trait ExoHarness: VaultContext {
+    /// Release process-owned local sandboxes after all execution has stopped.
+    /// Remote providers retain their own sandbox lifetime.
+    async fn release_local_sessions(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn with_caller(&self, _caller: crate::access::Caller) -> Result<Arc<dyn ExoHarness>> {
         anyhow::bail!("this provider does not support caller-scoped execution")
     }
@@ -198,6 +204,12 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
 
 #[async_trait]
 pub trait ThreadHandle: SandboxHandle + VaultContext {
+    /// Claim this thread for local execution or configuration. Provider servers
+    /// and inline runtimes use the same ownership; remote handles delegate it.
+    async fn claim_local_session(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn activate_caller(&self) -> Result<bool> {
         Ok(false)
     }
@@ -586,6 +598,10 @@ pub enum EventData {
         #[serde(default)]
         durable_file_systems: Vec<DurableFileSystem>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        resources: Option<SandboxResourceShape>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tcp_ports: Vec<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         policy: Option<EgressPolicy>,
         enable_networking: bool,
         idle_seconds: u64,
@@ -740,6 +756,10 @@ pub struct DurableFileSystem {
 pub struct SandboxResourceShape {
     pub vcpu_count: NonZeroU8,
     pub memory_mib: NonZeroU32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_gib: Option<NonZeroU32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_gib: Option<NonZeroU32>,
 }
 
 pub const DEFAULT_SANDBOX_VCPU_COUNT: u8 = 2;
@@ -753,6 +773,8 @@ impl SandboxResourceShape {
         Some(Self {
             vcpu_count: NonZeroU8::new(vcpu_count)?,
             memory_mib: NonZeroU32::new(memory_mib)?,
+            storage_gib: None,
+            overlay_gib: None,
         })
     }
 }
@@ -764,6 +786,8 @@ impl Default for SandboxResourceShape {
                 .expect("default sandbox vCPU count must be positive"),
             memory_mib: NonZeroU32::new(DEFAULT_SANDBOX_MEMORY_MIB)
                 .expect("default sandbox memory must be positive"),
+            storage_gib: None,
+            overlay_gib: None,
         }
     }
 }
@@ -774,7 +798,12 @@ pub struct SandboxRecord {
     pub name: Option<String>,
     pub provider: SandboxProvider,
     pub image: String,
+    /// Guest TCP ports published by the sandbox backend.
+    pub tcp_ports: Vec<u16>,
+    /// The harness's recorded running state, not a service health check.
     pub running: bool,
+    /// Whether an external owner controls this attached sandbox's lifecycle.
+    pub attached: bool,
 }
 
 pub(crate) fn canonical_egress_host(host: &str) -> Result<String> {
@@ -1005,11 +1034,11 @@ impl FromStr for SandboxProvider {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartSandboxRequest {
     pub id: SandboxId,
-    pub snapshot_id: SnapshotId,
+    /// Restore a snapshot, or resume the existing sandbox when omitted.
+    pub snapshot_id: Option<SnapshotId>,
     pub idle_seconds: Option<u64>,
-    // If unspecified, starts sandbox where it was last run. If specified, will attempt to
-    // start the sandbox on the specified provider, if supported. If successful, the
-    // sandbox will start there going forward.
+    /// Omit to retain the current provider. Changing providers requires a
+    /// snapshot ID and a snapshot format supported by the destination backend.
     #[serde(default)]
     pub provider: Option<SandboxProvider>,
 }

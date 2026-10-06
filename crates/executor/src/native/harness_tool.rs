@@ -637,7 +637,7 @@ async fn execute_rewind_sandbox_tool(
             agent
                 .start_sandbox(StartSandboxRequest {
                     id: handle.sandbox_id.clone(),
-                    snapshot_id,
+                    snapshot_id: Some(snapshot_id),
                     idle_seconds: Some(spec.idle_seconds),
                     provider: None,
                 })
@@ -670,7 +670,7 @@ async fn execute_rewind_sandbox_tool(
                 ensure_conversation_sandbox(conversation, agent_config, config, None).await?;
             turn.start_sandbox(StartSandboxRequest {
                 id: sandbox_id.clone(),
-                snapshot_id,
+                snapshot_id: Some(snapshot_id),
                 idle_seconds: Some(spec.idle_seconds),
                 provider: None,
             })

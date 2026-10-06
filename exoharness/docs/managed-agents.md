@@ -96,6 +96,8 @@ Use `--tui` to opt into the full-screen interface. Type `/help` for commands or
 Your turn streams as it runs. Updates from other clients appear when you submit
 the next line; pressing Enter on an empty prompt also checks for updates.
 
+### Named agents and threads
+
 ```bash
 exo agent run --agent-file exoharness/examples/managed-agents/support-analyst.md
 
@@ -116,12 +118,45 @@ exo agent create support --file exoharness/examples/managed-agents/support-analy
 exo agent list
 exo agent run --agent support
 exo thread list support
-exo agent run --agent support --thread <thread-slug>
+exo agent run --agent support --thread my-project
 ```
 
 The CLI prints the agent and thread ids. Both ids and slugs work when resuming.
-A missing `--thread` starts a new thread; an unknown thread is an error.
+Without `--thread`, each run starts a new thread. `--thread NAME` creates a thread
+with that name on the first run and resumes it on subsequent runs.
+
+New names must contain 1–128 ASCII letters, digits, hyphens, or underscores and
+start with a letter or digit; spaces and slashes are rejected. An unknown
+UUID-shaped reference returns `thread ... not found` instead of creating a
+thread with that name. Startup announces whether it is creating or opening a
+thread.
+
+Select VM settings explicitly with `--environment NAME`:
+
+```bash
+exo agent create support --file agent.md
+exo environment create local-dev --file environment.yaml
+exo agent run --agent support --environment local-dev --thread my-project
+```
+
+The environment file's `name` must match the name passed to `environment create`.
+The selected configuration is saved on the thread; resuming without `--environment`
+retains it. Passing `--environment` again applies the current saved definition.
 Add `--prompt "..."` to run a single turn and exit.
+
+Direct local CLI sessions stop their managed thread sandboxes when the session
+exits. With SmolVM, resuming the thread restarts the same VM with its disks and
+chat retained. Processes inside the VM restart; a development stack needs its
+startup command on resume. Deleting the thread removes its managed VM and disks.
+HTTP clients leave sandbox lifetime with the server, so use `exo serve` when
+services should stay running between client sessions.
+
+Local commands and servers claim exclusive ownership of each thread they use.
+Other threads can run concurrently under the same state root. Use the owner's
+HTTP provider to execute, reconfigure or delete a server-owned thread. Read-only
+queries and port forwarding do not claim ownership. After a crash, the next owner
+stops leftover managed sandboxes before resuming. Attached sandboxes keep their
+external owner. One `exo serve` process may supervise adapters per state root.
 
 Each `--agent-file` invocation creates or updates a saved agent from the Markdown
 file, then starts a saved thread. The agent slug combines the filename with a hash
@@ -313,16 +348,23 @@ The Codex example at `exoharness/examples/environments/codex-smolvm.yaml` uses
 the published `ghcr.io/exoharness/codex-devbox:latest`. To use a locally built
 image instead, change its `config.image` to `exo-codex-devbox:latest`.
 Definitions forward the existing sandbox settings: `provider`, `image`,
-`resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `policy`,
+`resources`, `default_workdir`, `file_system_mounts`, `durable_file_systems`, `tcp_ports`, `policy`,
 `enable_networking`, and `idle_seconds`. `policy.networking` takes precedence over
 `enable_networking`. Omitted `provider` selects SmolVM, and omitted networking
 allows unrestricted access. Unsupported network policies are rejected by the backend.
 Omitting `resources` preserves the container backend's defaults; Firecracker uses
 its default VM size. Local-process execution has no container resource or filesystem isolation.
 
+SmolVM also accepts `resources.storage_gib` and `resources.overlay_gib` to size
+its storage and persistent root filesystem disks. Both must be positive integers;
+other backends reject these settings. These are virtual disk sizes, not RAM.
+
 Use `--environment-file path.yaml` without saving a definition. An HTTP provider
 receives the definition's contents and provisions it on its host. Mount paths in
-that spec must be absolute paths on the runtime host. The CLI's `--mount` option
+that spec must refer to directories on the runtime host. Relative `host_path`
+values in environment files resolve against the file's directory and are saved
+as absolute paths. For HTTP providers, use absolute paths on the server.
+The CLI's `--mount` option
 can add local mounts at thread creation; it is rejected for HTTP providers.
 The OSS HTTP bearer grants runtime-owner access, including saving environments,
 mounting host paths, and local-process execution. Give it only to trusted runtime
@@ -331,8 +373,8 @@ operators.
 `exo environment update NAME --file path.yaml` changes the saved definition for
 new threads. Resume with `--agent NAME --thread THREAD --environment NAME` or
 `--environment-file path.yaml` to apply an updated definition to a saved thread.
-A changed definition replaces its sandbox and preserves thread history and
-filesystem resources; files outside persistent mounts are discarded. Omitting
+A changed sandbox configuration replaces its sandbox and preserves thread history
+and filesystem resources; files outside persistent mounts are discarded. Omitting
 both environment flags retains the thread's saved configuration. Reapplying the
 same definition reuses its sandbox. To upgrade the image of an existing sandbox,
 change the image reference in the environment; use a versioned tag or digest.

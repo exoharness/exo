@@ -80,7 +80,11 @@ impl Fixture {
                 }),
             ],
         };
-        let state = Arc::new(BasicExoHarness::new(config.clone()).await?);
+        let state = Arc::new(
+            BasicExoHarness::new(config.clone())
+                .await?
+                .with_local_sessions(root.clone()),
+        );
         let runtime = Arc::new(Runtime::new(
             LocalProvider::managed(
                 state,
@@ -173,6 +177,7 @@ impl Fixture {
         let mut command = Command::new(binary);
         command
             .env_clear()
+            .env("EXO_HOME", &self.root)
             .env("EXO_CONFIG_DIR", self.temp.path().join("config"))
             .env("SMOKE_API_KEY", "fixture-model-key")
             .env("RUNTIME_TOKEN", "workflow-token")

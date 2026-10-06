@@ -70,6 +70,7 @@ web-time = "1.1"
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+exoharness = { path = "../exoharness", features = ["contract-tests"] }
 tokio.workspace = true
 rsa = { version = "0.9", features = ["getrandom"] }
 rmcp = { workspace = true, features = ["auth"] }

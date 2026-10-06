@@ -85,10 +85,11 @@ EOF
 ./target/debug/exo agent run --agent assistant
 ```
 
-`exo agent run --agent assistant` starts a new saved thread. Pass `--thread <slug>`
-to resume an existing thread. `exo agent run --agent-file agent.md` creates or
-updates a saved agent from the file, then starts a saved thread; add `--thread
-<slug>` to resume one. The agent slug combines the filename with a hash of its
+`exo agent run --agent assistant` starts a new saved thread. Pass `--thread NAME`
+to create a named thread on the first run and resume it on subsequent runs.
+`exo agent run --agent-file agent.md` creates or updates a saved agent from the
+file, then starts a saved thread; `--thread NAME` uses the same create-or-resume
+behavior. The agent slug combines the filename with a hash of its
 canonical absolute path, so rerunning the same file reuses the agent without a
 local association file. Moving the file creates a different agent. Each run
 replaces the saved definition, including fields removed from the file. Agents
