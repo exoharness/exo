@@ -37,10 +37,6 @@ async fn setup(provider: &str) -> Result<Fixture> {
     Ok(f)
 }
 
-async fn open_session(f: &Fixture, thread: &str) -> Result<Child> {
-    open_session_on(f, thread, None).await
-}
-
 async fn open_session_on(f: &Fixture, thread: &str, provider: Option<&str>) -> Result<Child> {
     let agent =
         exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "dev").await?;
@@ -171,17 +167,19 @@ async fn server_and_inline_threads_share_a_root_without_sharing_ownership() -> R
     // HTTP clients leave ownership with the server, while an inline exit
     // releases only that inline process's thread.
     close_session(local).await?;
-    f.cli(&[
-        "--provider",
-        "local",
-        "agent",
-        "run",
-        "--agent",
-        agent_id.as_str(),
-        "--thread",
-        "inline",
-    ])
-    .await?;
+    let resumed = f
+        .cli(&[
+            "--provider",
+            "local",
+            "agent",
+            "run",
+            "--agent",
+            agent_id.as_str(),
+            "--thread",
+            "inline",
+        ])
+        .await?;
+    assert_eq!(support::thread_slug(&resumed)?, "inline");
     f.runtime.shutdown().await?;
     assert!(served.list_sandboxes().await?.iter().all(|s| !s.running));
     f.cli(&[
@@ -323,7 +321,10 @@ async fn inline_previews_keep_their_port_and_live_only_in_their_cli_process() ->
             .count()
     };
     let before = count_config(thread.list_artifacts().await?);
-    let (first, second) = tokio::try_join!(open_session(&f, "project"), open_session(&f, "other"))?;
+    let (first, second) = tokio::try_join!(
+        open_session_on(&f, "project", None),
+        open_session_on(&f, "other", None)
+    )?;
     assert_eq!(previews(&f, "project").await?, urls);
     let printed = f.cli(&["thread", "ports", "dev", "project"]).await?;
     assert!(printed.contains(&urls.page));
@@ -368,7 +369,7 @@ async fn inline_previews_keep_their_port_and_live_only_in_their_cli_process() ->
         .await?;
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("declare config.tcp_ports"));
-    let empty = open_session(&f, "project").await?;
+    let empty = open_session_on(&f, "project", None).await?;
     assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
     close_session(empty).await?;
     f.stop().await
@@ -382,7 +383,10 @@ async fn http_provider_owns_one_proxy_after_clients_exit_and_removes_deleted_thr
         .runtime
         .start_preview_server(&f.root, "dev.localhost", None)
         .await?;
-    let (first, second) = tokio::try_join!(open_session(&f, "first"), open_session(&f, "second"))?;
+    let (first, second) = tokio::try_join!(
+        open_session_on(&f, "first", None),
+        open_session_on(&f, "second", None)
+    )?;
     let first_urls = previews(&f, "first").await?;
     let second_urls = previews(&f, "second").await?;
     assert_ne!(first_urls.page, second_urls.page);
