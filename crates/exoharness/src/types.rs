@@ -753,7 +753,6 @@ pub struct DurableFileSystem {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(deny_unknown_fields)]
 pub struct SandboxResourceShape {
     pub vcpu_count: NonZeroU8,
     pub memory_mib: NonZeroU32,
@@ -1746,20 +1745,13 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_resource_shape_accepts_only_positive_cpu_and_memory() {
+    fn sandbox_resource_shape_rejects_zero_and_serializes_as_numbers() {
         assert!(SandboxResourceShape::new(0, 4096).is_none());
         assert!(SandboxResourceShape::new(2, 0).is_none());
         assert_eq!(
             serde_json::to_value(SandboxResourceShape::new(2, 4096).unwrap()).unwrap(),
             serde_json::json!({"vcpu_count": 2, "memory_mib": 4096})
         );
-        for field in ["storage_gib", "overlay_gib"] {
-            let error = serde_json::from_str::<SandboxResourceShape>(&format!(
-                r#"{{"vcpu_count":2,"memory_mib":4096,"{field}":64}}"#,
-            ))
-            .unwrap_err();
-            assert!(error.to_string().contains(field), "{error}");
-        }
     }
 
     #[test]
