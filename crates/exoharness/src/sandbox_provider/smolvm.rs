@@ -1856,7 +1856,19 @@ esac"#,
     fn write_test_binary(path: &Path, body: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        // A separate writer keeps concurrent forked test processes from briefly
+        // inheriting a writable script descriptor and causing Linux ETXTBSY.
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", "printf '%s\\n' \"$2\" > \"$1\"", "write-test-binary"])
+            .arg(path)
+            .arg(format!("#!/bin/sh\n{body}"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
