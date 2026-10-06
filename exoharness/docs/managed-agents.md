@@ -355,9 +355,16 @@ allows unrestricted access. Unsupported network policies are rejected by the bac
 Omitting `resources` preserves the container backend's defaults; Firecracker uses
 its default VM size. Local-process execution has no container resource or filesystem isolation.
 
-SmolVM also accepts `resources.storage_gib` and `resources.overlay_gib` to size
-its storage and persistent root filesystem disks. Both must be positive integers;
-other backends reject these settings. These are virtual disk sizes, not RAM.
+SmolVM disk sizes belong to its provider configuration. Set positive GiB capacities
+for new machines with:
+
+```sh
+exo environment provider create --backend smolvm \
+  --smolvm-storage-gib 64 --smolvm-overlay-gib 64
+```
+
+`storage_gib` holds OCI layers and container data; `overlay_gib` holds persistent
+root filesystem changes. Shared `resources` settings contain CPU and memory.
 
 Use `--environment-file path.yaml` without saving a definition. An HTTP provider
 receives the definition's contents and provisions it on its host. Mount paths in

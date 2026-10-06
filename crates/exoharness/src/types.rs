@@ -753,13 +753,10 @@ pub struct DurableFileSystem {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(deny_unknown_fields)]
 pub struct SandboxResourceShape {
     pub vcpu_count: NonZeroU8,
     pub memory_mib: NonZeroU32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub storage_gib: Option<NonZeroU32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overlay_gib: Option<NonZeroU32>,
 }
 
 pub const DEFAULT_SANDBOX_VCPU_COUNT: u8 = 2;
@@ -773,8 +770,6 @@ impl SandboxResourceShape {
         Some(Self {
             vcpu_count: NonZeroU8::new(vcpu_count)?,
             memory_mib: NonZeroU32::new(memory_mib)?,
-            storage_gib: None,
-            overlay_gib: None,
         })
     }
 }
@@ -786,8 +781,6 @@ impl Default for SandboxResourceShape {
                 .expect("default sandbox vCPU count must be positive"),
             memory_mib: NonZeroU32::new(DEFAULT_SANDBOX_MEMORY_MIB)
                 .expect("default sandbox memory must be positive"),
-            storage_gib: None,
-            overlay_gib: None,
         }
     }
 }
@@ -1355,6 +1348,12 @@ pub enum SandboxProviderConfig {
         /// is a wrapper script. Omitted derives it from `binary`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boot_binary: Option<PathBuf>,
+        /// Storage disk capacity for OCI layers and container data, in GiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage_gib: Option<NonZeroU32>,
+        /// Disk capacity for persistent root filesystem changes, in GiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overlay_gib: Option<NonZeroU32>,
     },
     Firecracker {
         #[serde(default = "crate::sandbox_provider::default_firecracker_image")]
@@ -1747,13 +1746,20 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_resource_shape_rejects_zero_and_serializes_as_numbers() {
+    fn sandbox_resource_shape_accepts_only_positive_cpu_and_memory() {
         assert!(SandboxResourceShape::new(0, 4096).is_none());
         assert!(SandboxResourceShape::new(2, 0).is_none());
         assert_eq!(
             serde_json::to_value(SandboxResourceShape::new(2, 4096).unwrap()).unwrap(),
             serde_json::json!({"vcpu_count": 2, "memory_mib": 4096})
         );
+        for field in ["storage_gib", "overlay_gib"] {
+            let error = serde_json::from_str::<SandboxResourceShape>(&format!(
+                r#"{{"vcpu_count":2,"memory_mib":4096,"{field}":64}}"#,
+            ))
+            .unwrap_err();
+            assert!(error.to_string().contains(field), "{error}");
+        }
     }
 
     #[test]

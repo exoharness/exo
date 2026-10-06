@@ -1459,13 +1459,6 @@ pub(super) async fn prepare_sandbox_request(
     scope: ResourceScope,
     request: CreateSandboxRequest,
 ) -> Result<PreparedSandboxRequest> {
-    if request
-        .resources
-        .is_some_and(|resources| resources.storage_gib.is_some() || resources.overlay_gib.is_some())
-        && request.provider != SandboxProvider::Smolvm
-    {
-        bail!("storage_gib and overlay_gib are supported only by SmolVM");
-    }
     let image = if !request.image.trim().is_empty() {
         request.image.clone()
     } else if let Some(default) = harness

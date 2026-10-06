@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -187,6 +188,12 @@ pub struct ProviderConfigureArgs {
     /// `--smolvm-binary`, else that binary itself.
     #[arg(long = "smolvm-boot-binary", env = "SMOLVM_BOOT_BINARY")]
     smolvm_boot_binary: Option<PathBuf>,
+    /// SmolVM storage disk capacity for OCI layers and container data, in GiB.
+    #[arg(long)]
+    smolvm_storage_gib: Option<NonZeroU32>,
+    /// SmolVM disk capacity for persistent root filesystem changes, in GiB.
+    #[arg(long)]
+    smolvm_overlay_gib: Option<NonZeroU32>,
     /// Sprites sprite HTTP URL auth: sprite | public.
     #[arg(long)]
     url_auth: Option<String>,
@@ -220,11 +227,18 @@ async fn configure_provider(state: &dyn ExoHarness, command: ProviderCommands) -
                 default_image,
                 smolvm_binary,
                 smolvm_boot_binary,
+                smolvm_storage_gib,
+                smolvm_overlay_gib,
                 url_auth,
                 labels,
             } = *args;
             let binding_name =
                 name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
+            if !matches!(provider, BackendArg::Smolvm)
+                && (smolvm_storage_gib.is_some() || smolvm_overlay_gib.is_some())
+            {
+                bail!("--smolvm-storage-gib and --smolvm-overlay-gib are only valid for smolvm");
+            }
             if !matches!(provider, BackendArg::AwsAgentCore) && session_storage_mount_path.is_some()
             {
                 bail!("--session-storage-mount-path is only valid for aws-agentcore");
@@ -281,6 +295,8 @@ async fn configure_provider(state: &dyn ExoHarness, command: ProviderCommands) -
                     default_image: default_image.unwrap_or_else(default_docker_image),
                     binary: smolvm_binary,
                     boot_binary: smolvm_boot_binary,
+                    storage_gib: smolvm_storage_gib,
+                    overlay_gib: smolvm_overlay_gib,
                 },
                 BackendArg::Firecracker => SandboxProviderConfig::Firecracker {
                     default_image: default_image.unwrap_or_else(default_firecracker_image),

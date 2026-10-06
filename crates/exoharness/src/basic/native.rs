@@ -576,14 +576,10 @@ impl BasicExoHarnessInner {
         }
     }
 
-    /// `DaytonaConfig` from a root-scoped `Binding::Sandbox` (newest wins), or
-    /// `None` if none is set so callers fall back to the secret-name spec.
-    /// The paths recorded on the most recent smolvm binding. Unset entries leave
-    /// the backend on its `SMOLVM_*`-or-PATH defaults, so an unconfigured install
-    /// keeps working exactly as before.
+    /// SmolVM settings from the newest root-scoped sandbox binding.
     pub(super) async fn smolvm_config_from_binding(&self) -> Result<crate::SmolvmBackendConfig> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let paths = bindings
+        let mut config = bindings
             .into_iter()
             .rev()
             .find_map(|record| match record.binding {
@@ -592,21 +588,23 @@ impl BasicExoHarnessInner {
                         SandboxProviderConfig::Smolvm {
                             binary,
                             boot_binary,
+                            storage_gib,
+                            overlay_gib,
                             ..
                         },
                     ..
-                } => Some((binary, boot_binary)),
+                } => Some(crate::SmolvmBackendConfig {
+                    binary,
+                    boot_binary,
+                    storage_gib,
+                    overlay_gib,
+                    ..Default::default()
+                }),
                 _ => None,
-            });
-        // A binding that names neither path is still the newest binding, and its
-        // silence means "use the defaults" rather than "keep looking".
-        let (binary, boot_binary) = paths.unwrap_or((None, None));
-        Ok(crate::SmolvmBackendConfig {
-            mode: crate::SmolvmExecutionMode::default(),
-            binary,
-            boot_binary,
-            image_cache: Some(self.native.cache_root.join("smolvm/images")),
-        })
+            })
+            .unwrap_or_default();
+        config.image_cache = Some(self.native.cache_root.join("smolvm/images"));
+        Ok(config)
     }
 
     pub(super) async fn daytona_config_from_binding(&self) -> Result<Option<crate::DaytonaConfig>> {
