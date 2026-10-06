@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { api, stopSandboxes } from "./live-api.mjs";
+import { api, createAgent, waitTurn, stopSandboxes } from "./live-api.mjs";
 
 const source = (
   await readFile(
@@ -9,17 +9,11 @@ const source = (
     "utf8",
   )
 ).replace("model: gpt-5.5", "model: gpt-6.1-sol");
-const agent = await api("agent", "POST", {
-  slug: `worker-basic-${Date.now()}`,
-  name: "Worker Basic Test",
-});
-await api(`agent/${agent.id}/artifact`, "POST", {
-  path: "managed-agents/agent.md",
-  contents: [...new TextEncoder().encode(source)],
-});
-const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
-const path = `agent/${agent.id}/thread/${thread.id}`;
-console.log(`Testing ${path}`);
+const { agent, thread, path } = await createAgent(
+  source,
+  "worker-basic",
+  "Worker Basic Test",
+);
 try {
   const turn = await api(
     `${path}/turn`,
@@ -33,21 +27,7 @@ try {
     },
     202,
   );
-  let events;
-  for (let i = 0; i < 180; i++) {
-    events = (await api(`${path}/event?turn_id=${turn.turn.id}&limit=1000`))
-      .events;
-    if (events.some((event) => event.data.type === "turn_ended")) break;
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  assert(
-    events.some((event) => event.data.type === "turn_ended"),
-    "turn did not finish",
-  );
-  assert(
-    !events.some((event) => event.data.type === "error"),
-    JSON.stringify(events.filter((event) => event.data.type === "error")),
-  );
+  const events = await waitTurn(path, turn.turn.id);
   assert(
     events.some(
       (event) =>

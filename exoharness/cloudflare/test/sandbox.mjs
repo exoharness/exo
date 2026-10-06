@@ -224,11 +224,12 @@ test("a command timeout kills the process and preserves the warm container", asy
   const f = fixture();
   await f.sandbox.acquire(identity, "", "/workspace", {}, null, 300_000);
   let finish;
+  const output = new Promise((resolve) => {
+    finish = resolve;
+  });
   f.container.exec = async () => ({
-    output: () =>
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
+    exitCode: output.then((result) => result.exitCode),
+    output: () => output,
     kill: (signal) => {
       f.calls.push(`kill:${signal}`);
       finish({

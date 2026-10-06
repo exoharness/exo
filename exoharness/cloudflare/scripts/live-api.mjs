@@ -26,6 +26,36 @@ export async function rpc(request) {
   assert.equal(result.ok, true, result.error);
   return result.response;
 }
+export async function createAgent(source, slug, name) {
+  const agent = await api("agent", "POST", {
+    slug: `${slug}-${Date.now()}`,
+    name,
+  });
+  await api(`agent/${agent.id}/artifact`, "POST", {
+    path: "managed-agents/agent.md",
+    contents: [...new TextEncoder().encode(source)],
+  });
+  const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
+  const path = `agent/${agent.id}/thread/${thread.id}`;
+  console.log(`Testing ${path}`);
+  return { agent, thread, path };
+}
+export async function waitTurn(path, turnId, attempts = 180) {
+  for (let i = 0; i < attempts; i++) {
+    const { events } = await api(`${path}/event?turn_id=${turnId}&limit=1000`);
+    if (events.some((event) => event.data.type === "turn_ended")) {
+      assert(
+        !events.some((event) => event.data.type === "error"),
+        JSON.stringify(events.filter((event) => event.data.type === "error")),
+      );
+      return events;
+    }
+    if (i % 20 === 0)
+      console.log(`Waiting for turn (${i}s, ${events.length} events)`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error("turn did not finish");
+}
 export async function stopSandboxes(agent, thread, restore = false) {
   const scope = { type: "thread", agent_id: agent.id, thread_id: thread.id };
   const result = await rpc({ type: "list_sandboxes", scope });

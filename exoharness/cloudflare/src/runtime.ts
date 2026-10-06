@@ -97,6 +97,9 @@ export class Runtime {
     }
     for (const event of progress.events) this.emitRuntimeEvent(event);
     if (progress.pending && !this.idle) {
+      // Watch is a pending operation for the lifetime of its SSE connection.
+      // Keeping the object resident preserves its live progress subscription;
+      // disconnecting cancels the watch and releases this waitUntil hold.
       let resolve!: () => void;
       const promise = new Promise<void>((done) => {
         resolve = done;

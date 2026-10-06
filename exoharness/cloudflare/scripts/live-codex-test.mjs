@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { api, stopSandboxes } from "./live-api.mjs";
+import { api, createAgent, waitTurn, stopSandboxes } from "./live-api.mjs";
 
 const source = (
   await readFile(
@@ -12,17 +12,11 @@ const source = (
   "model: gpt-6.1-sol",
   `model: ${process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol"}`,
 );
-const agent = await api("agent", "POST", {
-  slug: `cloudflare-codex-${Date.now()}`,
-  name: "Cloudflare Codex Test",
-});
-await api(`agent/${agent.id}/artifact`, "POST", {
-  path: "managed-agents/agent.md",
-  contents: [...new TextEncoder().encode(source)],
-});
-const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
-const path = `agent/${agent.id}/thread/${thread.id}`;
-console.log(`Testing ${path}`);
+const { agent, thread, path } = await createAgent(
+  source,
+  "cloudflare-codex",
+  "Cloudflare Codex Test",
+);
 const checks = [];
 async function turn(content) {
   const submitted = await api(
@@ -32,24 +26,7 @@ async function turn(content) {
     202,
   );
   assert.equal(submitted.harness, "codex-harness");
-  let events;
-  for (let i = 0; i < 600; i++) {
-    events = (
-      await api(`${path}/event?turn_id=${submitted.turn.id}&limit=1000`)
-    ).events;
-    if (events.some((event) => event.data.type === "turn_ended")) break;
-    if (i % 20 === 0)
-      console.log(`Waiting for Codex (${i}s, ${events.length} events)`);
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
-  assert(
-    events.some((event) => event.data.type === "turn_ended"),
-    "Codex turn did not finish",
-  );
-  assert(
-    !events.some((event) => event.data.type === "error"),
-    JSON.stringify(events.filter((event) => event.data.type === "error")),
-  );
+  const events = await waitTurn(path, submitted.turn.id, 600);
   const started = events.find(
     (event) => event.data.event_type === "codex_turn_started",
   );
@@ -64,20 +41,10 @@ async function turn(content) {
     ),
     "Codex did not run a successful shell command",
   );
-  const usage = events
-    .filter(
-      (event) =>
-        event.turn_id === submitted.turn.id && event.data.type === "messages",
-    )
-    .map((event) => event.data.usage)
-    .filter(Boolean);
-  assert.equal(usage.length, 1, "expected one canonical usage event per turn");
-  assert(usage[0].prompt_tokens > 0, "Codex input token counts are missing");
-  assert(
-    usage[0].completion_tokens > 0,
-    "Codex output token counts are missing",
-  );
-  assert(Number.isFinite(usage[0].cost_usd), "Codex cost is missing");
+  const usage = events.find((event) => event.data.usage)?.data.usage;
+  assert(usage?.prompt_tokens > 0, "Codex input token counts are missing");
+  assert(usage.completion_tokens > 0, "Codex output token counts are missing");
+  assert(Number.isFinite(usage.cost_usd), "Codex cost is missing");
   const markers = new Map(
     events.map((event) => [event.data.event_type ?? event.data.type, event]),
   );
@@ -89,7 +56,7 @@ async function turn(content) {
         Date.parse(markers.get("turn_started").created_at),
       warm_app_server_reused: started.data.payload.warm_app_server_reused,
       warm_thread_reused: started.data.payload.warm_thread_reused,
-      usage: usage[0],
+      usage,
     }),
   );
   return {

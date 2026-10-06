@@ -314,8 +314,13 @@ export class ExoSandbox extends DurableObject<Env> {
       request.timeoutMs === undefined
         ? undefined
         : setTimeout(() => process.kill(9), request.timeoutMs);
+    // Cloudflare signals only the direct process. Descendants can keep output
+    // open after it exits; this timeout does not terminate a process group.
+    const exited = process.exitCode.finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
     try {
-      const output = await process.output();
+      const [, output] = await Promise.all([exited, process.output()]);
       const decoder = new TextDecoder();
       return {
         stdout: decoder.decode(output.stdout),
