@@ -206,6 +206,8 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
 pub trait ThreadHandle: SandboxHandle + VaultContext {
     /// Claim this thread for local execution or configuration. Provider servers
     /// and inline runtimes use the same ownership; remote handles delegate it.
+    // TODO: Move execution ownership behind a TurnCoordinator abstraction;
+    // local file leases should remain a BasicExoHarness implementation detail.
     async fn claim_local_session(&self) -> Result<()> {
         Ok(())
     }
