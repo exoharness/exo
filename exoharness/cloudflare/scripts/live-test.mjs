@@ -3,16 +3,15 @@ import { readFile } from "node:fs/promises";
 
 import { api, createAgent, waitTurn, stopSandboxes } from "./live-api.mjs";
 
-const source = (
-  await readFile(
-    new URL("../../examples/managed-agents/assistant.md", import.meta.url),
-    "utf8",
-  )
-).replace("model: gpt-5.5", "model: gpt-6.1-sol");
+const source = await readFile(
+  new URL("../../examples/managed-agents/assistant.md", import.meta.url),
+  "utf8",
+);
 const { agent, thread, path } = await createAgent(
   source,
   "worker-basic",
   "Worker Basic Test",
+  "gpt-6.1-sol",
 );
 try {
   const turn = await api(
@@ -43,9 +42,7 @@ try {
     ),
     "usage is missing",
   );
-  console.log(
-    "PASS basic model, native shell execution, canonical events and usage",
-  );
+  console.log("Basic turn passed.");
 } finally {
   await stopSandboxes(agent, thread);
 }

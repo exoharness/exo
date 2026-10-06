@@ -22,8 +22,6 @@ run("cargo", [
   "--release",
   "--target",
   "wasm32-unknown-unknown",
-  "--target-dir",
-  resolve(root, "target"),
 ]);
 run(bindgen, [
   resolve(

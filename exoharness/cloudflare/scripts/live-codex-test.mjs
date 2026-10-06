@@ -3,21 +3,16 @@ import { readFile } from "node:fs/promises";
 
 import { api, createAgent, waitTurn, stopSandboxes } from "./live-api.mjs";
 
-const source = (
-  await readFile(
-    new URL("../../examples/managed-agents/coder.md", import.meta.url),
-    "utf8",
-  )
-).replace(
-  "model: gpt-6.1-sol",
-  `model: ${process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol"}`,
+const source = await readFile(
+  new URL("../../examples/managed-agents/coder.md", import.meta.url),
+  "utf8",
 );
 const { agent, thread, path } = await createAgent(
   source,
   "cloudflare-codex",
   "Cloudflare Codex Test",
+  process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol",
 );
-const checks = [];
 async function turn(content) {
   const submitted = await api(
     `${path}/turn`,
@@ -45,20 +40,6 @@ async function turn(content) {
   assert(usage?.prompt_tokens > 0, "Codex input token counts are missing");
   assert(usage.completion_tokens > 0, "Codex output token counts are missing");
   assert(Number.isFinite(usage.cost_usd), "Codex cost is missing");
-  const markers = new Map(
-    events.map((event) => [event.data.event_type ?? event.data.type, event]),
-  );
-  console.log(
-    JSON.stringify({
-      turn: submitted.turn.id,
-      duration_ms:
-        Date.parse(markers.get("turn_ended").created_at) -
-        Date.parse(markers.get("turn_started").created_at),
-      warm_app_server_reused: started.data.payload.warm_app_server_reused,
-      warm_thread_reused: started.data.payload.warm_thread_reused,
-      usage,
-    }),
-  );
   return {
     events,
     nativeThread: started.data.payload.codex_thread_id,
@@ -79,9 +60,6 @@ try {
   );
   assert.equal(warmStart.data.payload.warm_app_server_reused, true);
   assert.equal(warmStart.data.payload.warm_thread_reused, true);
-  checks.push(
-    "consecutive turns reuse the live Codex process and native thread",
-  );
   await stopSandboxes(agent, thread, true);
   const second = await turn(
     "Add a fourth test for decimal inputs to the existing sum.test.mjs. Run the tests. In your final answer, include the phase tag I gave you in our earlier message. Do not use any network tools.",
@@ -108,10 +86,7 @@ try {
     ),
     "four tests did not pass",
   );
-  checks.push(
-    "explicit snapshot restores workspace and native Codex history after sandbox destruction; resumed usage is reported and follow-up changes pass four tests",
-  );
-  for (const check of checks) console.log(`PASS ${check}`);
+  console.log("Codex reuse and snapshot restore passed.");
 } finally {
   await stopSandboxes(agent, thread);
 }

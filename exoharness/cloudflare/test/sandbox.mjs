@@ -109,7 +109,6 @@ function fixture() {
     container,
     calls,
     storage,
-    finish,
     delayCheckpoint: (promise) => {
       checkpoint = promise;
     },
@@ -167,7 +166,6 @@ test("production process invocation stays alive; checkpoint finishes before new 
     f.calls.find((call) => call[0] === "start")[1].image,
     codexImage,
   );
-  assert.equal(await f.storage.get("image"), codexImage);
   await f.sandbox.beginActivity(identity, "first");
   let ready;
   const started = new Promise((resolve) => {

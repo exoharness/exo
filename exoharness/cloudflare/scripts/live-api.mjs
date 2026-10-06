@@ -26,7 +26,7 @@ export async function rpc(request) {
   assert.equal(result.ok, true, result.error);
   return result.response;
 }
-export async function createAgent(source, slug, name) {
+export async function createAgent(source, slug, name, model) {
   const agent = await api("agent", "POST", {
     slug: `${slug}-${Date.now()}`,
     name,
@@ -35,7 +35,7 @@ export async function createAgent(source, slug, name) {
     path: "managed-agents/agent.md",
     contents: [...new TextEncoder().encode(source)],
   });
-  const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
+  const { thread } = await api(`agent/${agent.id}/thread`, "POST", { model });
   const path = `agent/${agent.id}/thread/${thread.id}`;
   console.log(`Testing ${path}`);
   return { agent, thread, path };
