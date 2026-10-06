@@ -48,3 +48,23 @@ pub fn local_test_config_with_daytona(root: impl Into<PathBuf>) -> BasicExoHarne
         ],
     }
 }
+
+pub fn corrupt_thread_history(
+    root: &std::path::Path,
+    agent: crate::AgentId,
+    thread: crate::ThreadId,
+) -> crate::Result<(PathBuf, Vec<u8>)> {
+    let directory = root
+        .join("agents")
+        .join(agent.to_string())
+        .join("conversations")
+        .join(thread.to_string())
+        .join("events");
+    let path = std::fs::read_dir(directory)?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("thread has no event files"))??
+        .path();
+    let original = std::fs::read(&path)?;
+    std::fs::write(&path, b"invalid event JSON")?;
+    Ok((path, original))
+}

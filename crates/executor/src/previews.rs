@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 pub use exo_managed_agents::http::protocol::PreviewEndpoint;
-use exoharness::{AgentId, EnvironmentDefinition, ThreadHandle, ThreadId, ThreadRecord};
+use exoharness::{AgentId, ThreadHandle, ThreadId, ThreadRecord};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -34,11 +34,14 @@ pub struct PreviewUrls {
 
 /// Derive every browser URL from the environment, thread identity and listener.
 pub fn previews_for(
-    environment: Option<&EnvironmentDefinition>,
     thread: &ThreadRecord,
     endpoint: &PreviewEndpoint,
 ) -> Result<Option<PreviewUrls>> {
-    let Some(environment) = environment.filter(|env| !env.config.tcp_ports.is_empty()) else {
+    let Some(environment) = thread
+        .environment
+        .as_ref()
+        .filter(|env| !env.config.tcp_ports.is_empty())
+    else {
         return Ok(None);
     };
     let slug: String = thread
@@ -54,13 +57,14 @@ pub fn previews_for(
         .take(50)
         .collect();
     let slug = slug.trim_matches('-');
-    ensure!(
-        !slug.is_empty(),
-        "preview thread names require an ASCII letter or digit"
-    );
     let digest = format!("{:x}", Sha256::digest(thread.id.to_string().as_bytes()));
+    let prefix = if slug.is_empty() {
+        String::new()
+    } else {
+        format!("{slug}-")
+    };
     let host = format!(
-        "{slug}-{}.{}:{}",
+        "{prefix}{}.{}:{}",
         &digest[..8],
         endpoint.domain,
         endpoint.port
@@ -107,6 +111,7 @@ enum Destination {
     Service {
         thread: Arc<dyn ThreadHandle>,
         port: u16,
+        sandbox_id: Arc<Mutex<Option<exoharness::SandboxId>>>,
     },
 }
 
@@ -136,7 +141,7 @@ impl PreviewProxy {
             Err(error) => return Err(error.into()),
         };
         let proxy = Self::start(saved.as_ref().map(|saved| saved.port), domain).await?;
-        if saved.is_none() {
+        if saved.as_ref().map(|saved| saved.port) != Some(proxy.endpoint.port) {
             std::fs::create_dir_all(path.parent().context("preview listener directory")?)?;
             std::fs::write(
                 path,
@@ -162,9 +167,15 @@ impl PreviewProxy {
                 }),
             "preview domain must be a lowercase DNS name of at most 187 bytes"
         );
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))
-            .await
-            .context("binding preview port; another process may be using the saved port")?;
+        let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, port.unwrap_or(0))).await {
+            Ok(listener) => listener,
+            Err(error) if port.is_some() && error.kind() == std::io::ErrorKind::AddrInUse => {
+                TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .context("binding a new preview port")?
+            }
+            Err(error) => return Err(error).context("binding preview port"),
+        };
         let endpoint = PreviewEndpoint {
             domain: domain.into(),
             port: listener.local_addr()?.port(),
@@ -214,6 +225,7 @@ impl PreviewProxy {
                     destination: Destination::Service {
                         thread: thread.clone(),
                         port: service.port,
+                        sandbox_id: Arc::default(),
                     },
                 },
             );
@@ -327,33 +339,31 @@ async fn handle(mut client: TcpStream, routes: Arc<Mutex<BTreeMap<String, Route>
                 })
                 .collect::<String>();
             let body = format!(
-                r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sandbox services · Exo</title>
-<style>
-:root {{ color-scheme: light dark; font-family: system-ui, sans-serif; }}
-body {{ max-width: 1000px; margin: 64px auto; padding: 0 24px; }}
-h1 {{ margin-bottom: 8px; }}
-.address {{ color: light-dark(#555, #aaa); overflow-wrap: anywhere; }}
-table {{ width: 100%; margin: 32px 0; border-collapse: collapse; text-align: left; }}
-th, td {{ padding: 16px 12px; border-bottom: 1px solid light-dark(#ddd, #444); }}
-td:last-child {{ overflow-wrap: anywhere; }}
-a {{ color: light-dark(#245dcc, #90b6ff); text-underline-offset: 3px; }}
-.note {{ line-height: 1.6; color: light-dark(#555, #aaa); }}
-@media (max-width: 600px) {{ body {{ margin-top: 32px; padding: 0 16px; }} th, td {{ padding: 12px 6px; }} }}
-</style></head><body><h1>Sandbox services</h1><p class="address">{host}</p>
-<table><thead><tr><th>Sandbox port</th><th>Browser URL</th></tr></thead><tbody>{links}</tbody></table>
-<p class="note">Start the services in your sandbox, then open a link above. You can ask the agent to start them or diagnose a connection problem.<br>Keep the owning Exo process running while using these links.</p>
-</body></html>"#
+                "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><title>Sandbox services · Exo</title><h1>Sandbox services</h1><p>{host}</p><table><tr><th>Sandbox port</th><th>Browser URL</th></tr>{links}</table><p>Start the services in your sandbox, then open a link above. Keep the owning Exo process running while using these links.</p></html>"
             );
             reply(&mut client, "200 OK", "text/html", &body).await
         }
-        Some(Destination::Service { thread, port }) => {
+        Some(Destination::Service {
+            thread,
+            port,
+            sandbox_id,
+        }) => {
             let upstream = timeout(Duration::from_secs(10), async {
-                let sandbox = published_sandbox(thread.as_ref(), port).await?;
-                thread
-                    .connect_sandbox_tcp(sandbox, port)
-                    .await?
-                    .context("sandbox provider did not return a TCP connection")
+                let cached = sandbox_id
+                    .lock()
+                    .expect("preview sandbox cache poisoned")
+                    .clone();
+                let sandbox = match cached {
+                    Some(id) => id,
+                    None => published_sandbox(thread.as_ref(), port).await?,
+                };
+                let result = thread.connect_sandbox_tcp(sandbox.clone(), port).await;
+                if result.is_err() {
+                    *sandbox_id.lock().expect("preview sandbox cache poisoned") = None;
+                } else {
+                    *sandbox_id.lock().expect("preview sandbox cache poisoned") = Some(sandbox);
+                }
+                result?.context("sandbox provider did not return a TCP connection")
             })
             .await
             .context("connecting to preview service timed out")

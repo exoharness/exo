@@ -338,11 +338,20 @@ impl Runtime {
         &self,
         root: &std::path::Path,
         domain: &str,
+        only_agent: Option<exoharness::AgentId>,
     ) -> Result<crate::PreviewEndpoint> {
         let proxy = self
             .previews
             .get_or_try_init(|| crate::previews::PreviewProxy::start_server(root, domain))
             .await?;
+        for agent in self.exoharness_handle().list_agents().await? {
+            if only_agent.is_some_and(|id| id != agent.record().id) {
+                continue;
+            }
+            for thread in agent.list_threads(Default::default()).await?.threads {
+                self.register_previews(agent.as_ref(), thread).await?;
+            }
+        }
         Ok(proxy.endpoint.clone())
     }
 
@@ -369,18 +378,12 @@ impl Runtime {
                 crate::previews::PreviewProxy::start(config.preview_port, "localhost")
             })
             .await?;
-        if config.preview_port.is_none() {
+        if config.preview_port != Some(proxy.endpoint.port) {
             config.preview_port = Some(proxy.endpoint.port);
             self.put_conversation_config(thread.as_ref(), config)
                 .await?;
         }
-        if let Some(previews) = crate::previews_for(
-            thread.record().environment.as_ref(),
-            thread.record(),
-            &proxy.endpoint,
-        )? {
-            proxy.register(agent.record().id, thread, &previews);
-        }
+        self.register_previews(agent, thread).await?;
         Ok(())
     }
 
@@ -396,17 +399,6 @@ impl Runtime {
         agent: &dyn AgentHandle,
         thread: Arc<dyn ConversationHandle>,
     ) -> Result<Option<crate::PreviewUrls>> {
-        if thread
-            .record()
-            .environment
-            .as_ref()
-            .is_none_or(|env| env.config.tcp_ports.is_empty())
-        {
-            if let Some(proxy) = self.previews.get() {
-                proxy.remove(thread.record().id);
-            }
-            return Ok(None);
-        }
         let endpoint = match self.active_preview_endpoint() {
             Some(endpoint) => Some(endpoint),
             None => {
@@ -418,13 +410,21 @@ impl Runtime {
         let Some(endpoint) = endpoint else {
             return Ok(None);
         };
-        let previews = crate::previews_for(
-            thread.record().environment.as_ref(),
-            thread.record(),
-            &endpoint,
-        )?;
-        if let (Some(proxy), Some(previews)) = (self.previews.get(), &previews) {
-            proxy.register(agent.record().id, thread, previews);
+        crate::previews_for(thread.record(), &endpoint)
+    }
+
+    #[cfg(feature = "native")]
+    pub async fn register_previews(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<Option<crate::PreviewUrls>> {
+        let previews = self.preview_urls(agent, thread.clone()).await?;
+        if let Some(proxy) = self.previews.get() {
+            match &previews {
+                Some(previews) => proxy.register(agent.record().id, thread, previews),
+                None => proxy.remove(thread.record().id),
+            }
         }
         Ok(previews)
     }
@@ -984,7 +984,10 @@ impl Runtime {
             }
         }
         #[cfg(feature = "native")]
-        if let Some(previews) = self.preview_urls(agent.as_ref(), thread.clone()).await? {
+        if let Some(previews) = self
+            .register_previews(agent.as_ref(), thread.clone())
+            .await?
+        {
             agent_config
                 .instructions
                 .push(crate::harness_helpers::system_message(
@@ -1255,6 +1258,7 @@ impl Runtime {
         let mut finalizer_error = None;
         while let Some(result) = finalizers.join_next().await {
             if let Err(error) = result {
+                tracing::error!(?error, "runtime finalizer failed");
                 finalizer_error = Some(error);
             }
         }
@@ -1348,7 +1352,7 @@ impl Runtime {
             self.recovery_gate.new_thread(opened.thread.record().id);
         }
         #[cfg(feature = "native")]
-        self.preview_urls(agent.as_ref(), opened.thread.clone())
+        self.register_previews(agent.as_ref(), opened.thread.clone())
             .await?;
         Ok(opened)
     }

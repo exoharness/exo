@@ -20,15 +20,9 @@ pub trait Provider: AgentBackend {
     async fn preview_endpoint(
         &self,
         _agent: &dyn AgentHandle,
-        thread: &dyn ThreadHandle,
+        _thread: &dyn ThreadHandle,
     ) -> Result<Option<exo_managed_agents::http::protocol::PreviewEndpoint>> {
-        Ok(crate::load_conversation_config(thread)
-            .await?
-            .preview_port
-            .map(|port| exo_managed_agents::http::protocol::PreviewEndpoint {
-                domain: "localhost".into(),
-                port,
-            }))
+        Ok(None)
     }
     fn runtime_host(&self) -> Arc<dyn RuntimeHost>;
 
@@ -135,6 +129,35 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
+    #[cfg(feature = "native")]
+    async fn preview_endpoint(
+        &self,
+        _agent: &dyn AgentHandle,
+        thread: &dyn ThreadHandle,
+    ) -> Result<Option<exo_managed_agents::http::protocol::PreviewEndpoint>> {
+        let Some(port) = crate::load_conversation_config(thread).await?.preview_port else {
+            return Ok(None);
+        };
+        let endpoint = crate::PreviewEndpoint {
+            domain: "localhost".into(),
+            port,
+        };
+        let Some(previews) = crate::previews_for(thread.record(), &endpoint)? else {
+            return Ok(None);
+        };
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(1))
+            .build()?
+            .get(format!("http://127.0.0.1:{port}"))
+            .header("Host", previews.page.trim_start_matches("http://"))
+            .send()
+            .await;
+        Ok(response
+            .ok()
+            .filter(|response| response.status().is_success())
+            .map(|_| endpoint))
+    }
     fn runtime_host(&self) -> Arc<dyn RuntimeHost> {
         self.host.clone()
     }

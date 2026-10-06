@@ -2459,6 +2459,17 @@ async fn deleting_stopped_remote_sandboxes_does_not_require_the_provider() -> cr
     }
     let reloaded = BasicExoHarness::new(local_test_config(temp.path())).await?;
     let reloaded_agent = reloaded.get_agent(&agent.record().id).await?.unwrap();
+    let first_reloaded = reloaded_agent
+        .get_thread(&first.record().id)
+        .await?
+        .unwrap();
+    first_reloaded
+        .update_environment(crate::EnvironmentDefinition {
+            name: "local".into(),
+            config: crate::test_support::sandbox_request(),
+        })
+        .await?;
+    assert!(first_reloaded.list_sandboxes().await?.is_empty());
     assert!(
         reloaded_agent
             .delete_conversation(&first.record().id)

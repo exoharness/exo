@@ -37,6 +37,5 @@ RUN groupadd --gid 10001 exo \
 
 WORKDIR /home/exo/workspace
 
-USER exo
 
 CMD ["bash"]

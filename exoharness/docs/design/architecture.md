@@ -153,22 +153,6 @@ environment:
 - `list_bindings()`, `put_binding()`, `get_binding()`
 - `list_vaults()`, `get_vault(id)`
 
-`start_sandbox` resumes an existing managed sandbox when `snapshot_id` is omitted
-or `None`; supplying a snapshot ID restores that snapshot. Changing providers
-requires a snapshot. See [Sandbox snapshots](../sandbox-snapshots.md#resuming-without-a-snapshot)
-for both request forms.
-
-`list_sandboxes()` exposes current sandbox metadata in `SandboxRecord`:
-
-| Field       | Meaning                                                                                                                          |
-| ----------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `tcp_ports` | Guest TCP ports published by the sandbox backend.                                                                                |
-| `running`   | The harness's recorded running state; this is not a service health check.                                                        |
-| `attached`  | Whether the sandbox is attached and its lifecycle belongs to an external owner. Session cleanup leaves attached sandboxes alone. |
-
-Port routing and session cleanup use these records without replaying the thread's
-event history.
-
 Conversation-level `add_events()` is append-only. Callers that need to avoid
 overlapping agent runs should serialize through the executor-level `send()` APIs
 or another higher-level owner/lease.

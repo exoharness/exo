@@ -595,7 +595,7 @@ async fn preview_endpoint(
     if endpoint.is_some() {
         let previews = service
             .runtime
-            .preview_urls(agent.as_ref(), thread)
+            .register_previews(agent.as_ref(), thread)
             .await
             .map_err(ErrorBadRequest)?;
         if previews.is_none() {

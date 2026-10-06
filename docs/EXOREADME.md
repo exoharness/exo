@@ -118,20 +118,7 @@ EOF
 The CLI defaults Exo home to `$HOME/.exo`, shared across working directories.
 Pass `--root <path>` or set `EXO_HOME` to use a different home. Provider profiles
 live in `<root>/config`, runtime state in `<root>/exoharness`, and pricing caches
-in `<root>/cache`. To access state created
-under the previous `./.exo` default, select that directory explicitly:
-
-```bash
-./target/debug/exo --root /absolute/path/to/previous-checkout/.exo agent list
-```
-
-Use the same `--root` when reopening its agents and threads. Existing state is
-not moved automatically. For thread naming rules and development previews, see
-[Managed agents](../exoharness/docs/managed-agents.md).
-
-Use `--config-dir ~/.config/exo` for provider profiles saved at the previous
-default location. Existing file-encrypted state also needs its original key
-selected with `--master-key-path`.
+in `<root>/cache`. See [Managed agents](../exoharness/docs/managed-agents.md).
 
 ## TypeScript Harnesses
 

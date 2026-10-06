@@ -59,7 +59,7 @@ async fn direct_connections_preserve_upgrade_bytes_and_report_unavailable_servic
     let mut request = exoharness::test_support::sandbox_request();
     request.provider = SandboxProvider::Smolvm;
     request.tcp_ports = vec![guest_port];
-    let environment = EnvironmentDefinition {
+    let environment = exoharness::EnvironmentDefinition {
         name: "dev".into(),
         config: request.clone(),
     };
@@ -71,8 +71,7 @@ async fn direct_connections_preserve_upgrade_bytes_and_report_unavailable_servic
         })
         .await?;
     let proxy = PreviewProxy::start(None, "localhost").await?;
-    let previews =
-        previews_for(Some(&environment), thread.record(), &proxy.endpoint)?.context("previews")?;
+    let previews = previews_for(thread.record(), &proxy.endpoint)?.context("previews")?;
     proxy.register(agent.record().id, thread.clone(), &previews);
     let endpoint = format!("http://127.0.0.1:{}", proxy.endpoint.port);
     let http = reqwest::Client::new();
@@ -100,18 +99,11 @@ async fn direct_connections_preserve_upgrade_bytes_and_report_unavailable_servic
         502
     );
     thread.create_sandbox(request).await?;
-    let events = temp
-        .path()
-        .join("agents")
-        .join(agent.record().id.to_string())
-        .join("conversations")
-        .join(thread.record().id.to_string())
-        .join("events");
-    let event_file = std::fs::read_dir(events)?
-        .next()
-        .context("thread has no event files")??
-        .path();
-    std::fs::write(event_file, b"invalid event JSON")?;
+    exoharness::test_support::corrupt_thread_history(
+        temp.path(),
+        agent.record().id,
+        thread.record().id,
+    )?;
     assert!(thread.get_events(None).await.is_err());
 
     let upgrade = format!(
@@ -162,7 +154,7 @@ async fn hostnames_are_stable_bounded_and_distinguish_equal_thread_names() -> Re
     record.slug = "Hello / world".repeat(20);
     let mut config = exoharness::test_support::sandbox_request();
     config.tcp_ports = vec![5173, 8000];
-    let mut env = EnvironmentDefinition {
+    let mut env = exoharness::EnvironmentDefinition {
         name: "dev".into(),
         config,
     };
@@ -170,20 +162,21 @@ async fn hostnames_are_stable_bounded_and_distinguish_equal_thread_names() -> Re
         domain: "localhost".into(),
         port: 1234,
     };
-    let first = previews_for(Some(&env), &record, &endpoint)?.context("previews")?;
-    assert_eq!(
-        first,
-        previews_for(Some(&env), &record, &endpoint)?.unwrap()
-    );
+    record.environment = Some(env.clone());
+    let first = previews_for(&record, &endpoint)?.context("previews")?;
+    assert_eq!(first, previews_for(&record, &endpoint)?.unwrap());
     assert!(first.host.starts_with("hello---world"));
     assert!(first.host.split('.').all(|label| label.len() <= 63));
     record.id = exoharness::Uuid7::now();
-    assert_ne!(
-        first.page,
-        previews_for(Some(&env), &record, &endpoint)?.unwrap().page
-    );
+    assert_ne!(first.page, previews_for(&record, &endpoint)?.unwrap().page);
+    for slug in ["测试", "---"] {
+        record.slug = slug.into();
+        let preview = previews_for(&record, &endpoint)?.unwrap();
+        assert_eq!(preview.host.split('.').next().unwrap().len(), 8);
+    }
     env.config.tcp_ports.clear();
-    assert!(previews_for(Some(&env), &record, &endpoint)?.is_none());
+    record.environment = Some(env);
+    assert!(previews_for(&record, &endpoint)?.is_none());
     Ok(())
 }
 
@@ -200,21 +193,81 @@ async fn duplicate_host_headers_are_rejected() -> Result<()> {
 }
 
 #[tokio::test]
-async fn saved_listener_reuses_its_port_and_reports_conflicts() -> Result<()> {
+async fn saved_listener_reuses_its_port_and_replaces_conflicts() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let mut first = PreviewProxy::start_server(temp.path(), "localhost").await?;
     let port = first.endpoint.port;
-    assert!(
-        PreviewProxy::start_server(temp.path(), "localhost")
-            .await
-            .is_err()
-    );
+    let replacement = PreviewProxy::start_server(temp.path(), "localhost").await?;
+    assert_ne!(replacement.endpoint.port, port);
+    let replacement_port = replacement.endpoint.port;
+    let mut replacement = replacement;
+    replacement.stop();
+    assert!((&mut replacement.task).await.unwrap_err().is_cancelled());
     let path = temp.path().join("previews/listener.json");
     let saved = std::fs::read(&path)?;
     first.stop();
     assert!((&mut first.task).await.unwrap_err().is_cancelled());
     let resumed = PreviewProxy::start_server(temp.path(), "localhost").await?;
-    assert_eq!(resumed.endpoint.port, port);
+    assert_eq!(resumed.endpoint.port, replacement_port);
     assert_eq!(std::fs::read(path)?, saved);
     Ok(())
+}
+
+#[tokio::test]
+async fn server_restart_registers_saved_previews_without_opening_threads() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config = exoharness::test_support::local_test_config(temp.path().join("state"));
+    let state = Arc::new(exoharness::BasicExoHarness::new(config.clone()).await?);
+    let agent = exoharness::test_support::new_test_agent(state.as_ref(), "web").await?;
+    let mut request = exoharness::test_support::sandbox_request();
+    request.tcp_ports = vec![8000];
+    let thread = agent
+        .new_thread(exoharness::NewThreadRequest {
+            environment: Some(exoharness::EnvironmentDefinition {
+                name: "web".into(),
+                config: request,
+            }),
+            ..Default::default()
+        })
+        .await?;
+    let runtime = || {
+        crate::Runtime::new(
+            crate::LocalProvider::managed(
+                state.clone(),
+                config.clone(),
+                Default::default(),
+                Arc::new(cost::PricingTable::empty()),
+            )
+            .unwrap(),
+            None,
+        )
+    };
+    let first = runtime();
+    let endpoint = first
+        .start_preview_server(temp.path(), "localhost", Some(agent.record().id))
+        .await?;
+    let urls = previews_for(thread.record(), &endpoint)?.unwrap();
+    first.shutdown().await?;
+    timeout(Duration::from_secs(2), async {
+        while TcpStream::connect((Ipv4Addr::LOCALHOST, endpoint.port))
+            .await
+            .is_ok()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let restarted = runtime();
+    let endpoint = restarted
+        .start_preview_server(temp.path(), "localhost", Some(agent.record().id))
+        .await?;
+    assert_eq!(endpoint.port, url::Url::parse(&urls.page)?.port().unwrap());
+    let page = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{}", endpoint.port))
+        .header("Host", &urls.host)
+        .send()
+        .await?;
+    assert_eq!(page.status(), 200);
+    assert!(page.text().await?.contains(&urls.services[0].url));
+    restarted.shutdown().await
 }

@@ -5,9 +5,6 @@ use executor::ConversationHandle;
 pub(crate) use executor::previews::published_sandbox;
 use tokio::{io::copy_bidirectional, net::TcpListener};
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) async fn run(
     conversation: Arc<dyn ConversationHandle>,
     port: u16,

@@ -70,6 +70,14 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         .with_max_level(tracing::Level::INFO)
         .try_init()
         .map_err(|error| anyhow::anyhow!("initializing service logging: {error}"))?;
+    std::fs::create_dir_all(root)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join("service.lock"))?;
+    lock.try_lock()
+        .context("another agent service is using this root")?;
     let auth = if let Some(path) = &args.auth_file {
         let config: executor::remote::AuthConfig = crate::read_config_file(path)?;
         eprintln!("OIDC callback: {}", config.callback_url());
@@ -86,11 +94,14 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         service = service.with_auth(auth.clone(), args.multiplayer);
     }
     let mut store = executor::AdapterStore::new(root.join("adapters"));
-    if let Some(reference) = args.agent {
+    let only_agent = if let Some(reference) = args.agent {
         let agent = crate::must_get_agent(&runtime, &reference).await?;
         service = service.for_agent(agent.record().id);
         store = store.for_agent(agent.record().id.to_string());
-    }
+        Some(agent.record().id)
+    } else {
+        None
+    };
     let definitions = args
         .adapters_file
         .as_deref()
@@ -130,7 +141,7 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         return result;
     }
     let previews = runtime
-        .start_preview_server(root, &args.preview_domain)
+        .start_preview_server(root, &args.preview_domain, only_agent)
         .await?;
     println!(
         "preview listener: 127.0.0.1:{} (domain: {})",

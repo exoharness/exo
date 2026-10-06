@@ -57,7 +57,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn apple_container() -> Self {
-        Self::from_factory(SandboxProvider::AppleContainer, true, |inner| {
+        Self::from_factory(SandboxProvider::AppleContainer, true, false, |inner| {
             Box::pin(async move {
                 Ok(Arc::new(
                     crate::CliContainerSandboxBackend::apple_container()
@@ -70,7 +70,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn docker() -> Self {
-        Self::from_factory(SandboxProvider::Docker, true, |inner| {
+        Self::from_factory(SandboxProvider::Docker, true, false, |inner| {
             Box::pin(async move {
                 Ok(Arc::new(
                     crate::CliContainerSandboxBackend::docker().with_durable_file_system_root(
@@ -86,6 +86,7 @@ impl SandboxBackendRegistration {
         Self::from_factory(
             SandboxProvider::Firecracker,
             cfg!(any(target_os = "linux", target_os = "macos")),
+            true,
             move |inner| {
                 let spec = spec.clone();
                 let resolver = Arc::new(LocalEgressResolver {
@@ -102,7 +103,7 @@ impl SandboxBackendRegistration {
 
     #[cfg(not(feature = "firecracker"))]
     pub fn firecracker(_spec: FirecrackerBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Firecracker, false, |_| {
+        Self::from_factory(SandboxProvider::Firecracker, false, true, |_| {
             Box::pin(async move {
                 bail!("Firecracker support requires building Exo with --features firecracker")
             })
@@ -126,7 +127,7 @@ impl SandboxBackendRegistration {
         // the same shape daytona/e2b use for their credentials. The result is
         // cached per provider by `sandbox_backend_for_provider`, so this runs
         // once per harness and not once per sandbox.
-        Self::from_factory(SandboxProvider::Smolvm, true, |inner| {
+        Self::from_factory(SandboxProvider::Smolvm, true, true, |inner| {
             Box::pin(async move {
                 let config = inner.smolvm_config_from_binding().await?;
                 let resolver = Arc::new(LocalEgressResolver {
@@ -140,7 +141,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn daytona(spec: DaytonaBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Daytona, false, move |inner| {
+        Self::from_factory(SandboxProvider::Daytona, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.daytona_config_from_binding().await? {
@@ -154,7 +155,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn e2b(spec: E2bBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::E2b, false, move |inner| {
+        Self::from_factory(SandboxProvider::E2b, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.e2b_config_from_binding().await? {
@@ -168,7 +169,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn sprites(spec: SpritesBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Sprites, false, move |inner| {
+        Self::from_factory(SandboxProvider::Sprites, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.sprites_config_from_binding().await? {
@@ -182,7 +183,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn vercel(spec: VercelBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Vercel, false, move |inner| {
+        Self::from_factory(SandboxProvider::Vercel, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.vercel_config_from_binding().await? {
@@ -196,7 +197,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn aws_agentcore() -> Self {
-        Self::from_factory(SandboxProvider::AwsAgentCore, false, |_inner| {
+        Self::from_factory(SandboxProvider::AwsAgentCore, false, false, |_inner| {
             Box::pin(async move {
                 #[cfg(feature = "aws-agentcore")]
                 {
@@ -1232,11 +1233,12 @@ impl BasicAgentHandle {
     }
 }
 
-impl OwnedThreadHandle<'_> {
+impl BasicConversationHandle {
     pub(super) async fn materialize_resources_impl(
         &self,
         resources: Vec<crate::resources::PreparedResource>,
         provider: SandboxProvider,
+        lease: Option<Arc<sessions::SessionLease>>,
     ) -> Result<Vec<FileSystemMount>> {
         self.harness
             .check(ResourceScope::Thread {
@@ -1283,16 +1285,18 @@ impl OwnedThreadHandle<'_> {
             {
                 if let Some(name) = credential {
                     tracing::info!(target: "exoharness::progress", "Loading Git credentials");
-                    let reference = crate::vault::find_secret(self.thread, name)
-                        .await?
-                        .with_context(|| {
-                            format!("Git resource credential {name} is not in the selected vaults")
-                        })?;
+                    let reference =
+                        crate::vault::find_secret(self, name)
+                            .await?
+                            .with_context(|| {
+                                format!(
+                                    "Git resource credential {name} is not in the selected vaults"
+                                )
+                            })?;
                     let target = crate::vault::CredentialDestination::origin(
                         &url::Url::parse(url)?.origin().ascii_serialization(),
                     )?;
-                    let vault =
-                        crate::vault::require_vault(self.thread, &reference.vault_id).await?;
+                    let vault = crate::vault::require_vault(self, &reference.vault_id).await?;
                     let resolved = vault.resolve_secret(&reference.secret_id, &target).await?;
                     let value = resolved.secret.bearer_value().to_owned();
                     Some(crate::resources::GitCredential {
@@ -1317,7 +1321,6 @@ impl OwnedThreadHandle<'_> {
         .await?;
         let harness = self.harness.clone();
         let record = self.conversation_dir().join("record.json");
-        let lease = self.lease.clone();
         tokio::spawn(async move {
             // The task can outlive a cancelled request; retain ownership until
             // materialization finishes even if runtime shutdown has started.

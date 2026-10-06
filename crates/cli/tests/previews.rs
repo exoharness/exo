@@ -109,7 +109,7 @@ async fn server_and_inline_threads_share_a_root_without_sharing_ownership() -> R
     let sandbox = served
         .create_sandbox(exoharness::test_support::sandbox_request())
         .await?;
-    assert!(!f.root.join("service.lock").exists());
+
     for args in [
         vec![
             "agent",
@@ -249,25 +249,38 @@ async fn inline_previews_keep_their_port_and_live_only_in_their_cli_process() ->
         ])
         .await?;
     assert_eq!(support::thread_slug(&first)?, "project");
-    let urls = previews(&f, "project").await?;
-    assert_eq!(urls.services.len(), 2);
-    assert!(urls.services[0].url.contains("5173.project-"));
-    assert!(urls.services[1].url.contains("8000.project-"));
-    assert!(urls.page.contains(".localhost:"));
-    assert!(first.contains(&urls.page));
     let agent =
         exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "dev").await?;
     let thread = exo_managed_agents::find_thread(agent.as_ref(), "project").await?;
-    let port = f
+    let mut port = f
         .runtime
         .get_conversation_config(thread.as_ref())
         .await?
         .preview_port
         .context("saved port")?;
+    let mut urls = executor::previews_for(
+        thread.record(),
+        &executor::PreviewEndpoint {
+            domain: "localhost".into(),
+            port,
+        },
+    )?
+    .context("preview URLs")?;
+    assert_eq!(urls.services.len(), 2);
+    assert!(urls.services[0].url.contains("5173.project-"));
+    assert!(urls.services[1].url.contains("8000.project-"));
+    assert!(first.contains(&urls.page));
     assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
-    let printed = f.cli(&["thread", "ports", "dev", "project"]).await?;
-    assert!(printed.contains(&urls.page));
-    assert!(printed.contains("owning Exo process and sandbox services"));
+    assert!(
+        f.runtime
+            .preview_urls(agent.as_ref(), thread.clone())
+            .await?
+            .is_none()
+    );
+    let stopped = f
+        .output(&["thread", "ports", "dev", "project"], None, None)
+        .await?;
+    assert!(!stopped.status.success());
     let requests = f
         .model
         .received_requests()
@@ -280,28 +293,29 @@ async fn inline_previews_keep_their_port_and_live_only_in_their_cli_process() ->
     let instructions = std::str::from_utf8(&request.body)?;
     assert!(instructions.contains(&urls.page));
     for service in &urls.services {
-        assert!(printed.contains(&service.url));
         assert!(instructions.contains(&service.url));
     }
 
     let conflict = TcpListener::bind(("127.0.0.1", port)).await?;
-    let rejected = f
-        .output(
-            &["agent", "run", "--agent", "dev", "--thread", "project"],
-            None,
-            None,
-        )
+    f.cli(&["agent", "run", "--agent", "dev", "--thread", "project"])
         .await?;
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("binding preview port"));
-    assert_eq!(
-        f.runtime
-            .get_conversation_config(thread.as_ref())
-            .await?
-            .preview_port,
-        Some(port)
-    );
+    let replacement = f
+        .runtime
+        .get_conversation_config(thread.as_ref())
+        .await?
+        .preview_port
+        .context("replacement port")?;
+    assert_ne!(replacement, port);
     drop(conflict);
+    port = replacement;
+    urls = executor::previews_for(
+        thread.record(),
+        &executor::PreviewEndpoint {
+            domain: "localhost".into(),
+            port,
+        },
+    )?
+    .context("replacement URLs")?;
     let count_config = |artifacts: Vec<exoharness::ArtifactVersion>| {
         artifacts
             .into_iter()
@@ -311,6 +325,8 @@ async fn inline_previews_keep_their_port_and_live_only_in_their_cli_process() ->
     let before = count_config(thread.list_artifacts().await?);
     let (first, second) = tokio::try_join!(open_session(&f, "project"), open_session(&f, "other"))?;
     assert_eq!(previews(&f, "project").await?, urls);
+    let printed = f.cli(&["thread", "ports", "dev", "project"]).await?;
+    assert!(printed.contains(&urls.page));
     assert_eq!(count_config(thread.list_artifacts().await?), before + 1);
     let other = previews(&f, "other").await?;
     assert_ne!(url::Url::parse(&other.page)?.port(), Some(port));
@@ -364,7 +380,7 @@ async fn http_provider_owns_one_proxy_after_clients_exit_and_removes_deleted_thr
     let f = setup("remote").await?;
     let endpoint = f
         .runtime
-        .start_preview_server(&f.root, "dev.localhost")
+        .start_preview_server(&f.root, "dev.localhost", None)
         .await?;
     let (first, second) = tokio::try_join!(open_session(&f, "first"), open_session(&f, "second"))?;
     let first_urls = previews(&f, "first").await?;

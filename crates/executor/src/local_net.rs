@@ -17,7 +17,13 @@ where
     loop {
         tokio::select! {
             client = accept() => {
-                connections.spawn(handle(client?));
+                match client {
+                    Ok(client) => { connections.spawn(handle(client)); }
+                    Err(error) => {
+                        tracing::warn!(%error, listener = name, "failed to accept connection");
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
             }
             completed = connections.join_next(), if !connections.is_empty() => {
                 match completed {
@@ -27,5 +33,51 @@ where
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn accept_error_does_not_stop_the_listener() -> Result<()> {
+        let handled = Arc::new(Notify::new());
+        let completed = handled.clone();
+        let mut attempts = 0;
+        let task = tokio::spawn(async move {
+            serve_connections(
+                move || {
+                    attempts += 1;
+                    let attempt = attempts;
+                    async move {
+                        match attempt {
+                            1 => {
+                                Err(std::io::Error::from(std::io::ErrorKind::ConnectionAborted)
+                                    .into())
+                            }
+                            2 => Ok(()),
+                            _ => std::future::pending().await,
+                        }
+                    }
+                },
+                move |()| {
+                    let completed = completed.clone();
+                    async move {
+                        completed.notify_one();
+                        Ok(())
+                    }
+                },
+                "test",
+                |_| {},
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), handled.notified()).await?;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        Ok(())
     }
 }

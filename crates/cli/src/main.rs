@@ -1114,14 +1114,13 @@ async fn run_selected(
         }
         Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars, local).await?,
         Commands::Agent { command: AgentCommands::Run { thread, tui, prompt, execution, .. }, .. } => {
-            let opened = managed_agents::open_thread(
+            let (agent, conversation) = managed_agents::open_thread(
                 harness.as_ref(),
                 definition.as_ref(),
                 &thread,
                 execution.egress_policy.is_some(),
             )
             .await?;
-            let (agent, conversation) = (opened.agent, opened.thread);
             if local {
                 harness.start_inline_previews(agent.as_ref(), conversation.clone()).await?;
             }
@@ -1692,9 +1691,6 @@ async fn run_selected(
                         .get_conversation(agent_handle.as_ref(), &conversation)
                         .await?
                         .ok_or_else(|| anyhow!("conversation not found: {}", conversation))?;
-                    if local {
-                        harness.start_inline_previews(agent_handle.as_ref(), conversation.clone()).await?;
-                    }
                     let output = run_sandbox_shell_command(
                         agent_handle.as_ref(),
                         conversation.as_ref(),

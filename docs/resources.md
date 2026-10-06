@@ -33,39 +33,6 @@ the mounted Git resource paths via `safe.directory`, so host/guest ownership
 differences do not block Git. This leaves host Git configuration unchanged and
 does not trust unrelated repositories.
 
-## Local sandbox lifetime
-
-A local `exo agent run` session owns its thread's managed sandboxes. Exiting the
-session stops them; SmolVM retains its disks so the next run can resume the same
-files. The backend does not independently stop idle SmolVM machines while a
-session or server owns them, including when only browser previews are active.
-For SmolVM, a nonzero `idle_seconds` selects warm reuse; it does not set an idle
-eviction timer. Session shutdown and explicit sandbox commands control stopping.
-
-Local `exo thread send` and `exo thread sandbox run` (also available under
-`conversation`) use the same exclusive thread ownership. Each invocation starts
-or resumes the sandbox and stops its managed sandboxes on exit. They cannot run
-alongside an open local `exo agent run` on that thread. Use an HTTP provider
-backed by `exo serve` for repeated commands sharing a running VM.
-`exo thread sandbox forward` only connects to published ports and does not take
-lifetime ownership.
-
-The CLI and `exo serve` use the same per-thread ownership. They can run different
-threads under the same state root concurrently. A process retains its thread's
-lease until shutdown; repeated HTTP requests reuse the server's lease. Another
-process cannot execute, reconfigure, or delete that thread while it is owned.
-Use the owner's HTTP provider to operate on a server-owned thread. Read-only
-queries and port forwarding do not claim ownership. Updating a saved environment
-changes the template for future opens; it does not reconfigure an active thread.
-Deleting an agent checks ownership of all its threads before stopping any VMs.
-
-After a crash or SIGKILL, machines may keep running until their thread is reopened.
-The OS releases the dead process's leases automatically. The next owner claims
-that thread and stops leftover managed sandboxes before resuming. Clean CLI or
-server shutdown stops managed sandboxes while retaining ownership through cleanup.
-Attached sandboxes keep their external owner. Deleting a thread or agent deletes
-retained SmolVM disks, so that deletion requires an available SmolVM runtime.
-
 ## Git cache
 
 For a Git URL, Exo maintains a checkout on a cached volume. For a new thread,

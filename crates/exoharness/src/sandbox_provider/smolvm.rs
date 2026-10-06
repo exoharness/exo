@@ -432,7 +432,7 @@ impl SmolvmSandboxBackend {
             "--",
             "/bin/sh",
             "-c",
-            "trap 'exit 0' INT TERM; while :; do sleep 86400 & wait \"$!\"; done",
+            "trap 'kill -TERM -1; wait; exit 0' INT TERM; while :; do sleep 86400 & wait \"$!\"; done",
         ]);
         let output = create
             .output()
@@ -450,9 +450,7 @@ impl SmolvmSandboxBackend {
             host_ports
         };
         if !output.status.success() && egress.is_some() {
-            let mut stop = Command::new(self.binary().await?);
-            stop.args(["machine", "stop", "--name", name]);
-            run_checked(stop, "smolvm machine stop before replacing egress").await?;
+            stop_machine(self.binary().await?, name).await?;
         }
 
         let mut start = Command::new(self.binary().await?);
@@ -685,10 +683,9 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
     async fn stop_existing(
         &self,
         sandbox_id: &str,
-        previous: &Arc<dyn ManagedSandboxHandle>,
+        _previous: &Arc<dyn ManagedSandboxHandle>,
     ) -> Result<()> {
-        self.invalidate_tcp_forwards(sandbox_id);
-        self.egress.terminate(sandbox_id, previous.stop()).await
+        self.stop_machine(sandbox_id).await
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
@@ -702,7 +699,6 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             let image = self.prepare_image(&request.spec.image).await?;
             reject_unsupported_spec(&request.spec, &image)?;
             let boot_binary = self.boot_binary().await?.clone();
-            self.invalidate_tcp_forwards(&request.sandbox_id);
             return Ok(crate::with_process_management(Arc::new(
                 SmolvmOneShotHandle {
                     id: format!("smolvm-oneshot:{}", request.sandbox_id),
@@ -758,6 +754,10 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         request: SandboxRequest,
         port: u16,
     ) -> Result<Option<BoxSandboxTcpStream>> {
+        ensure!(
+            request.spec.tcp_ports.contains(&port),
+            "sandbox does not publish guest TCP port {port}"
+        );
         let cell = self
             .tcp_forwards
             .lock()
@@ -772,7 +772,24 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                     .await
             })
             .await?;
-        connect_published_tcp(host_ports, port).await
+        match connect_published_tcp(host_ports, port).await {
+            Ok(stream) => Ok(stream),
+            Err(_) => {
+                let machine = machine_name(&request.sandbox_id);
+                let refreshed = self
+                    .existing_tcp_forwards(&machine, &request.spec.tcp_ports, None)
+                    .await?;
+                let stream = connect_published_tcp(&refreshed, port).await?;
+                self.tcp_forwards
+                    .lock()
+                    .expect("smolvm TCP handle cache poisoned")
+                    .insert(
+                        request.sandbox_id,
+                        Arc::new(OnceCell::new_with(Some(refreshed))),
+                    );
+                Ok(stream)
+            }
+        }
     }
 
     async fn attach(
@@ -789,7 +806,6 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        self.invalidate_tcp_forwards(&request.sandbox_id);
         request.spec.policy.validate_basic("smolvm")?;
         if payload.format != SnapshotFormat::SmolvmMachinePack {
             bail!(
@@ -846,6 +862,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .arg(&machine);
         run_checked(start, "smolvm machine start").await?;
 
+        self.invalidate_tcp_forwards(&request.sandbox_id);
         Ok(crate::with_process_management(Arc::new(SmolvmWarmHandle {
             id: format!("smolvm:{machine}"),
             binary: binary.clone(),
@@ -1453,6 +1470,8 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let binary = dir.path().join("smolvm");
         let inspected = dir.path().join("inspected");
+        let host_port = dir.path().join("host-port");
+        std::fs::write(&host_port, listener.local_addr()?.port().to_string())?;
         write_test_binary(
             &binary,
             &format!(
@@ -1463,7 +1482,7 @@ mod tests {
                  *) exit 23;;\n\
                  esac",
                 inspected.display(),
-                listener.local_addr()?.port()
+                format_args!("'\"$(cat '{}')\"'", host_port.display())
             ),
         );
         let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
@@ -1488,8 +1507,29 @@ mod tests {
         listener.accept().await?;
         assert!(backend.connect_tcp(request.clone(), 20_001).await.is_err());
         backend.stop(request.clone()).await?;
-        assert!(shared_backend.connect_tcp(request, 20_000).await?.is_some());
-        assert_eq!(std::fs::read_to_string(inspected)?, "status\nstatus\n");
+        assert!(
+            shared_backend
+                .connect_tcp(request.clone(), 20_000)
+                .await?
+                .is_some()
+        );
+        assert_eq!(std::fs::read_to_string(&inspected)?, "status\nstatus\n");
+        let replacement = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        std::fs::write(host_port, replacement.local_addr()?.port().to_string())?;
+        drop(listener);
+        for _ in 0..2 {
+            assert!(
+                shared_backend
+                    .connect_tcp(request.clone(), 20_000)
+                    .await?
+                    .is_some()
+            );
+            replacement.accept().await?;
+        }
+        assert_eq!(
+            std::fs::read_to_string(inspected)?,
+            "status\nstatus\nstatus\n"
+        );
         Ok(())
     }
 
@@ -1547,7 +1587,7 @@ mod tests {
         let args = std::fs::read_to_string(args_file)?;
         assert!(args.contains("--storage\n64\n"));
         assert!(args.contains("--overlay\n64\n"));
-        assert!(args.contains("--\n/bin/sh\n-c\ntrap 'exit 0' INT TERM;"));
+        assert!(args.contains("--\n/bin/sh\n-c\ntrap 'kill -TERM -1; wait; exit 0' INT TERM;"));
         for (guest, host) in &host_ports {
             assert!(
                 args.contains(&format!("--port\n{host}:{guest}\n")),

@@ -89,14 +89,18 @@ pub async fn ensure_conversation_sandbox(
                     && matches_sandbox_policy(sandbox.policy.as_ref(), policy.as_ref()) =>
             {
                 if !sandbox.running {
-                    conversation
+                    let restart = conversation
                         .start_sandbox(exoharness::StartSandboxRequest {
                             id: sandbox.id.clone(),
                             snapshot_id: None,
                             idle_seconds: None,
                             provider: None,
                         })
-                        .await?;
+                        .await;
+                    if let Err(error) = restart {
+                        tracing::warn!(sandbox_id = %sandbox.id, %error, "failed to resume sandbox");
+                        continue;
+                    }
                 }
                 if let Some(program) = healthcheck_program {
                     let healthcheck = conversation

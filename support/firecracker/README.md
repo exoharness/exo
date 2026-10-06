@@ -76,8 +76,9 @@ Most ordinary Linux container images work, subject to these constraints:
   `--firecracker-allow-guest-root=false`, or
   `EXO_FIRECRACKER_ALLOW_GUEST_ROOT=false`. Restricted guests use
   `no_new_privs` and `nosuid` root mounts.
-  The generic Codex image provides passwordless `sudo` for package
-  installation and Docker inside the guest. This setting is part of VM and
+  Build and publish the updated generic Codex Dockerfile to provide
+  passwordless `sudo` for package installation and Docker inside the guest;
+  the currently pinned image predates that setup. This setting is part of VM and
   snapshot identity; a privileged VM cannot be adopted or restored by a
   restricted backend. Xattrs and file capabilities are not extracted while
   materializing the image.

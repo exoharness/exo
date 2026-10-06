@@ -3,7 +3,7 @@ use std::{collections::HashMap, fs::File, path::PathBuf, sync::Arc};
 use anyhow::{Context, Result};
 use tokio::sync::OnceCell;
 
-use super::{BasicExoHarness, BasicScopedSandboxHandle, OwnedSandboxHandle};
+use super::{BasicExoHarness, BasicScopedSandboxHandle};
 use crate::{AgentId, ResourceScope};
 
 /// Process ownership is scoped to the sandbox's thread (or agent scope).
@@ -22,6 +22,7 @@ struct SessionState {
 pub(super) struct SessionLease {
     pub recovered: OnceCell<()>,
     _lock: File,
+    path: PathBuf,
 }
 
 impl LocalSessions {
@@ -96,6 +97,11 @@ impl LocalSessions {
         Ok(Arc::new(SessionLease {
             recovered: OnceCell::new(),
             _lock: lock,
+            path: self
+                .root
+                .join("sessions")
+                .join(agent.to_string())
+                .join(name),
         }))
     }
 
@@ -115,6 +121,35 @@ impl LocalSessions {
             .get(&scope)
             .cloned()
             .context("sandbox scope has not been claimed")
+    }
+
+    pub fn release(&self, scope: ResourceScope) -> Result<()> {
+        let lease = self
+            .state
+            .lock()
+            .expect("local sessions poisoned")
+            .leases
+            .remove(&scope);
+        if let Some(lease) = lease {
+            std::fs::remove_file(&lease.path).context("removing deleted session lock")?;
+        }
+        Ok(())
+    }
+
+    pub fn release_agent(&self, agent: AgentId) -> Result<()> {
+        let scopes: Vec<_> = self
+            .state
+            .lock()
+            .expect("local sessions poisoned")
+            .leases
+            .keys()
+            .copied()
+            .filter(|scope| scope.agent_id() == Some(agent))
+            .collect();
+        for scope in scopes {
+            self.release(scope)?;
+        }
+        Ok(())
     }
 
     pub fn finish(&self) -> HashMap<ResourceScope, Arc<SessionLease>> {
@@ -169,7 +204,7 @@ impl BasicExoHarness {
             // acquisition while stopping machines left by a crashed owner.
             let mut operator = self.clone();
             operator.caller = None;
-            let sandboxes = scope_sandboxes(&operator, scope).with_lease(Some(lease.clone()));
+            let sandboxes = scope_sandboxes(&operator, scope);
             if sandboxes.list_sandboxes().await?.iter().any(|s| s.running && !s.attached) {
                 tracing::info!(target: "exoharness::progress", "Stopping sandboxes left by the previous local session...");
                 stop_owned_sandboxes(&sandboxes).await?;
@@ -187,9 +222,10 @@ impl BasicExoHarness {
         let mut operator = self.clone();
         operator.caller = None;
         let mut failure = None;
-        for (&scope, lease) in &leases {
-            let owned = scope_sandboxes(&operator, scope).with_lease(Some(lease.clone()));
+        for &scope in leases.keys() {
+            let owned = scope_sandboxes(&operator, scope);
             if let Err(error) = stop_owned_sandboxes(&owned).await {
+                tracing::error!(%error, ?scope, "failed to stop session sandboxes");
                 failure = Some(error);
             }
         }
@@ -216,13 +252,14 @@ fn scope_sandboxes(
     }
 }
 
-async fn stop_owned_sandboxes(scope: &OwnedSandboxHandle<'_>) -> Result<()> {
+async fn stop_owned_sandboxes(scope: &BasicScopedSandboxHandle<'_>) -> Result<()> {
     let mut failure = None;
     for sandbox in scope.list_sandboxes().await? {
         if sandbox.running
             && !sandbox.attached
-            && let Err(error) = scope.stop_sandbox(sandbox.id).await
+            && let Err(error) = scope.stop_sandbox(sandbox.id.clone()).await
         {
+            tracing::error!(%error, sandbox_id = %sandbox.id, "failed to stop sandbox");
             failure = Some(error);
         }
     }
@@ -241,11 +278,13 @@ mod tests {
         SandboxProvider, SandboxRequest, SnapshotFormat, SnapshotPayload, WriteArtifactRequest,
         test_support,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct RecoveryBackend {
         acquisitions: AtomicUsize,
+        pause_acquisitions: AtomicBool,
+        resume_acquisition: tokio::sync::Notify,
         stops: AtomicUsize,
         terminations: AtomicUsize,
     }
@@ -263,6 +302,9 @@ mod tests {
         }
         async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
             self.acquisitions.fetch_add(1, Ordering::SeqCst);
+            if self.pause_acquisitions.load(Ordering::SeqCst) {
+                self.resume_acquisition.notified().await;
+            }
             LocalProcessSandboxBackend.acquire(request).await
         }
         async fn stop(&self, _request: SandboxRequest) -> Result<()> {
@@ -304,6 +346,10 @@ mod tests {
         let sandbox = thread
             .create_sandbox(test_support::sandbox_request())
             .await?;
+        let fork = thread.fork(Default::default()).await?;
+        assert!(fork.list_sandboxes().await?.is_empty());
+        fork.claim_local_session().await?;
+        assert!(thread.list_sandboxes().await?[0].running);
         let inline = harness(temp.path()).await?;
         let other_agent = inline.get_agent(&agent.record().id).await?.unwrap();
         let busy = other_agent.get_thread(&thread.record().id).await?.unwrap();
@@ -313,6 +359,17 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("owned by another local process")
+        );
+        let fork_elsewhere = other_agent.get_thread(&fork.record().id).await?.unwrap();
+        assert!(fork_elsewhere.claim_local_session().await.is_err());
+        assert!(agent.delete_thread(&fork.record().id).await?);
+        assert!(
+            !temp
+                .path()
+                .join("sessions")
+                .join(agent.record().id.to_string())
+                .join(format!("{}.lock", fork.record().id))
+                .exists()
         );
         assert!(
             busy.create_sandbox(test_support::sandbox_request())
@@ -356,19 +413,8 @@ mod tests {
             .create_sandbox(test_support::sandbox_request())
             .await?;
         let (agent_id, thread_id) = (agent.record().id, thread.record().id);
-        let event_file = std::fs::read_dir(
-            temp.path()
-                .join("agents")
-                .join(agent_id.to_string())
-                .join("conversations")
-                .join(thread_id.to_string())
-                .join("events"),
-        )?
-        .next()
-        .context("thread has no event files")??
-        .path();
-        let original_event = std::fs::read(&event_file)?;
-        std::fs::write(&event_file, b"invalid")?;
+        let (event_file, original_event) =
+            test_support::corrupt_thread_history(temp.path(), agent_id, thread_id)?;
         assert!(thread.get_events(None).await.is_err());
         // Process death releases leases without stopping its persisted VMs.
         drop((thread, agent, first));
@@ -391,10 +437,27 @@ mod tests {
         // Repair history before exercising normal sandbox acquisition, which
         // can load provider state. Ownership recovery above never reads it.
         std::fs::write(&event_file, original_event)?;
-        thread
-            .create_sandbox(test_support::sandbox_request())
-            .await
-            .context("starting a sandbox after recovery")?;
+        backend.pause_acquisitions.store(true, Ordering::SeqCst);
+        let restart = thread.start_sandbox(crate::StartSandboxRequest {
+            id: thread.list_sandboxes().await?[0].id.clone(),
+            snapshot_id: None,
+            idle_seconds: None,
+            provider: None,
+        });
+        tokio::pin!(restart);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut restart)
+                .await
+                .is_err()
+        );
+        assert_eq!(backend.acquisitions.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            test_support::new_test_agent(&recovered, "independent"),
+        )
+        .await??;
+        backend.resume_acquisition.notify_one();
+        restart.await.context("resuming a sandbox after recovery")?;
         thread.claim_local_session().await?;
         assert_eq!(backend.stops.load(Ordering::SeqCst), 1);
         assert!(thread.list_sandboxes().await?.iter().any(|s| s.running));
@@ -430,18 +493,7 @@ mod tests {
                 default_workdir: None,
             })
             .await?;
-        let event_file = std::fs::read_dir(
-            temp.path()
-                .join("agents")
-                .join(agent.record().id.to_string())
-                .join("conversations")
-                .join(thread.record().id.to_string())
-                .join("events"),
-        )?
-        .next()
-        .context("thread has no event files")??
-        .path();
-        std::fs::write(event_file, b"invalid")?;
+        test_support::corrupt_thread_history(temp.path(), agent.record().id, thread.record().id)?;
         assert!(thread.get_events(None).await.is_err());
         owner.release_local_sessions().await?;
         let sandboxes = thread.list_sandboxes().await?;
@@ -538,6 +590,25 @@ mod tests {
                 let agent = deleting.get_agent(&agent_id).await?.unwrap();
                 assert!(agent.delete_thread(&thread_id).await?);
             }
+            assert!(
+                deleting
+                    .sessions
+                    .as_ref()
+                    .unwrap()
+                    .state
+                    .lock()
+                    .unwrap()
+                    .leases
+                    .is_empty()
+            );
+            assert!(
+                !temp
+                    .path()
+                    .join("sessions")
+                    .join(agent_id.to_string())
+                    .join(format!("{thread_id}.lock"))
+                    .exists()
+            );
             assert_eq!(backend.terminations.load(Ordering::SeqCst), 1);
             assert_eq!(backend.stops.load(Ordering::SeqCst), 0);
             assert_eq!(backend.acquisitions.load(Ordering::SeqCst), 0);
