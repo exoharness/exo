@@ -73,8 +73,8 @@ Most ordinary Linux container images work, subject to these constraints:
 - Workload processes start as UID/GID 10001. Guest privilege elevation is
   enabled by default. Operators can disable it with
   `FirecrackerConfig.allow_guest_root = false`,
-  `--firecracker-allow-guest-root=false`, or
-  `EXO_FIRECRACKER_ALLOW_GUEST_ROOT=false`. Restricted guests use
+  `--firecracker-disable-guest-root`, or
+  `EXO_FIRECRACKER_DISABLE_GUEST_ROOT=true`. Restricted guests use
   `no_new_privs` and `nosuid` root mounts.
   Build and publish the updated generic Codex Dockerfile to provide
   passwordless `sudo` for package installation and Docker inside the guest;
