@@ -13,7 +13,6 @@ fn test_host_runtime() -> FirecrackerHostFingerprint {
         initramfs_sha256: "initramfs".to_string(),
         network_device_policy: FirecrackerNetworkDevicePolicy::default(),
         template_resource_slots: 0,
-        allow_guest_root: false,
     }
 }
 
@@ -27,22 +26,6 @@ fn runtime_fingerprint_uses_requested_resources() {
     let runtime = test_host_runtime().for_resources(resources);
     assert_eq!(runtime.vcpu_count, 8);
     assert_eq!(runtime.memory_mib, 16_384);
-}
-
-#[test]
-fn guest_root_policy_changes_runtime_and_snapshot_identity() {
-    assert!(FirecrackerConfig::default().allow_guest_root);
-    let restricted = test_runtime();
-    let mut host = test_host_runtime();
-    host.allow_guest_root = true;
-    let privileged = host.for_resources(SandboxResourceShape::default());
-    assert_ne!(restricted, privileged);
-    let hash = |runtime: &FirecrackerRuntimeFingerprint| {
-        let mut hasher = Sha256::new();
-        hash_runtime_fingerprint(&mut hasher, runtime);
-        hasher.finalize()
-    };
-    assert_ne!(hash(&restricted), hash(&privileged));
 }
 
 #[test]
@@ -1284,22 +1267,6 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
     let configuration =
         firecracker_vm_configuration(&FirecrackerConfig::default(), &request, &record)?;
     assert!(
-        !configuration
-            .boot_source
-            .boot_args
-            .contains("exo_allow_guest_root")
-    );
-    let mut privileged_record = record.clone();
-    privileged_record.runtime.allow_guest_root = true;
-    let privileged =
-        firecracker_vm_configuration(&FirecrackerConfig::default(), &request, &privileged_record)?;
-    assert!(
-        privileged
-            .boot_source
-            .boot_args
-            .contains(" exo_allow_guest_root=1")
-    );
-    assert!(
         configuration
             .boot_source
             .boot_args
@@ -1326,65 +1293,6 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
     request.spec.mounts.pop();
     request.spec.mounts[0].internal = false;
     assert!(prepare_request(request).is_err());
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires root, KVM, FIRECRACKER_CONFIG, and FIRECRACKER_IMAGE with passwordless sudo"]
-async fn guest_root_permission_live() -> Result<()> {
-    let config: FirecrackerConfig = serde_json::from_str(&std::env::var("FIRECRACKER_CONFIG")?)?;
-    let image = std::env::var("FIRECRACKER_IMAGE")?;
-    for allow_guest_root in [false, true] {
-        let temp = tempfile::Builder::new()
-            .prefix("r")
-            .tempdir_in(&config.state_root)?;
-        let backend = FirecrackerSandboxBackend::new(FirecrackerConfig {
-            state_root: temp.path().join("s"),
-            allowed_local_images: vec![image.clone().into()],
-            allow_guest_root,
-            workspace_size_gib: 1,
-            ..config.clone()
-        })
-        .await?;
-        let request = SandboxRequest {
-            sandbox_id: "root-policy".into(),
-            scope: crate::ResourceScope::Global,
-            provider_state: None,
-            spec: SandboxSpec {
-                image: image.clone(),
-                resources: SandboxResourceShape::new(1, 512),
-                default_workdir: "/home/exo/workspace".into(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
-                tcp_ports: vec![],
-                mounts: vec![],
-                durable_file_systems: vec![],
-            },
-            lifecycle: crate::SandboxLifecycleConfig::default(),
-        };
-        let result: Result<()> = async {
-            let handle = backend.acquire(request.clone()).await?;
-            let output = handle
-                .exec(&SandboxCommand {
-                    argv: vec![
-                        "/bin/sh".into(),
-                        "-c".into(),
-                        "test -x /usr/bin/sudo || exit 99; id -u; awk '/^NoNewPrivs:/ {print $2}' /proc/self/status; sudo -n id -u".into(),
-                    ],
-                    timeout: Some(Duration::from_secs(10)),
-                    env: Default::default(),
-                    cwd: None,
-                    display_argv: None,
-                })
-                .await?;
-            let expected = if allow_guest_root { "10001\n0\n0\n" } else { "10001\n1\n" };
-            ensure!(output.stdout == expected && output.ok == allow_guest_root,
-                "guest root policy {allow_guest_root}: {output:?}");
-            Ok(())
-        }.await;
-        let cleanup = backend.terminate(request).await;
-        result?;
-        cleanup?;
-    }
     Ok(())
 }
 
