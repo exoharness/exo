@@ -464,7 +464,7 @@ pub async fn delete_agent(service: &Service<'_>, path: &AgentPath) -> Result<boo
     service.require_full_provider()?;
     service
         .runtime
-        .delete_agent(&path.agent_id.to_string())
+        .delete_agent_by_id(&path.agent_id)
         .await
         .map_err(bad_request)
 }
@@ -622,7 +622,7 @@ pub async fn delete_thread(service: &Service<'_>, path: &ThreadPath) -> Result<D
     let agent = service.agent(path.agent_id).await?;
     let deleted = service
         .runtime
-        .delete_conversation(agent.as_ref(), &path.thread_id.to_string())
+        .delete_conversation_by_id(agent.as_ref(), &path.thread_id)
         .await
         .map_err(bad_request)?;
     Ok(DeleteThreadResult {

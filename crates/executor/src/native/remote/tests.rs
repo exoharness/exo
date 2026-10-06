@@ -396,6 +396,9 @@ async fn rmcp_login_private_vaults_and_session_revocation() -> Result<()> {
         .await?;
     assert!(bob_client.get_agent(agent.id).await?.is_none());
     assert!(bob_client.delete_agent(agent.id).await.is_err());
+    assert!(alice_client.get_agent(agent.id).await?.is_some());
+    assert!(alice_client.delete_agent(agent.id).await?);
+    assert!(alice_client.get_agent(agent.id).await?.is_none());
     assert!(
         bob_client
             .create_agent(&NewAgentRequest {

@@ -1415,14 +1415,14 @@ impl Runtime {
         else {
             return Ok(false);
         };
-        let deleted = self
-            .provider
-            .exoharness()
-            .delete_agent(&agent.record().id)
-            .await?;
+        self.delete_agent_by_id(&agent.record().id).await
+    }
+
+    pub(crate) async fn delete_agent_by_id(&self, agent_id: &exoharness::AgentId) -> Result<bool> {
+        let deleted = self.provider.exoharness().delete_agent(agent_id).await?;
         #[cfg(feature = "native")]
         if deleted && let Some(proxy) = self.previews.get() {
-            proxy.remove_agent(agent.record().id);
+            proxy.remove_agent(*agent_id);
         }
         Ok(deleted)
     }
@@ -1443,10 +1443,19 @@ impl Runtime {
         let Some(thread) = resolve_conversation_handle(agent, reference).await? else {
             return Ok(false);
         };
-        let deleted = agent.delete_conversation(&thread.record().id).await?;
+        self.delete_conversation_by_id(agent, &thread.record().id)
+            .await
+    }
+
+    pub(crate) async fn delete_conversation_by_id(
+        &self,
+        agent: &dyn AgentHandle,
+        thread_id: &exoharness::ThreadId,
+    ) -> Result<bool> {
+        let deleted = agent.delete_conversation(thread_id).await?;
         #[cfg(feature = "native")]
         if deleted && let Some(proxy) = self.previews.get() {
-            proxy.remove(thread.record().id);
+            proxy.remove(*thread_id);
         }
         Ok(deleted)
     }
