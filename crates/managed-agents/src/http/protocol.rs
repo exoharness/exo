@@ -23,22 +23,7 @@ impl<T> OneOrMany<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TurnAttention {
-    #[default]
-    Wake,
-    Interrupt,
-}
-
-impl TurnAttention {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Wake => "wake",
-            Self::Interrupt => "interrupt",
-        }
-    }
-}
+pub use exoharness::turn_coordinator::TurnAttention;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

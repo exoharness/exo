@@ -352,6 +352,9 @@ pub struct TurnRecord {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BeginTurnRequest {
+    /// Identity allocated during durable acceptance, before execution starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<TurnRecord>,
     pub session_id: Option<SessionId>,
     pub input: Vec<Message>,
     /// Events committed in the same write as TurnStarted and the input.

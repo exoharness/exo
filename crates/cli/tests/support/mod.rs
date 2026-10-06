@@ -85,6 +85,7 @@ impl Fixture {
                 .await?
                 .with_local_sessions(root.clone()),
         );
+        let turns = state.turn_coordinator();
         let runtime = Arc::new(
             Runtime::new(
                 LocalProvider::managed(
@@ -92,7 +93,8 @@ impl Fixture {
                     config.clone(),
                     HashMap::new(),
                     Arc::new(cost::PricingTable::empty()),
-                )?,
+                )?
+                .with_turn_coordinator(turns.clone(), Some(turns)),
                 None,
             )
             .with_shutdown_hook(move || {

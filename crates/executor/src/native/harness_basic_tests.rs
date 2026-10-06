@@ -37,6 +37,20 @@ use crate::{
 
 struct RecoveryPolicy(Uuid7);
 
+async fn wait_for_active_turn(
+    runtime: &Runtime,
+    thread: &dyn ConversationHandle,
+    turn: exoharness::TurnId,
+) -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !runtime.is_turn_active(thread, turn).await? {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
 #[async_trait]
 impl AccessPolicy for RecoveryPolicy {
     async fn check(&self, _: &str, _: ResourceScope) -> Result<()> {
@@ -155,6 +169,7 @@ async fn recovery_leaves_threads_owned_by_another_process_untouched() -> Result<
         .create_sandbox(exoharness::test_support::sandbox_request())
         .await?;
     let work = RecoverableTurn {
+        streaming: false,
         agent_config: serde_json::from_str(
             r#"{"model":"unused","instructions":[],"sandbox":{"provider":"local_process"}}"#,
         )?,
@@ -235,12 +250,14 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
     let mut agent_config = runtime.get_agent_config(agent.as_ref()).await?;
     agent_config.model = "recovery-model".into();
     let work = RecoverableTurn {
+        streaming: false,
         agent_config,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
     let turn = thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
@@ -278,6 +295,7 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         .await?;
     let completed_thread_id = completed_thread.record().id;
     let completed_work = RecoverableTurn {
+        streaming: false,
         request: SendRequest {
             input: vec![user_message("already answered")],
             session_id: None,
@@ -286,6 +304,7 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
     };
     let completed_turn = completed_thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: completed_work.request.input.clone(),
             initial_events: vec![completed_work.event()?],
@@ -317,6 +336,7 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
     let failed_thread_id = failed_thread.record().id;
     let failed_turn = failed_thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: vec![user_message("already failed")],
             initial_events: vec![work.event()?],
@@ -341,6 +361,7 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
     let invalid_thread_id = invalid_thread.record().id;
     let invalid_turn = invalid_thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: vec![user_message("invalid work")],
             initial_events: vec![EventData::Custom {
@@ -531,12 +552,14 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
         session_id: None,
     };
     let work = RecoverableTurn {
+        streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
     let turn = thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
@@ -565,6 +588,7 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
     let answered_thread_id = answered_thread.record().id;
     let answered_turn = answered_thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: vec![user_message("approval was answered before crash")],
             initial_events: vec![work.event()?],
@@ -720,12 +744,14 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     let mut agent_config = runtime.get_agent_config(agent.as_ref()).await?;
     agent_config.max_tool_round_trips = Some(1);
     let work = RecoverableTurn {
+        streaming: false,
         agent_config,
         thread_config,
         request: request.clone(),
     };
     let turn = thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
@@ -847,7 +873,7 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     runtime.recover_unfinished_turns().await?;
     let agent = state.get_agent(&agent_id).await?.unwrap();
     let thread = agent.get_thread(&thread_id).await?.unwrap();
-    assert!(runtime.is_turn_active(thread.as_ref(), turn_id).await?);
+    wait_for_active_turn(&runtime, thread.as_ref(), turn_id).await?;
     assert_eq!(tools.0.load(Ordering::SeqCst), 0);
     assert!(model.requests().is_empty());
     runtime
@@ -1037,6 +1063,9 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
         None,
     );
     runtime.recover_unfinished_turns().await?;
+    let agent = state.get_agent(&agent_id).await?.unwrap();
+    let thread = agent.get_thread(&thread_id).await?.unwrap();
+    wait_for_active_turn(&runtime, thread.as_ref(), turn.id).await?;
     runtime
         .approval_response(
             agent_id,
@@ -1050,8 +1079,6 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
             },
         )
         .await?;
-    let agent = state.get_agent(&agent_id).await?.unwrap();
-    let thread = agent.get_thread(&thread_id).await?.unwrap();
     let events = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let events = thread
@@ -1235,12 +1262,14 @@ async fn new_turn_waits_for_older_turn_recovery() -> Result<()> {
         session_id: None,
     };
     let work = RecoverableTurn {
+        streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
     let old_turn = thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
@@ -1564,12 +1593,14 @@ async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
         session_id: None,
     };
     let work = RecoverableTurn {
+        streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
     thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],
@@ -1649,12 +1680,14 @@ async fn recovered_turn_uses_its_original_caller() -> Result<()> {
         session_id: None,
     };
     let work = RecoverableTurn {
+        streaming: false,
         agent_config: runtime.get_agent_config(agent.as_ref()).await?,
         thread_config: runtime.get_conversation_config(thread.as_ref()).await?,
         request: request.clone(),
     };
     let turn = caller_thread
         .begin_turn(BeginTurnRequest {
+            turn: None,
             session_id: None,
             input: request.input,
             initial_events: vec![work.event()?],

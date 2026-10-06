@@ -10,7 +10,7 @@ use exoharness::{AgentHandle, ExoHarness, Result, ThreadHandle, TurnRecord};
 use tokio::sync::oneshot;
 
 use crate::harness::{Harness, HarnessCommand};
-use crate::harness_adapter::{ExecutorHarness, ExecutorTurn};
+use crate::harness_adapter::ExecutorHarness;
 use crate::harness_executor::{HarnessExecutor, RecoveryRuntimeResolver};
 use crate::runtime_host::{RuntimeHost, TaskGroup};
 use crate::{AgentConfig, ExecutionStreamHandle, Runtime, SendRequest};
@@ -24,6 +24,17 @@ pub trait Provider: AgentBackend {
     }
 
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
+    async fn cancel_turn(&self, key: crate::harness::HarnessTurnKey) -> Result<bool>;
+    async fn execute_accepted_turn(
+        &self,
+        _runtime: &Runtime,
+        _agent: Arc<dyn AgentHandle>,
+        _thread: Arc<dyn ThreadHandle>,
+        _turn: TurnRecord,
+        _work: crate::TurnWork,
+    ) -> Result<ExecutionStreamHandle> {
+        anyhow::bail!("this provider does not execute accepted queue entries")
+    }
 
     async fn recover_unfinished_turns(
         &self,
@@ -64,6 +75,7 @@ pub trait Provider: AgentBackend {
 }
 
 pub struct ProviderTurn {
+    pub options: crate::TurnOptions,
     pub agent: Arc<dyn AgentHandle>,
     pub thread: Arc<dyn ThreadHandle>,
     pub request: SendRequest,
@@ -73,8 +85,9 @@ pub struct ProviderTurn {
     pub(crate) runtime: Runtime,
 }
 
+#[derive(Clone)]
 pub struct LocalProvider {
-    host: Arc<dyn RuntimeHost>,
+    pub(crate) host: Arc<dyn RuntimeHost>,
     pub(crate) state: Arc<dyn ExoHarness>,
     pub(crate) executor: Arc<dyn HarnessExecutor>,
     pub(crate) harness: Arc<ExecutorHarness>,
@@ -82,9 +95,10 @@ pub struct LocalProvider {
     pub(crate) resource_preparations: Arc<Mutex<TaskGroup>>,
     // One provider-wide lock serializes the pending check and decision write so
     // concurrent responses cannot accept the same approval twice.
-    approval_responses: tokio::sync::Mutex<()>,
+    approval_responses: Arc<tokio::sync::Mutex<()>>,
     pub(crate) live_turns:
         Arc<tokio::sync::RwLock<HashMap<crate::harness::HarnessTurnKey, Weak<()>>>>,
+    pub(crate) turns: Arc<crate::turn_queue::TurnQueueRuntime>,
 }
 
 impl LocalProvider {
@@ -99,9 +113,10 @@ impl LocalProvider {
             executor,
             managed: Default::default(),
             resource_preparations: Arc::new(Mutex::new(TaskGroup::new(host.clone()))),
-            host,
+            host: host.clone(),
             approval_responses: Default::default(),
             live_turns: Arc::default(),
+            turns: Arc::new(crate::turn_queue::TurnQueueRuntime::new(host.clone())),
         }
     }
 
@@ -122,6 +137,40 @@ impl LocalProvider {
 
 #[async_trait]
 impl Provider for LocalProvider {
+    async fn execute_accepted_turn(
+        &self,
+        runtime: &Runtime,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ThreadHandle>,
+        turn: TurnRecord,
+        work: crate::TurnWork,
+    ) -> Result<ExecutionStreamHandle> {
+        runtime
+            .start_local_turn(
+                self,
+                agent,
+                thread,
+                work.request,
+                work.streaming,
+                Some(work.agent_config),
+                None,
+                Some((turn, work.thread_config)),
+            )
+            .await
+            .map(|(_, stream)| stream)
+    }
+    async fn cancel_turn(&self, key: crate::harness::HarnessTurnKey) -> Result<bool> {
+        if self.cancel_queued_turn(key).await? {
+            return Ok(true);
+        }
+        if self.harness.is_active(key) {
+            self.harness
+                .submit(HarnessCommand::CancelTurn { key })
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
     fn runtime_host(&self) -> Arc<dyn RuntimeHost> {
         self.host.clone()
     }
@@ -153,6 +202,7 @@ impl Provider for LocalProvider {
                 false,
                 Some(agent_config),
                 Some((turn, thread_config)),
+                None,
             )
             .await
             .map(|(_, stream)| stream)
@@ -165,6 +215,7 @@ impl Provider for LocalProvider {
             .with_managed_agents(self.managed.clone());
         provider.live_turns = self.live_turns.clone();
         provider.resource_preparations = self.resource_preparations.clone();
+        provider.turns = self.turns.clone();
         Ok(Arc::new(provider))
     }
 
@@ -248,6 +299,17 @@ impl Harness<ProviderTurn> for LocalProvider {
     }
 
     async fn shutdown(&self) -> Result<()> {
+        if self.state.caller().is_none() {
+            let _admission = self.turns.admission.write().await;
+            let _active = self
+                .turns
+                .active
+                .lock()
+                .expect("active queue owners poisoned");
+            self.turns
+                .draining
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         let mut preparations = std::mem::replace(
             &mut *self
                 .resource_preparations
@@ -258,7 +320,11 @@ impl Harness<ProviderTurn> for LocalProvider {
         while let Some(result) = preparations.join_next().await {
             result?;
         }
-        self.harness.shutdown().await
+        if self.state.caller().is_none() {
+            self.turns.shutdown(self.harness.clone()).await
+        } else {
+            self.harness.shutdown().await
+        }
     }
 
     async fn submit(&self, command: HarnessCommand<ProviderTurn>) -> Result<()> {
@@ -266,14 +332,14 @@ impl Harness<ProviderTurn> for LocalProvider {
             HarnessCommand::StartTurn(work) => {
                 let result = work
                     .runtime
-                    .start_local_turn(
+                    .accept_local_turn(
                         self,
                         work.agent,
                         work.thread,
                         work.request,
                         work.streaming,
                         work.config_override,
-                        None,
+                        work.options,
                     )
                     .await?;
                 if work.receipt.send(result).is_err() {
@@ -282,9 +348,8 @@ impl Harness<ProviderTurn> for LocalProvider {
                 Ok(())
             }
             HarnessCommand::CancelTurn { key } => {
-                self.harness
-                    .submit(HarnessCommand::<ExecutorTurn>::CancelTurn { key })
-                    .await
+                Provider::cancel_turn(self, key).await?;
+                Ok(())
             }
         }
     }

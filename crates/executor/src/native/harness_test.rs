@@ -330,36 +330,45 @@ async fn panic_reports_failure_and_releases_execution() -> Result<()> {
 }
 
 #[tokio::test]
-async fn dropping_stream_holds_thread_lock_until_cancelled_execution_stops() -> Result<()> {
+async fn queued_turn_waits_for_cancelled_execution_cleanup() -> Result<()> {
     let fixture = Fixture::new().await?;
     let executor = ControlledExecutor::default();
     let runtime = Runtime::new(
         crate::LocalProvider::new(Arc::clone(&fixture.storage), Arc::new(executor.clone())),
         None,
     );
-    let first = runtime
+    let (first_turn, first) = runtime
+        .start_turn(
+            Arc::clone(&fixture.agent),
+            Arc::clone(&fixture.thread),
+            fixture.request(),
+            true,
+            None,
+        )
+        .await?;
+    executor.started.notified().await;
+    drop(first);
+    runtime
+        .cancel(HarnessTurnKey::new(
+            fixture.thread.record().id,
+            first_turn.id,
+        ))
+        .await?;
+    executor.cancelling.notified().await;
+    let mut second = runtime
         .send_stream(
             Arc::clone(&fixture.agent),
             Arc::clone(&fixture.thread),
             fixture.request(),
         )
         .await?;
-    executor.started.notified().await;
-    drop(first);
-    executor.cancelling.notified().await;
-    let second = runtime.send_stream(
-        Arc::clone(&fixture.agent),
-        Arc::clone(&fixture.thread),
-        fixture.request(),
-    );
-    tokio::pin!(second);
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut second)
+        tokio::time::timeout(Duration::from_millis(20), executor.started.notified())
             .await
             .is_err()
     );
     executor.cleanup.add_permits(1);
-    let mut second = tokio::time::timeout(Duration::from_secs(1), second).await??;
+    tokio::time::timeout(Duration::from_secs(1), executor.started.notified()).await?;
     executor.release.add_permits(1);
     assert!(matches!(
         second.next().await.transpose()?,

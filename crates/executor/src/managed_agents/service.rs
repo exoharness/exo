@@ -96,6 +96,7 @@ pub async fn create_thread(
 }
 
 pub struct PreparedTurn {
+    pub options: crate::TurnOptions,
     pub request: SendRequest,
     pub config: AgentConfig,
     pub harness: String,
@@ -107,9 +108,7 @@ pub async fn prepare_turn(
     thread: &dyn ThreadHandle,
     body: SubmitTurnBody,
 ) -> Result<PreparedTurn> {
-    if body.idempotency_key.is_some()
-        || body.attention != TurnAttention::Wake
-        || body.parent.is_some()
+    if body.parent.is_some()
         || body.endpoint_name.is_some()
         || body.reasoning_effort.is_some()
         || body.frontend_tools.is_some()
@@ -137,6 +136,10 @@ pub async fn prepare_turn(
     }
     let harness = harness_name(&config).to_owned();
     Ok(PreparedTurn {
+        options: crate::TurnOptions {
+            idempotency_key: body.idempotency_key,
+            attention: body.attention,
+        },
         config,
         harness,
         request: SendRequest {
@@ -714,12 +717,13 @@ pub async fn submit_turn(
     streaming: bool,
 ) -> Result<(SubmitTurnResult, crate::ExecutionStreamHandle)> {
     let (turn, stream) = runtime
-        .start_turn(
+        .start_turn_with_options(
             agent.clone(),
             thread.clone(),
             prepared.request,
             streaming,
             Some(prepared.config),
+            prepared.options,
         )
         .await?;
     Ok((

@@ -398,16 +398,44 @@ artifacts, events, or sandbox execution can use `exoharness_handle()`.
 
 ## Turn Execution Lifecycle
 
-`ExecutorHarnessRuntime` implements the shared send lifecycle:
+`Runtime` separates accepting a turn from executing it:
 
-1. Load agent config.
-2. Load conversation config.
-3. Load any conversation-level model override.
-4. Let the selected executor prepare the conversation.
-5. Prepare the request.
-6. Call `conversation.begin_turn()`.
-7. Execute the turn with streaming enabled or disabled.
-8. Append `turn_ended` through the turn handle.
+1. Authorize the request and capture its configuration and typed work payload.
+2. Assign the turn and session IDs, enqueue the work, and return its receipt.
+3. Claim the thread's queue and persist execution admission for its head.
+4. Prepare the conversation, then call `begin_turn()` with the accepted IDs.
+5. Run the selected executor and persist its terminal events.
+6. Acknowledge the head and execute the next entry in order.
+
+Acceptance does not wait for an earlier turn or VM startup. Dropping the progress
+stream leaves accepted work queued; cancellation explicitly records a request in
+the queue. Interruption records cancellation of the submitter's active turn and
+appends its replacement atomically. Idempotency keys are scoped to the submitter;
+the stored implementation keeps receipts for 24 hours after acceptance.
+
+`TurnCoordinator<Work>` is a separate trait in `exoharness`. It defines ordering,
+ownership, cancellation, and acknowledgment. `TurnQueueDiscovery` is a separate
+extension for startup scans and worker pools. A host that knows its thread can
+call `LocalProvider::wake_turn_queue()` after a wakeup without global discovery.
+Timed ownership renewal and worker scheduling belong to the deployment backend.
+
+The CLI explicitly supplies `BasicExoHarness::turn_coordinator()`, which persists
+`turn_queue.json` in each thread's directory. Embedded `LocalProvider` constructors
+use a volatile queue unless configured through `with_turn_coordinator()`. The
+stored implementation requires one host owner; Basic's local session leases
+enforce this across processes and separately protect thread mutations and VMs.
+
+On restart, the runtime reconciles the saved queue head with its recovery journal.
+It retains the accepted ID if execution never started, resumes unfinished work,
+and acknowledges completed work without running it again. Existing journaled
+turns are imported before draining. Sandbox ownership and shutdown remain with
+the state implementation.
+
+A Durable Object coordinator must persist a recovery alarm before reporting
+successful acceptance. A competing-worker coordinator must implement atomic
+storage mutations and revoke ownership when renewal fails; the runtime stops its
+execution on revocation. Queue ownership does not itself fence event or tool writes,
+and recovery does not guarantee exactly-once external side effects.
 
 The actual turn runner is a `HarnessExecutor` implementation. Current executor
 implementations include the basic harness, RLM harness, and TypeScript harness.

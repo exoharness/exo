@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::{
     Provider, ProviderTurn,
-    harness::{Harness, HarnessCommand},
+    harness::{Harness, HarnessCommand, HarnessTurnKey},
 };
 
 pub struct HttpProvider {
@@ -68,6 +68,38 @@ impl HttpProvider {
         }
         watchers.spawn(async move {
             let observed = async {
+                if body.idempotency_key.is_some() {
+                    let terminal = client
+                        .events(
+                            agent_id,
+                            thread_id,
+                            &EventsQuery {
+                                turn_id: Some(result.turn.id),
+                                event_type: Some("error,turn_ended".into()),
+                                ..Default::default()
+                            },
+                        )
+                        .await?
+                        .events;
+                    // An idempotent receipt may refer to work that finished
+                    // before this request's cursor. Replay its terminal events.
+                    if terminal
+                        .iter()
+                        .any(|event| matches!(event.data, exoharness::EventData::TurnEnded))
+                    {
+                        let stream = crate::harness_events::turn_stream(
+                            Box::pin(futures::stream::iter(terminal.into_iter().map(Ok))),
+                            result.turn,
+                        );
+                        futures::pin_mut!(stream);
+                        while let Some(event) = stream.next().await {
+                            if sender.send(event).is_err() {
+                                break;
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
                 let events = client
                     .watch(
                         agent_id,
@@ -129,6 +161,21 @@ impl AgentBackend for HttpProvider {
 
 #[async_trait]
 impl Provider for HttpProvider {
+    async fn cancel_turn(&self, key: HarnessTurnKey) -> Result<bool> {
+        let agent_id = *self
+            .transport
+            .threads
+            .lock()
+            .expect("HTTP threads poisoned")
+            .get(&key.thread_id)
+            .context("thread has not been opened")?;
+        Ok(self
+            .transport
+            .client
+            .cancel_turn(agent_id, key.thread_id, key.turn_id)
+            .await?
+            .canceled_active_turn)
+    }
     fn runtime_host(&self) -> Arc<dyn crate::runtime_host::RuntimeHost> {
         Arc::new(crate::TokioRuntimeHost)
     }
@@ -198,6 +245,8 @@ impl Harness<ProviderTurn> for HttpProvider {
                         work.agent.record().id,
                         work.thread.record().id,
                         SubmitTurnBody {
+                            idempotency_key: work.options.idempotency_key,
+                            attention: work.options.attention,
                             input: Some(OneOrMany::Many(work.request.input)),
                             session_id: work.request.session_id,
                             model: self.transport.model.clone(),

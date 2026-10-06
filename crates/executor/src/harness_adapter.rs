@@ -57,6 +57,24 @@ pub(crate) struct ExecutorHarness {
 }
 
 impl ExecutorHarness {
+    pub(crate) async fn wait_for_turn(&self, key: HarnessTurnKey) {
+        loop {
+            let idle = self.idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if !self
+                .active
+                .lock()
+                .expect("active harness turns poisoned")
+                .turns
+                .contains_key(&key)
+            {
+                return;
+            }
+            idle.await;
+        }
+    }
+
     pub(crate) fn is_active(&self, key: HarnessTurnKey) -> bool {
         self.active
             .lock()

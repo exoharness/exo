@@ -418,7 +418,8 @@ async fn saved_http_turn_survives_disconnect_and_replays_completion() -> Result<
         .client
         .watch(f.agent_id, thread.id, &Default::default())
         .await?;
-    let body = SubmitTurnBody::<()> {
+    let body: SubmitTurnBody = SubmitTurnBody {
+        idempotency_key: Some("saved-turn".into()),
         input: Some(OneOrMany::One(crate::harness_helpers::user_message(
             "hello",
         ))),
@@ -475,6 +476,15 @@ async fn saved_http_turn_survives_disconnect_and_replays_completion() -> Result<
             .iter()
             .all(|e| !matches!(e.data, EventData::LinguaStreamChunk { .. }))
     );
+    let provider = HttpProvider::new(f.client.clone());
+    let (retried, mut retry_stream) = provider.send_stream(f.agent_id, thread.id, body).await?;
+    assert_eq!(retried.id, receipt.turn.id);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), retry_stream.next()).await?,
+        Some(Ok(crate::ExecutionStreamEvent::Completed(_)))
+    ));
+    assert!(retry_stream.next().await.is_none());
+    crate::harness::Harness::shutdown(&provider).await?;
     let second = f
         .client
         .submit_turn(f.agent_id, thread.id, &SubmitTurnBody::<()>::default())
@@ -1064,12 +1074,16 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
                     None,
                 )
                 .await?;
-            let (reconnected, mut events) = tokio::time::timeout(
-                Duration::from_secs(5),
-                runtime.reconnect_turn(thread.as_ref()),
-            )
-            .await??
-            .context("live turn")?;
+            // Acceptance precedes execution; reconnect follows the executing turn.
+            let (reconnected, mut events) = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(reconnected) = runtime.reconnect_turn(thread.as_ref()).await? {
+                        return Ok::<_, anyhow::Error>(reconnected);
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
             assert_eq!(reconnected.id, turn.id);
             f.release.add_permits(1);
             tokio::time::timeout(Duration::from_secs(5), async {

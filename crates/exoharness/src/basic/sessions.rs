@@ -8,8 +8,8 @@ use crate::{AgentId, ResourceScope};
 
 /// Process ownership is scoped to the sandbox's thread (or agent scope).
 /// The OS releases each lease on a crash; a new owner then recovers its VMs.
-// TODO: Move execution ownership behind a TurnCoordinator abstraction;
-// local file leases should remain a BasicExoHarness implementation detail.
+// TurnCoordinator owns execution ordering. These leases also protect thread
+// mutations and retained VMs between turns, so their lifetime stays separate.
 pub(super) struct LocalSessions {
     root: PathBuf,
     state: std::sync::Mutex<SessionState>,

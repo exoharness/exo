@@ -938,6 +938,7 @@ export default {
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
         let work = crate::harness_executor::RecoverableTurn {
+            streaming: false,
             agent_config: config,
             thread_config: ConversationConfig::default(),
             request: SendRequest {
@@ -947,6 +948,7 @@ export default {
         };
         let turn = thread
             .begin_turn(BeginTurnRequest {
+                turn: None,
                 session_id: None,
                 input: vec![],
                 initial_events: vec![
@@ -1056,6 +1058,7 @@ export default {
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
         let work = crate::harness_executor::RecoverableTurn {
+            streaming: false,
             agent_config: config,
             thread_config: ConversationConfig::default(),
             request: SendRequest {
@@ -1065,6 +1068,7 @@ export default {
         };
         let turn = thread
             .begin_turn(BeginTurnRequest {
+                turn: None,
                 session_id: None,
                 input: vec![],
                 initial_events: vec![

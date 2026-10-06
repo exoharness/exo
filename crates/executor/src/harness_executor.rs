@@ -16,7 +16,6 @@ use futures::future::BoxFuture;
 use tokio::sync::{Notify, OnceCell, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use crate::conversation_lock::conversation_send_lock;
 use crate::execution_tracing::{ExecutionTracer, TurnExecutionTrace};
 use crate::harness::{
     Harness, HarnessCommand, HarnessEventSink, HarnessTurnKey, HarnessTurnOutcome,
@@ -175,10 +174,12 @@ mod recovery_gate_tests {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RecoverableTurn {
-    pub(crate) agent_config: AgentConfig,
-    pub(crate) thread_config: ConversationConfig,
-    pub(crate) request: SendRequest,
+pub struct RecoverableTurn {
+    #[serde(default)]
+    pub streaming: bool,
+    pub agent_config: AgentConfig,
+    pub thread_config: ConversationConfig,
+    pub request: SendRequest,
 }
 
 impl RecoverableTurn {
@@ -299,11 +300,34 @@ pub struct Runtime {
     recovery: Arc<OnceCell<()>>,
     recovery_gate: Arc<RecoveryGate>,
     recovery_agent_concurrency: Arc<AtomicUsize>,
-    recovery_thread_concurrency: Arc<AtomicUsize>,
+    recovery_capacity: Arc<Mutex<Arc<tokio::sync::Semaphore>>>,
     shutdown_hook: Option<ShutdownHook>,
 }
 
 impl Runtime {
+    pub(crate) async fn claim_recovery_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit> {
+        let capacity = self
+            .recovery_capacity
+            .lock()
+            .expect("recovery capacity poisoned")
+            .clone();
+        Ok(capacity.acquire_owned().await?)
+    }
+
+    pub(crate) async fn wait_for_recovery(&self, thread: exoharness::ThreadId) {
+        self.recovery_gate.wait(thread).await;
+    }
+    pub(crate) async fn execute_accepted_turn(
+        &self,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ConversationHandle>,
+        turn: TurnRecord,
+        work: crate::TurnWork,
+    ) -> Result<ExecutionStreamHandle> {
+        self.provider
+            .execute_accepted_turn(self, agent, thread, turn, work)
+            .await
+    }
     pub fn with_caller(&self, caller: exoharness::access::Caller) -> Result<Self> {
         let mut scoped = self.clone();
         scoped.provider = self.provider.with_caller(caller)?;
@@ -331,7 +355,7 @@ impl Runtime {
             recovery: Arc::default(),
             recovery_gate: Arc::default(),
             recovery_agent_concurrency: Arc::new(AtomicUsize::new(4)),
-            recovery_thread_concurrency: Arc::new(AtomicUsize::new(4)),
+            recovery_capacity: Arc::new(Mutex::new(Arc::new(tokio::sync::Semaphore::new(4)))),
             shutdown_hook: None,
         }
     }
@@ -350,8 +374,11 @@ impl Runtime {
     pub fn set_recovery_concurrency(&self, agents: NonZeroUsize, threads: NonZeroUsize) {
         self.recovery_agent_concurrency
             .store(agents.get(), Ordering::Relaxed);
-        self.recovery_thread_concurrency
-            .store(threads.get(), Ordering::Relaxed);
+        *self
+            .recovery_capacity
+            .lock()
+            .expect("recovery capacity poisoned") =
+            Arc::new(tokio::sync::Semaphore::new(threads.get()));
     }
 
     pub async fn recover_unfinished_turns(&self) -> Result<()> {
@@ -472,8 +499,12 @@ impl Runtime {
         provider: &crate::LocalProvider,
         resolver: Option<RecoveryRuntimeResolver>,
     ) -> Result<()> {
+        let mut queued = match &provider.turns.discovery {
+            Some(discovery) => discovery.pending_threads().await?,
+            None => Vec::new(),
+        };
         let agents = provider.state.list_agents().await?;
-        let listings = agents
+        let pending = agents
             .into_iter()
             .map(|agent| async move {
                 let result = agent
@@ -485,19 +516,21 @@ impl Runtime {
                 (agent, result)
             })
             .collect::<Vec<_>>();
-        let pages = futures::stream::iter(listings)
+        let listings = futures::stream::iter(pending)
             .buffer_unordered(self.recovery_agent_concurrency.load(Ordering::Relaxed))
             .collect::<Vec<_>>()
             .await;
         let mut threads = Vec::new();
-        for (agent, result) in pages {
+        for (agent, result) in listings {
             match result {
-                Ok(page) => threads.extend(page.threads.into_iter().filter_map(|thread| {
-                    (!self.recovery_gate.is_new_thread(thread.record().id))
-                        .then_some((Arc::clone(&agent), thread))
-                })),
+                Ok(page) => threads.extend(
+                    page.threads
+                        .into_iter()
+                        .filter(|thread| !self.recovery_gate.is_new_thread(thread.record().id))
+                        .map(|thread| (agent.clone(), thread)),
+                ),
                 Err(error) => {
-                    tracing::error!(agent_id = %agent.record().id, %error, "failed to list unfinished threads");
+                    tracing::error!(agent_id = %agent.record().id, %error, "failed to list unfinished threads")
                 }
             }
         }
@@ -505,40 +538,128 @@ impl Runtime {
             threads
                 .iter()
                 .map(|(_, thread)| thread.record().id)
+                .chain(queued.iter().map(|scope| scope.thread_id))
                 .collect(),
         );
-        let recoveries = threads
-            .into_iter()
-            .map(|(agent, thread)| {
-                let resolver = resolver.clone();
-                async move {
-                    let thread_id = thread.record().id;
-                    let result = self
-                        .recover_local_thread(provider, agent, thread, resolver)
-                        .await;
-                    self.recovery_gate.thread_done(thread_id);
-                    if let Err(error) = result {
-                        tracing::error!(%thread_id, %error, "failed to recover thread");
+        for (agent, thread) in threads {
+            let scope = exoharness::turn_coordinator::TurnThread {
+                agent_id: agent.record().id,
+                thread_id: thread.record().id,
+            };
+            // Main already journals running turns. Import those identities into
+            // the queue so both pre-queue and newly accepted work use one drain.
+            let imported = async {
+                let events = thread
+                    .get_events(Some(EventQuery {
+                        direction: Some(EventQueryDirection::Asc),
+                        types: Some(vec![
+                            EventKind::custom(RUNTIME_TURN_WORK),
+                            EventKind::TURN_STARTED,
+                            EventKind::TURN_ENDED,
+                        ]),
+                        ..Default::default()
+                    }))
+                    .await?
+                    .events;
+                let ended: HashSet<_> = events
+                    .iter()
+                    .filter(|event| matches!(event.data, EventData::TurnEnded))
+                    .filter_map(|event| event.turn_id)
+                    .collect();
+                let callers: std::collections::HashMap<_, _> = events
+                    .iter()
+                    .filter_map(|event| match &event.data {
+                        EventData::TurnStarted { user_id } => {
+                            event.turn_id.map(|id| (id, user_id.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                for event in events {
+                    let (Some(id), Some(session_id)) = (event.turn_id, event.session_id) else {
+                        continue;
+                    };
+                    if ended.contains(&id) {
+                        continue;
+                    }
+                    let EventData::Custom {
+                        event_type,
+                        payload,
+                    } = event.data
+                    else {
+                        continue;
+                    };
+                    if event_type != RUNTIME_TURN_WORK {
+                        continue;
+                    }
+                    let turn = TurnRecord { id, session_id };
+                    let work = match serde_json::from_value::<RecoverableTurn>(payload) {
+                        Ok(work) => work,
+                        Err(error) => {
+                            let handle = thread.turn_handle(turn).await?;
+                            handle
+                                .add_events(vec![EventData::Error {
+                                    message: error.to_string(),
+                                    metadata: None,
+                                }])
+                                .await?;
+                            handle.finish().await?;
+                            continue;
+                        }
+                    };
+                    provider
+                        .turns
+                        .coordinator
+                        .enqueue(
+                            scope,
+                            exoharness::turn_coordinator::QueuedTurn {
+                                turn,
+                                work,
+                                principal: callers.get(&id).cloned().flatten(),
+                                idempotency_key: None,
+                                attention: Default::default(),
+                                started: true,
+                                cancelled: false,
+                            },
+                        )
+                        .await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+            match imported {
+                Ok(()) => {
+                    if !queued.contains(&scope) {
+                        queued.push(scope);
                     }
                 }
-            })
-            .collect::<Vec<_>>();
-        futures::stream::iter(recoveries)
-            .buffer_unordered(self.recovery_thread_concurrency.load(Ordering::Relaxed))
-            .collect::<Vec<_>>()
-            .await;
+                Err(error) => {
+                    tracing::error!(?scope, %error, "failed to import unfinished thread");
+                    self.recovery_gate.thread_done(scope.thread_id);
+                }
+            }
+        }
+        for scope in queued {
+            if let Err(error) = self.drain_queue(provider, scope, resolver.clone()).await {
+                tracing::error!(?scope, %error, "failed to recover queued thread");
+            }
+            self.recovery_gate.thread_done(scope.thread_id);
+        }
         Ok(())
     }
 
-    async fn recover_local_thread(
+    pub(crate) async fn recover_local_thread(
         &self,
         provider: &crate::LocalProvider,
         agent: Arc<dyn AgentHandle>,
         thread: Arc<dyn ConversationHandle>,
         resolver: Option<RecoveryRuntimeResolver>,
+        only_turn: exoharness::TurnId,
+        mut recovery_slot: Option<tokio::sync::OwnedSemaphorePermit>,
     ) -> Result<()> {
         let events = thread
             .get_events(Some(EventQuery {
+                turn_id: Some(only_turn),
                 direction: Some(EventQueryDirection::Asc),
                 types: Some(vec![
                     EventKind::custom(RUNTIME_TURN_WORK),
@@ -769,13 +890,10 @@ impl Runtime {
                         work.thread_config,
                     )
                     .await?;
-                runtime.provider.runtime_host().spawn(Box::pin(async move {
-                    while let Some(event) = stream.next().await {
-                        if let Err(error) = event {
-                            tracing::error!(%turn_id, %error, "recovered turn failed");
-                        }
-                    }
-                }));
+                drop(recovery_slot.take());
+                while let Some(event) = stream.next().await {
+                    provider.turns.broadcast(HarnessTurnKey::new(thread.record().id, turn_id), event);
+                }
                 Ok::<(), anyhow::Error>(())
             }
             .await;
@@ -808,10 +926,31 @@ impl Runtime {
         streaming: bool,
         config_override: Option<AgentConfig>,
     ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
+        self.start_turn_with_options(
+            agent,
+            thread,
+            request,
+            streaming,
+            config_override,
+            Default::default(),
+        )
+        .await
+    }
+
+    pub async fn start_turn_with_options(
+        &self,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ConversationHandle>,
+        request: SendRequest,
+        streaming: bool,
+        config_override: Option<AgentConfig>,
+        options: crate::TurnOptions,
+    ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
         let (receipt, response) = tokio::sync::oneshot::channel();
         self.provider
             .harness()
             .submit(HarnessCommand::StartTurn(crate::provider::ProviderTurn {
+                options,
                 agent,
                 thread,
                 request,
@@ -835,7 +974,26 @@ impl Runtime {
         streaming: bool,
         config_override: Option<AgentConfig>,
         recovery: Option<(TurnRecord, ConversationConfig)>,
+        accepted: Option<(TurnRecord, ConversationConfig)>,
     ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
+        if let Some((record, _)) = accepted.as_ref().or(recovery.as_ref()) {
+            let mut active = provider
+                .turns
+                .active
+                .lock()
+                .expect("active queue owners poisoned");
+            anyhow::ensure!(
+                !provider.turns.draining.load(Ordering::SeqCst),
+                "runtime is shutting down"
+            );
+            active.insert(
+                exoharness::turn_coordinator::TurnThread {
+                    agent_id: agent.record().id,
+                    thread_id: thread.record().id,
+                },
+                (provider.harness.clone(), record.id),
+            );
+        }
         if recovery.is_none() {
             self.recovery_gate.wait(thread.record().id).await;
         }
@@ -846,9 +1004,6 @@ impl Runtime {
                     .init(HarnessEventSink::new(self.events.clone()))
             })
             .await?;
-        let guard = conversation_send_lock(&thread.record().id.to_string())
-            .lock_owned()
-            .await;
         if recovery.is_none() && thread.activate_caller().await? {
             provider.executor.reset_thread(thread.record().id).await?;
         }
@@ -867,7 +1022,10 @@ impl Runtime {
             async {
                 match recovery.as_ref() {
                     Some((_, config)) => Ok(config.clone()),
-                    None => self.get_conversation_config(thread.as_ref()).await,
+                    None => match &accepted {
+                        Some((_, config)) => Ok(config.clone()),
+                        None => self.get_conversation_config(thread.as_ref()).await,
+                    },
                 }
             },
         )?;
@@ -915,12 +1073,14 @@ impl Runtime {
             Some((record, _)) => thread.turn_handle(record).await?,
             None => {
                 let work = RecoverableTurn {
+                    streaming,
                     agent_config: agent_config.clone(),
                     thread_config: thread_config.clone(),
                     request: request.clone(),
                 };
                 thread
                     .begin_turn(BeginTurnRequest {
+                        turn: accepted.map(|(record, _)| record),
                         session_id: request.session_id,
                         input: request.input.clone(),
                         initial_events: vec![work.event()?],
@@ -987,18 +1147,8 @@ impl Runtime {
             }
             return Err(error);
         }
-        let harness = Arc::clone(&provider.harness);
         finalizers.spawn(async move {
-            let _guard = guard;
-            let outcome = tokio::select! {
-                outcome = &mut completion => outcome,
-                () = event_tx.closed() => {
-                    if let Err(error) = harness.submit(HarnessCommand::CancelTurn { key }).await {
-                        tracing::error!(?key, %error, "failed to cancel disconnected harness turn");
-                    }
-                    completion.await
-                },
-            };
+            let outcome = (&mut completion).await;
             let latest_event_id = match outcome {
                 Ok(HarnessTurnOutcome::Completed(_)) => {
                     let marked = completion_thread
@@ -1135,18 +1285,12 @@ impl Runtime {
     }
 
     pub async fn cancel_turn(&self, key: HarnessTurnKey) -> Result<bool> {
-        if !self.events.contains(key) {
-            return Ok(false);
-        }
-        self.cancel(key).await?;
-        Ok(true)
+        self.provider.cancel_turn(key).await
     }
 
     pub async fn cancel(&self, key: HarnessTurnKey) -> Result<()> {
-        self.provider
-            .harness()
-            .submit(HarnessCommand::CancelTurn { key })
-            .await
+        self.provider.cancel_turn(key).await?;
+        Ok(())
     }
 
     pub async fn flush_tracing(&self) -> Result<()> {

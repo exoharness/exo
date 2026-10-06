@@ -46,7 +46,7 @@ chrono.workspace = true
 cost = { path = "../cost" }
 exo-mcp = { path = "../mcp", optional = true }
 exo-managed-agents = { path = "../managed-agents", default-features = false }
-exoharness = { path = "../exoharness" }
+exoharness = { path = "../exoharness", features = ["store"] }
 encoding_rs = "0.8.35"
 futures.workspace = true
 lingua.workspace = true

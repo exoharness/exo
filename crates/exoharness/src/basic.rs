@@ -70,6 +70,9 @@ mod resource_tests;
 
 const UNFINISHED_TURNS_DIR: &str = "recovery/unfinished_turns";
 
+#[path = "basic/turn_queue.rs"]
+mod turn_queue;
+
 #[derive(Serialize, Deserialize)]
 struct StoredEventBatch {
     events: Vec<Event>,
@@ -204,6 +207,7 @@ pub struct BasicExoHarness {
 }
 
 struct BasicExoHarnessInner {
+    turn_queue_locks: Arc<crate::turn_coordinator::TurnQueueLocks>,
     access_policy: std::sync::OnceLock<Arc<dyn crate::access::AccessPolicy>>,
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
@@ -282,6 +286,7 @@ impl BasicExoHarness {
         Ok(Self {
             caller: None,
             inner: Arc::new(BasicExoHarnessInner {
+                turn_queue_locks: Arc::default(),
                 access_policy: Default::default(),
                 vaults: BasicVaultStore::hosted(storage.clone(), cipher.clone()),
                 storage,
@@ -1695,11 +1700,17 @@ impl ConversationHandle for BasicConversationHandle {
         let mut record = self.load_record().await?;
         let conversation_dir = self.conversation_dir();
 
-        let session_id = request.session_id.unwrap_or_else(Uuid7::now);
-        let turn_record = TurnRecord {
+        let turn_record = request.turn.unwrap_or_else(|| TurnRecord {
             id: Uuid7::now(),
-            session_id,
-        };
+            session_id: request.session_id.unwrap_or_else(Uuid7::now),
+        });
+        anyhow::ensure!(
+            request
+                .session_id
+                .is_none_or(|id| id == turn_record.session_id),
+            "accepted turn belongs to a different session"
+        );
+        let session_id = turn_record.session_id;
         // Write the marker first: a crash may leave an extra candidate to scan,
         // but cannot leave an admitted turn absent from the recovery index.
         self.harness
