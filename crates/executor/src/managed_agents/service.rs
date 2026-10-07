@@ -717,7 +717,7 @@ pub async fn submit_turn(
     streaming: bool,
 ) -> Result<(SubmitTurnResult, crate::ExecutionStreamHandle)> {
     let (turn, stream) = runtime
-        .start_turn_with_options(
+        .start_turn(
             agent.clone(),
             thread.clone(),
             prepared.request,

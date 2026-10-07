@@ -24,8 +24,8 @@ pub mod permissions;
 mod provider;
 mod turn_queue;
 pub use exoharness::runtime_host;
+pub use exoharness::turn_coordinator::TurnOptions;
 pub use harness_executor::TurnWork;
-pub use turn_queue::TurnOptions;
 pub mod sandbox_policy;
 mod shared;
 

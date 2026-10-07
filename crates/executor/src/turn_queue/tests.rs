@@ -181,6 +181,7 @@ impl Fixture {
                 request(),
                 false,
                 None,
+                Default::default(),
             )
             .await
     }
@@ -284,6 +285,7 @@ async fn continued_turns_do_not_restart_implicit_or_explicit_sessions() -> Resul
                 },
                 false,
                 None,
+                Default::default(),
             )
             .await?;
         if let Some(session_id) = session_id {
@@ -305,13 +307,21 @@ async fn continued_turns_do_not_restart_implicit_or_explicit_sessions() -> Resul
                 continuing.clone(),
                 false,
                 None,
+                Default::default(),
             )
             .await?;
         assert_eq!(second.session_id, first.session_id);
         f.started(second.id).await?;
         let (cancelled, cancelled_stream) = f
             .runtime
-            .start_turn(f.agent.clone(), f.thread.clone(), continuing, false, None)
+            .start_turn(
+                f.agent.clone(),
+                f.thread.clone(),
+                continuing,
+                false,
+                None,
+                Default::default(),
+            )
             .await?;
         assert_eq!(cancelled.session_id, first.session_id);
         assert!(f.runtime.cancel_turn(f.key(&cancelled)).await?);
@@ -412,7 +422,7 @@ async fn queued_cancellation_skips_execution_and_interrupt_starts_its_replacemen
     assert!(f.runtime.cancel_turn(f.key(&cancelled)).await?);
     let (replacement, stream) = f
         .runtime
-        .start_turn_with_options(
+        .start_turn(
             f.agent.clone(),
             f.thread.clone(),
             request(),
@@ -712,7 +722,14 @@ async fn rejected_submission_is_finalized_exactly_once() -> Result<()> {
     provider.harness.shutdown().await?;
     let runtime = Runtime::new(provider, None);
     let (turn, stream) = runtime
-        .start_turn(f.agent.clone(), f.thread.clone(), request(), false, None)
+        .start_turn(
+            f.agent.clone(),
+            f.thread.clone(),
+            request(),
+            false,
+            None,
+            Default::default(),
+        )
         .await?;
     assert!(finish(stream).await.is_err());
     assert_eq!(
@@ -867,7 +884,7 @@ async fn live_drain_can_finish_before_enqueue_returns_without_losing_the_observe
     let (runtime, agent, thread) = (f.runtime.clone(), f.agent.clone(), f.thread.clone());
     let next = tokio::spawn(async move {
         runtime
-            .start_turn(agent, thread, request(), false, None)
+            .start_turn(agent, thread, request(), false, None, Default::default())
             .await
     });
     let second_id = tokio::time::timeout(Duration::from_secs(5), published_rx.recv())
@@ -1087,6 +1104,7 @@ async fn unsupported_suspension_preserves_running_and_queued_controls() -> Resul
                 request(),
                 false,
                 Some(config.clone()),
+                Default::default(),
             )
             .await?;
         if running {

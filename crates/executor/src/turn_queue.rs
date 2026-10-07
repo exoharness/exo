@@ -6,7 +6,7 @@ use std::sync::{
 
 use anyhow::{Context, Result, anyhow, ensure};
 use exoharness::turn_coordinator::{
-    QueuedTurn, TurnAuthority, TurnControl, TurnControlOutcome, TurnLease, TurnQueue,
+    QueuedTurn, TurnAuthority, TurnControl, TurnControlOutcome, TurnLease, TurnOptions, TurnQueue,
     TurnSubmission, TurnThread,
 };
 use exoharness::{
@@ -24,8 +24,6 @@ use crate::{
 
 #[cfg(all(test, feature = "native"))]
 mod tests;
-
-pub use exoharness::turn_coordinator::TurnOptions;
 
 #[derive(Debug)]
 pub(crate) struct TurnSuspended;
@@ -247,16 +245,45 @@ impl LocalProvider {
         self
     }
 
-    pub(crate) async fn control_queued_turn(
+    pub(crate) async fn cancel_queued_turn(
         &self,
+        runtime: &Runtime,
         key: HarnessTurnKey,
-        control: TurnControl,
     ) -> Result<bool> {
+        let _admission = self.turns.admission.read().await;
+        ensure!(
+            !self.turns.draining.load(Ordering::SeqCst),
+            "runtime is shutting down"
+        );
         let thread = TurnThread {
             agent_id: key.agent_id,
             thread_id: key.thread_id,
         };
-        if control == TurnControl::Suspend {
+        let outcome = self
+            .turns
+            .coordinator
+            .cancel(thread, key.turn_id, self.turn_authority())
+            .await?;
+        self.finish_queued_control(runtime, key, outcome, TurnControl::Cancel)
+            .await
+    }
+
+    pub(crate) async fn set_queued_suspended(
+        &self,
+        runtime: &Runtime,
+        key: HarnessTurnKey,
+        suspended: bool,
+    ) -> Result<bool> {
+        let _admission = self.turns.admission.read().await;
+        ensure!(
+            !self.turns.draining.load(Ordering::SeqCst),
+            "runtime is shutting down"
+        );
+        let thread = TurnThread {
+            agent_id: key.agent_id,
+            thread_id: key.thread_id,
+        };
+        if suspended {
             let Some(entry) = self.turns.coordinator.get(thread, key.turn_id).await? else {
                 return Ok(false);
             };
@@ -264,29 +291,45 @@ impl LocalProvider {
                 return Ok(false);
             }
         }
-        let authority = match self.state.caller() {
+        let outcome = self
+            .turns
+            .coordinator
+            .set_suspended(thread, key.turn_id, self.turn_authority(), suspended)
+            .await?;
+        let control = if suspended {
+            TurnControl::Suspend
+        } else {
+            TurnControl::Run
+        };
+        self.finish_queued_control(runtime, key, outcome, control)
+            .await
+    }
+
+    fn turn_authority(&self) -> TurnAuthority {
+        match self.state.caller() {
             Some(caller) => TurnAuthority::Submitter(caller.principal.clone()),
             None => TurnAuthority::ThreadOwner,
-        };
-        let outcome = if control == TurnControl::Cancel {
-            self.turns
-                .coordinator
-                .cancel(thread, key.turn_id, authority)
-                .await?
-        } else {
-            self.turns
-                .coordinator
-                .set_suspended(
-                    thread,
-                    key.turn_id,
-                    authority,
-                    control == TurnControl::Suspend,
-                )
-                .await?
-        };
+        }
+    }
+
+    async fn finish_queued_control(
+        &self,
+        runtime: &Runtime,
+        key: HarnessTurnKey,
+        outcome: TurnControlOutcome,
+        control: TurnControl,
+    ) -> Result<bool> {
         match outcome {
             TurnControlOutcome::Queued | TurnControlOutcome::Running => {
                 self.turns.signal(key, control).await?;
+                let scope = TurnThread {
+                    agent_id: key.agent_id,
+                    thread_id: key.thread_id,
+                };
+                if let Err(error) = runtime.spawn_queue(self, scope).await {
+                    self.turns.stop_observers(key, &error);
+                    tracing::error!(?scope, %error, "controlled turn retained; failed to wake queue");
+                }
                 Ok(true)
             }
             TurnControlOutcome::NotAccessible => {
@@ -298,31 +341,6 @@ impl LocalProvider {
 }
 
 impl Runtime {
-    pub(crate) async fn control_local_turn(
-        &self,
-        provider: &LocalProvider,
-        key: HarnessTurnKey,
-        control: TurnControl,
-    ) -> Result<bool> {
-        let _admission = provider.turns.admission.read().await;
-        ensure!(
-            !provider.turns.draining.load(Ordering::SeqCst),
-            "runtime is shutting down"
-        );
-        if !provider.control_queued_turn(key, control).await? {
-            return Ok(false);
-        }
-        let scope = TurnThread {
-            agent_id: key.agent_id,
-            thread_id: key.thread_id,
-        };
-        if let Err(error) = self.spawn_queue(provider, scope).await {
-            provider.turns.stop_observers(key, &error);
-            tracing::error!(?scope, %error, "controlled turn retained; failed to wake queue");
-        }
-        Ok(true)
-    }
-
     pub(crate) async fn accept_local_turn(
         &self,
         provider: &LocalProvider,
@@ -451,10 +469,7 @@ impl Runtime {
     ) -> Result<ExecutionStreamHandle> {
         let (sender, receiver) = mpsc::unbounded_channel();
         provider.turns.register_observer(key, self, sender.clone());
-        match self
-            .control_local_turn(provider, key, TurnControl::Run)
-            .await
-        {
+        match provider.set_queued_suspended(self, key, false).await {
             Ok(true) => {}
             result => {
                 let mut contexts = provider

@@ -1022,6 +1022,7 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
             },
             false,
             None,
+            Default::default(),
         )
         .await?;
     let (approval_id, events) = tokio::time::timeout(Duration::from_secs(3), async {
@@ -1234,6 +1235,7 @@ async fn new_turn_queues_behind_older_work_before_startup_recovery() -> Result<(
         },
         false,
         None,
+        Default::default(),
     );
     let (new_record, mut stream) = tokio::time::timeout(Duration::from_secs(3), new_turn).await??;
     runtime.recover_unfinished_turns().await?;
@@ -1297,6 +1299,7 @@ async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<
             },
             false,
             None,
+            Default::default(),
         )
         .await?;
     tokio::time::timeout(Duration::from_secs(3), blocked_model.entered.notified()).await?;
@@ -1389,6 +1392,7 @@ async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
             },
             false,
             Some(config),
+            Default::default(),
         )
         .await?;
     tokio::time::timeout(Duration::from_secs(3), blocked_model.entered.notified()).await?;

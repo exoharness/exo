@@ -384,25 +384,6 @@ impl Runtime {
         request: SendRequest,
         streaming: bool,
         config_override: Option<AgentConfig>,
-    ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
-        self.start_turn_with_options(
-            agent,
-            thread,
-            request,
-            streaming,
-            config_override,
-            Default::default(),
-        )
-        .await
-    }
-
-    pub async fn start_turn_with_options(
-        &self,
-        agent: Arc<dyn AgentHandle>,
-        thread: Arc<dyn ConversationHandle>,
-        request: SendRequest,
-        streaming: bool,
-        config_override: Option<AgentConfig>,
         options: crate::TurnOptions,
     ) -> Result<(exoharness::TurnRecord, ExecutionStreamHandle)> {
         let (receipt, response) = tokio::sync::oneshot::channel();
@@ -691,7 +672,14 @@ impl Runtime {
         request: SendRequest,
     ) -> Result<SendResult> {
         let (_, mut events) = self
-            .start_turn(agent, conversation, request, false, None)
+            .start_turn(
+                agent,
+                conversation,
+                request,
+                false,
+                None,
+                Default::default(),
+            )
             .await?;
         while let Some(event) = events.next().await {
             match event? {
@@ -711,7 +699,7 @@ impl Runtime {
         conversation: Arc<dyn ConversationHandle>,
         request: SendRequest,
     ) -> Result<ExecutionStreamHandle> {
-        self.start_turn(agent, conversation, request, true, None)
+        self.start_turn(agent, conversation, request, true, None, Default::default())
             .await
             .map(|(_, stream)| stream)
     }

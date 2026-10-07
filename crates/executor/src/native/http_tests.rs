@@ -546,7 +546,14 @@ async fn local_and_http_providers_use_the_same_runtime_contract() -> Result<()> 
             session_id: None,
         };
         let (turn, mut stream) = runtime
-            .start_turn(agent.clone(), thread.clone(), request.clone(), true, None)
+            .start_turn(
+                agent.clone(),
+                thread.clone(),
+                request.clone(),
+                true,
+                None,
+                Default::default(),
+            )
             .await?;
         f.release.add_permits(1);
         let completed = tokio::time::timeout(Duration::from_secs(5), async {
@@ -581,7 +588,14 @@ async fn local_and_http_providers_use_the_same_runtime_contract() -> Result<()> 
         );
 
         let (turn, mut stream) = runtime
-            .start_turn(agent, thread.clone(), request, true, None)
+            .start_turn(
+                agent,
+                thread.clone(),
+                request,
+                true,
+                None,
+                Default::default(),
+            )
             .await?;
         runtime
             .cancel_turn(HarnessTurnKey::new(f.agent_id, thread.record().id, turn.id))
@@ -667,6 +681,7 @@ async fn managed_agents_created_locally_resume_over_http() -> Result<()> {
                 },
                 true,
                 None,
+                Default::default(),
             )
             .await?;
         f.release.add_permits(1);
@@ -725,6 +740,7 @@ async fn http_runtime_preserves_server_failure_and_turn_id() -> Result<()> {
             },
             true,
             None,
+            Default::default(),
         )
         .await?;
     f.release.add_permits(1);
@@ -823,6 +839,7 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                     },
                     true,
                     None,
+                    Default::default(),
                 )
                 .await?;
             session = Some(turn.session_id);
@@ -972,6 +989,7 @@ async fn saved_policy_changes_apply_to_existing_local_and_http_threads() -> Resu
                     },
                     true,
                     None,
+                    Default::default(),
                 )
                 .await?;
             let mut saw_approval = false;
@@ -1078,6 +1096,7 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
                     },
                     true,
                     None,
+                    Default::default(),
                 )
                 .await?;
             // Acceptance precedes execution; reconnect follows the executing turn.

@@ -660,6 +660,7 @@ impl ChatRepl {
                 },
                 true,
                 None,
+                Default::default(),
             ))
             .await?;
         self.observe_turn(turn, stream, started).await

@@ -333,6 +333,7 @@ async fn queued_turn_waits_for_cancelled_execution_cleanup() -> Result<()> {
             fixture.request(),
             true,
             None,
+            Default::default(),
         )
         .await?;
     executor.started.notified().await;

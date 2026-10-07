@@ -162,22 +162,14 @@ impl Provider for LocalProvider {
         runtime: &Runtime,
         key: crate::harness::HarnessTurnKey,
     ) -> Result<bool> {
-        runtime
-            .control_local_turn(self, key, exoharness::turn_coordinator::TurnControl::Cancel)
-            .await
+        self.cancel_queued_turn(runtime, key).await
     }
     async fn suspend_turn(
         &self,
         runtime: &Runtime,
         key: crate::harness::HarnessTurnKey,
     ) -> Result<bool> {
-        runtime
-            .control_local_turn(
-                self,
-                key,
-                exoharness::turn_coordinator::TurnControl::Suspend,
-            )
-            .await
+        self.set_queued_suspended(runtime, key, true).await
     }
     async fn resume_suspended_turn(
         &self,
