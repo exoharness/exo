@@ -464,8 +464,7 @@ pub async fn delete_agent(service: &Service<'_>, path: &AgentPath) -> Result<boo
     service.require_full_provider()?;
     service
         .runtime
-        .exoharness_handle()
-        .delete_agent(&path.agent_id)
+        .delete_agent_by_id(&path.agent_id)
         .await
         .map_err(bad_request)
 }
@@ -620,8 +619,9 @@ pub async fn attach_thread_vaults(
 
 pub async fn delete_thread(service: &Service<'_>, path: &ThreadPath) -> Result<DeleteThreadResult> {
     let agent = service.agent(path.agent_id).await?;
-    let deleted = agent
-        .delete_thread(&path.thread_id)
+    let deleted = service
+        .runtime
+        .delete_conversation_by_id(agent.as_ref(), &path.thread_id)
         .await
         .map_err(bad_request)?;
     Ok(DeleteThreadResult {

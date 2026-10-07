@@ -176,6 +176,8 @@ type ShutdownHook = Arc<dyn Fn() -> BoxFuture<'static, Result<()>> + Send + Sync
 pub struct Runtime {
     provider: Arc<dyn Provider>,
     root_provider: Arc<dyn Provider>,
+    #[cfg(feature = "native")]
+    previews: Arc<OnceCell<crate::previews::PreviewProxy>>,
     initialized: Arc<OnceCell<()>>,
     events: Arc<HarnessEvents>,
     finalizers: Arc<tokio::sync::Mutex<TaskGroup>>,
@@ -235,6 +237,8 @@ impl Runtime {
         Self {
             provider: provider.clone(),
             root_provider: provider,
+            #[cfg(feature = "native")]
+            previews: Arc::default(),
             initialized: Arc::default(),
             events: Arc::default(),
             finalizers: Arc::new(tokio::sync::Mutex::new(TaskGroup::new(host))),
@@ -244,6 +248,102 @@ impl Runtime {
             recovery_capacity: Arc::default(),
             shutdown_hook: None,
         }
+    }
+
+    /// Own a single preview listener for every thread served by this runtime.
+    #[cfg(feature = "native")]
+    pub async fn start_preview_server(
+        &self,
+        root: &std::path::Path,
+        domain: &str,
+        only_agent: Option<exoharness::AgentId>,
+    ) -> Result<crate::PreviewEndpoint> {
+        let proxy = self
+            .previews
+            .get_or_try_init(|| crate::previews::PreviewProxy::start_server(root, domain))
+            .await?;
+        for agent in self.exoharness_handle().list_agents().await? {
+            if only_agent.is_some_and(|id| id != agent.record().id) {
+                continue;
+            }
+            for thread in agent.list_threads(Default::default()).await?.threads {
+                self.register_previews(agent.as_ref(), thread).await?;
+            }
+        }
+        Ok(proxy.endpoint.clone())
+    }
+
+    /// Own this inline thread's listener and retain its port across resumes.
+    #[cfg(feature = "native")]
+    pub async fn start_inline_previews(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<()> {
+        if thread
+            .record()
+            .environment
+            .as_ref()
+            .is_none_or(|env| env.config.tcp_ports.is_empty())
+        {
+            return Ok(());
+        }
+        let mut config = self.get_conversation_config(thread.as_ref()).await?;
+        let proxy = self
+            .previews
+            .get_or_try_init(|| {
+                crate::previews::PreviewProxy::start(config.preview_port, "localhost")
+            })
+            .await?;
+        if config.preview_port != Some(proxy.endpoint.port) {
+            config.preview_port = Some(proxy.endpoint.port);
+            self.put_conversation_config(thread.as_ref(), config)
+                .await?;
+        }
+        self.register_previews(agent, thread).await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "native")]
+    pub(crate) fn active_preview_endpoint(&self) -> Option<crate::PreviewEndpoint> {
+        self.previews.get().map(|proxy| proxy.endpoint.clone())
+    }
+
+    /// Discover the owner's address; URLs are derived, never stored on the thread.
+    #[cfg(feature = "native")]
+    pub async fn preview_urls(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<Option<crate::PreviewUrls>> {
+        let endpoint = match self.active_preview_endpoint() {
+            Some(endpoint) => Some(endpoint),
+            None => {
+                self.provider
+                    .preview_endpoint(agent, thread.as_ref())
+                    .await?
+            }
+        };
+        let Some(endpoint) = endpoint else {
+            return Ok(None);
+        };
+        crate::previews_for(thread.record(), &endpoint)
+    }
+
+    #[cfg(feature = "native")]
+    pub async fn register_previews(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: Arc<dyn ConversationHandle>,
+    ) -> Result<Option<crate::PreviewUrls>> {
+        let previews = self.preview_urls(agent, thread.clone()).await?;
+        if let Some(proxy) = self.previews.get() {
+            match &previews {
+                Some(previews) => proxy.register(agent.record().id, thread, previews),
+                None => proxy.remove(thread.record().id),
+            }
+        }
+        Ok(previews)
     }
 
     /// Run cleanup after execution and finalizers have drained. Caller-scoped
@@ -475,6 +575,17 @@ impl Runtime {
                     .instructions
                     .push(crate::harness_helpers::system_message(&locations));
             }
+        }
+        #[cfg(feature = "native")]
+        if let Some(previews) = self
+            .register_previews(agent.as_ref(), thread.clone())
+            .await?
+        {
+            agent_config
+                .instructions
+                .push(crate::harness_helpers::system_message(
+                    &previews.instructions(),
+                ));
         }
         provider
             .executor
@@ -721,6 +832,10 @@ impl Runtime {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        #[cfg(feature = "native")]
+        if let Some(previews) = self.previews.get() {
+            previews.stop();
+        }
         let shutdown = self.provider.harness().shutdown().await;
         let mut finalizers = self.finalizers.lock().await;
         let mut finalizer_error = None;
@@ -813,6 +928,9 @@ impl Runtime {
         let opened =
             exo_managed_agents::open_thread(self.provider.as_ref(), agent, reference, request)
                 .await?;
+        #[cfg(feature = "native")]
+        self.register_previews(agent.as_ref(), opened.thread.clone())
+            .await?;
         Ok(opened)
     }
 
@@ -878,10 +996,16 @@ impl Runtime {
         else {
             return Ok(false);
         };
-        self.provider
-            .exoharness()
-            .delete_agent(&agent.record().id)
-            .await
+        self.delete_agent_by_id(&agent.record().id).await
+    }
+
+    pub(crate) async fn delete_agent_by_id(&self, agent_id: &exoharness::AgentId) -> Result<bool> {
+        let deleted = self.provider.exoharness().delete_agent(agent_id).await?;
+        #[cfg(feature = "native")]
+        if deleted && let Some(proxy) = self.previews.get() {
+            proxy.remove_agent(*agent_id);
+        }
+        Ok(deleted)
     }
 
     pub async fn get_conversation(
@@ -900,7 +1024,21 @@ impl Runtime {
         let Some(thread) = resolve_conversation_handle(agent, reference).await? else {
             return Ok(false);
         };
-        agent.delete_conversation(&thread.record().id).await
+        self.delete_conversation_by_id(agent, &thread.record().id)
+            .await
+    }
+
+    pub(crate) async fn delete_conversation_by_id(
+        &self,
+        agent: &dyn AgentHandle,
+        thread_id: &exoharness::ThreadId,
+    ) -> Result<bool> {
+        let deleted = agent.delete_conversation(thread_id).await?;
+        #[cfg(feature = "native")]
+        if deleted && let Some(proxy) = self.previews.get() {
+            proxy.remove(*thread_id);
+        }
+        Ok(deleted)
     }
 
     pub async fn create_conversation(
@@ -935,6 +1073,7 @@ impl Runtime {
             }
         };
         let conversation_config = ConversationConfig {
+            preview_port: None,
             resources: agent_config.resources.clone(),
             resource_mounts,
             sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),
