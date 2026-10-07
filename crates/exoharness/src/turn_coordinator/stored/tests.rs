@@ -22,44 +22,44 @@ async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head()
         thread_id: Uuid7::now(),
     };
     let first = queued("alice", TurnAttention::Wake);
-    coordinator.enqueue(thread, first.clone()).await?;
+    coordinator.enqueue_turn(thread, first.clone(), ()).await?;
     let lease = coordinator.claim(thread).await?.unwrap();
     assert!(coordinator.claim(thread).await?.is_none());
     coordinator.start(&lease, first.turn.id).await?;
     let other = queued("bob", TurnAttention::Interrupt);
-    coordinator.enqueue(thread, other.clone()).await?;
+    coordinator.enqueue_turn(thread, other.clone(), ()).await?;
     assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().control,
+        coordinator.peek_turn(&lease).await?.unwrap().control,
         TurnControl::Run
     );
     assert_eq!(
         coordinator
-            .control(
-                thread,
-                first.turn.id,
-                TurnAuthority::Submitter("bob".into()),
-                TurnControl::Cancel
-            )
+            .cancel_turn(thread, first.turn.id, "bob", false)
             .await?,
         TurnControlOutcome::NotAccessible
     );
     let replacement = queued("alice", TurnAttention::Interrupt);
-    coordinator.enqueue(thread, replacement.clone()).await?;
+    coordinator
+        .enqueue_turn(thread, replacement.clone(), ())
+        .await?;
+    assert!(coordinator.turn_cancelled(&lease, first.turn.id).await?);
     assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().control,
+        coordinator.peek_turn(&lease).await?.unwrap().control,
         TurnControl::Cancel
     );
     assert!(!coordinator.release_if_idle(&lease).await?);
-    coordinator.acknowledge(&lease, first.turn.id).await?;
-    coordinator.acknowledge(&lease, first.turn.id).await?;
+    coordinator.complete_turn(&lease, first.turn.id).await?;
+    coordinator.complete_turn(&lease, first.turn.id).await?;
     assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().turn.id,
+        coordinator.peek_turn(&lease).await?.unwrap().turn.id,
         other.turn.id
     );
-    coordinator.acknowledge(&lease, other.turn.id).await?;
-    coordinator.acknowledge(&lease, replacement.turn.id).await?;
+    coordinator.complete_turn(&lease, other.turn.id).await?;
+    coordinator
+        .complete_turn(&lease, replacement.turn.id)
+        .await?;
     assert!(coordinator.release_if_idle(&lease).await?);
-    assert!(coordinator.peek(&lease).await.is_err());
+    assert!(coordinator.peek_turn(&lease).await.is_err());
     let next = coordinator.claim(thread).await?.unwrap();
     assert!(!Arc::ptr_eq(&next.identity, &lease.identity));
     Ok(())
@@ -74,19 +74,19 @@ async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter() ->
     };
     let mut first = queued("alice", TurnAttention::Wake);
     first.idempotency_key = Some("request-1".into());
-    coordinator.enqueue(thread, first.clone()).await?;
+    coordinator.enqueue_turn(thread, first.clone(), ()).await?;
     let lease = coordinator.claim(thread).await?.unwrap();
-    coordinator.acknowledge(&lease, first.turn.id).await?;
+    coordinator.complete_turn(&lease, first.turn.id).await?;
     let mut retry = first.clone();
     retry.turn = TurnRecord {
         id: Uuid7::now(),
         session_id: Uuid7::now(),
     };
-    let receipt = coordinator.enqueue(thread, retry.clone()).await?;
+    let receipt = coordinator.enqueue_turn(thread, retry.clone(), ()).await?;
     assert!(receipt.duplicate);
     assert_eq!(receipt.turn, first.turn);
     retry.principal = Some("bob".into());
-    assert!(!coordinator.enqueue(thread, retry).await?.duplicate);
+    assert!(!coordinator.enqueue_turn(thread, retry, ()).await?.duplicate);
     assert!(!coordinator.release_if_idle(&lease).await?);
     Ok(())
 }
@@ -101,8 +101,8 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
     };
     let first = queued("alice", TurnAttention::Wake);
     let second = queued("alice", TurnAttention::Wake);
-    coordinator.enqueue(thread, first.clone()).await?;
-    coordinator.enqueue(thread, second).await?;
+    coordinator.enqueue_turn(thread, first.clone(), ()).await?;
+    coordinator.enqueue_turn(thread, second, ()).await?;
     let lease = coordinator.claim(thread).await?.unwrap();
     coordinator
         .control(
@@ -121,10 +121,15 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
     assert!(coordinator.release_if_idle(&lease).await?);
     drop(control);
     drop(lease);
-    assert!(coordinator.enqueue(thread, first.clone()).await?.duplicate);
+    assert!(
+        coordinator
+            .enqueue_turn(thread, first.clone(), ())
+            .await?
+            .duplicate
+    );
     let lease = coordinator.claim(thread).await?.unwrap();
     assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().control,
+        coordinator.peek_turn(&lease).await?.unwrap().control,
         TurnControl::Suspend
     );
     assert_eq!(
@@ -168,7 +173,7 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
             .await
             .is_err()
     );
-    coordinator.acknowledge(&lease, first.turn.id).await?;
+    coordinator.complete_turn(&lease, first.turn.id).await?;
     drop(control);
     drop(lease);
     assert!(coordinator.locks.threads.lock().unwrap().is_empty());

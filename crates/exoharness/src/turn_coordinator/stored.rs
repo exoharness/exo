@@ -129,15 +129,21 @@ impl<Work: Clone + Send + Sync + 'static> StoredTurnCoordinator<Work> {
 }
 
 #[async_trait]
-impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<Work> for StoredTurnCoordinator<Work> {
-    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
-        self.store.pending_threads().await
-    }
+impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<QueuedTurn<Work>, TurnSubmission<Work>>
+    for StoredTurnCoordinator<Work>
+{
+    type Scope = TurnThread;
+    type Lease = TurnLease;
+    type EnqueueOptions = ();
+    type EnqueueOutcome = AcceptedTurn;
+    type CancelOutcome = TurnControlOutcome;
+    type Completion = Option<QueuedTurn<Work>>;
 
-    async fn enqueue(
+    async fn enqueue_turn(
         &self,
         thread: TurnThread,
         turn: TurnSubmission<Work>,
+        (): (),
     ) -> Result<AcceptedTurn> {
         let state_lock = self.locks.thread(thread);
         let mutation = state_lock.mutation.lock().await;
@@ -202,6 +208,73 @@ impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<Work> for StoredTurnCo
             duplicate: false,
         })
     }
+    async fn peek_turn(&self, lease: &TurnLease) -> Result<Option<QueuedTurn<Work>>> {
+        let state = self.locks.thread(lease.thread);
+        let mutation = state.mutation.lock().await;
+        mutation.check(lease)?;
+        Ok(self
+            .store
+            .load(lease.thread)
+            .await?
+            .pending
+            .front()
+            .cloned())
+    }
+    async fn complete_turn(
+        &self,
+        lease: &TurnLease,
+        turn: TurnId,
+    ) -> Result<Option<QueuedTurn<Work>>> {
+        let state_lock = self.locks.thread(lease.thread);
+        let mut mutation = state_lock.mutation.lock().await;
+        mutation.check(lease)?;
+        let mut state = self.store.load(lease.thread).await?;
+        if state.acknowledged == Some(turn) {
+            return Ok(state.pending.front().cloned());
+        }
+        ensure!(
+            state
+                .pending
+                .front()
+                .is_some_and(|head| head.turn.id == turn),
+            "turn is not the queue head"
+        );
+        state.pending.pop_front();
+        state.acknowledged = Some(turn);
+        self.store.save(lease.thread, &state).await?;
+        mutation.control.take();
+        Ok(state.pending.front().cloned())
+    }
+    async fn cancel_turn(
+        &self,
+        thread: TurnThread,
+        turn: TurnId,
+        user_id: &str,
+        is_thread_owner: bool,
+    ) -> Result<TurnControlOutcome> {
+        let authority = if is_thread_owner {
+            TurnAuthority::ThreadOwner
+        } else {
+            TurnAuthority::Submitter(user_id.to_owned())
+        };
+        self.control(thread, turn, authority, TurnControl::Cancel)
+            .await
+    }
+    async fn turn_cancelled(&self, lease: &TurnLease, turn: TurnId) -> Result<bool> {
+        let head = self
+            .peek_turn(lease)
+            .await?
+            .context("turn queue is empty")?;
+        ensure!(head.turn.id == turn, "turn is not the queue head");
+        Ok(head.control == TurnControl::Cancel)
+    }
+}
+
+#[async_trait]
+impl<Work: Clone + Send + Sync + 'static> TurnQueue<Work> for StoredTurnCoordinator<Work> {
+    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
+        self.store.pending_threads().await
+    }
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>> {
         let state = self.locks.thread(thread);
         let mut mutation = state.mutation.lock().await;
@@ -222,18 +295,6 @@ impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<Work> for StoredTurnCo
             .pending
             .into_iter()
             .find(|entry| entry.turn.id == turn))
-    }
-    async fn peek(&self, lease: &TurnLease) -> Result<Option<QueuedTurn<Work>>> {
-        let state = self.locks.thread(lease.thread);
-        let mutation = state.mutation.lock().await;
-        mutation.check(lease)?;
-        Ok(self
-            .store
-            .load(lease.thread)
-            .await?
-            .pending
-            .front()
-            .cloned())
     }
     async fn start(&self, lease: &TurnLease, turn: TurnId) -> Result<TurnStart<Work>> {
         let state_lock = self.locks.thread(lease.thread);
@@ -288,31 +349,6 @@ impl<Work: Clone + Send + Sync + 'static> TurnCoordinator<Work> for StoredTurnCo
         self.store.save(thread, &state).await?;
         mutation.notify(turn, control);
         Ok(outcome)
-    }
-    async fn acknowledge(
-        &self,
-        lease: &TurnLease,
-        turn: TurnId,
-    ) -> Result<Option<QueuedTurn<Work>>> {
-        let state_lock = self.locks.thread(lease.thread);
-        let mut mutation = state_lock.mutation.lock().await;
-        mutation.check(lease)?;
-        let mut state = self.store.load(lease.thread).await?;
-        if state.acknowledged == Some(turn) {
-            return Ok(state.pending.front().cloned());
-        }
-        ensure!(
-            state
-                .pending
-                .front()
-                .is_some_and(|head| head.turn.id == turn),
-            "turn is not the queue head"
-        );
-        state.pending.pop_front();
-        state.acknowledged = Some(turn);
-        self.store.save(lease.thread, &state).await?;
-        mutation.control.take();
-        Ok(state.pending.front().cloned())
     }
     async fn release_if_idle(&self, lease: &TurnLease) -> Result<bool> {
         let state = self.locks.thread(lease.thread);

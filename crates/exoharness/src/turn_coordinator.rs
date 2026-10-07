@@ -1,5 +1,5 @@
 //! Durable turn queues, independent of worker discovery and sandbox lifetime.
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -80,7 +80,7 @@ pub enum TurnAuthority {
 pub struct TurnLease {
     pub thread: TurnThread,
     pub(crate) identity: Arc<()>,
-    guard: Arc<dyn Any + Send + Sync>,
+    _guard: Arc<dyn Send + Sync>,
 }
 
 impl TurnLease {
@@ -88,39 +88,91 @@ impl TurnLease {
         Self {
             thread,
             identity: Arc::new(()),
-            guard: Arc::new(guard),
+            _guard: Arc::new(guard),
         }
-    }
-
-    /// Access the backend's ownership data, such as a distributed lease token.
-    pub fn guard<T: 'static>(&self) -> Option<&T> {
-        self.guard.downcast_ref()
     }
 }
 
+/// Ordered pending work. Hosts supply their own scope, ownership token, and
+/// admission results; queue payloads need not expose executor or journal state.
 #[async_trait]
-pub trait TurnCoordinator<Work: Send + Sync>: Send + Sync {
+pub trait TurnCoordinator<Work: Send + Sync, Submission: Send = Work>: Send + Sync {
+    type Scope: Send + Sync;
+    type Lease: Send + Sync;
+    type EnqueueOptions: Send;
+    type EnqueueOutcome: Send;
+    type CancelOutcome: Send;
+    type Completion: Send;
+
+    /// Append durably, deduplicate, and apply interruption atomically. The host
+    /// must arrange any durable wakeup before reporting acceptance.
+    async fn enqueue_turn(
+        &self,
+        scope: Self::Scope,
+        turn: Submission,
+        options: Self::EnqueueOptions,
+    ) -> Result<Self::EnqueueOutcome>;
+    /// Read the head without removing it, checking ownership.
+    async fn peek_turn(&self, lease: &Self::Lease) -> Result<Option<Work>>;
+    /// Authorize and persist cancellation. A backend may remove queued work or
+    /// retain it for its executor to terminalize; the outcome tells the host.
+    async fn cancel_turn(
+        &self,
+        scope: Self::Scope,
+        turn: TurnId,
+        user_id: &str,
+        is_thread_owner: bool,
+    ) -> Result<Self::CancelOutcome>;
+    /// Check cancellation and ownership during execution.
+    async fn turn_cancelled(&self, lease: &Self::Lease, turn: TurnId) -> Result<bool>;
+    /// Remove only the specified head after its terminal events are durable.
+    async fn complete_turn(&self, lease: &Self::Lease, turn: TurnId) -> Result<Self::Completion>;
+}
+
+/// Discovery and renewable ownership for hosts with competing workers.
+/// Journal writes are not fenced by this interface: a worker that loses its
+/// lease must stop when renewal or a cancellation check reports ownership loss.
+#[async_trait]
+pub trait WorkerTurnCoordinator<Work: Send + Sync>: TurnCoordinator<Work> {
+    type Owner: Send + Sync;
+
+    fn runtime_id(&self) -> &Self::Owner;
+    fn lease_expiration_timeout(&self) -> std::time::Duration;
+    async fn pending_turn_count(&self) -> Result<u64>;
+    async fn claim_ready_conversations(&self, max: usize) -> Result<Vec<Self::Lease>>;
+    async fn renew_conversation(&self, lease: &Self::Lease, processing: bool) -> Result<bool>;
+    async fn release_idle_conversation(&self, lease: &Self::Lease) -> Result<bool>;
+}
+
+/// Admission, recovery and suspension used by Exo's shared executor runtime.
+/// These capabilities do not impose extra storage state on other hosts.
+/// Completion must tolerate repeating the last acknowledgment without popping
+/// another head. Cancellation retains queued work for durable terminalization.
+#[async_trait]
+pub trait TurnQueue<Work: Send + Sync>:
+    TurnCoordinator<
+        QueuedTurn<Work>,
+        TurnSubmission<Work>,
+        Scope = TurnThread,
+        Lease = TurnLease,
+        EnqueueOptions = (),
+        EnqueueOutcome = AcceptedTurn,
+        CancelOutcome = TurnControlOutcome,
+        Completion = Option<QueuedTurn<Work>>,
+    >
+{
     /// Startup discovery for hosts serving multiple threads. Hosts waking a
-    /// known thread can use the default and drain that thread directly.
+    /// known thread can drain that thread directly.
     async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
         Ok(Vec::new())
     }
-    /// Preserve queue order and atomically apply interruption and deduplication.
-    /// The host owns durable wakeups (for example, setting a DO alarm) and must
-    /// arrange one before reporting acceptance to its caller.
-    async fn enqueue(&self, thread: TurnThread, turn: TurnSubmission<Work>)
-    -> Result<AcceptedTurn>;
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>>;
-    /// Read a pending turn's accepted work and control state.
     async fn get(&self, thread: TurnThread, turn: TurnId) -> Result<Option<QueuedTurn<Work>>>;
-    async fn peek(&self, lease: &TurnLease) -> Result<Option<QueuedTurn<Work>>>;
     /// Persist admission and subscribe atomically to control changes. The watch
-    /// emits the current state first, then changes without a gap. Distributed
-    /// backends must observe remote writes and report lost ownership or errors.
-    /// Suspended heads remain unstarted until explicitly resumed.
+    /// emits current state first, then changes without a gap, including ownership
+    /// loss. Suspended heads remain unstarted until explicitly resumed.
     async fn start(&self, lease: &TurnLease, turn: TurnId) -> Result<TurnStart<Work>>;
-    /// Persist a control request. Cancellation also makes a suspended head ready
-    /// for terminalization. Resume cannot undo cancellation.
+    /// Resume cannot undo cancellation.
     async fn control(
         &self,
         thread: TurnThread,
@@ -128,16 +180,7 @@ pub trait TurnCoordinator<Work: Send + Sync>: Send + Sync {
         authority: TurnAuthority,
         control: TurnControl,
     ) -> Result<TurnControlOutcome>;
-    /// Call after terminal events are durable. Repeating the last acknowledgment
-    /// must succeed without removing a different head. Return the next head.
-    async fn acknowledge(
-        &self,
-        lease: &TurnLease,
-        turn: TurnId,
-    ) -> Result<Option<QueuedTurn<Work>>>;
-    /// Atomically release an empty queue or a suspended head. Resume and enqueue
-    /// must race with this operation without losing a wakeup. Suspension retains
-    /// queue order, the unfinished journal, and the original turn identity.
+    /// Release only an empty queue or suspended head, without losing wakeups.
     async fn release_if_idle(&self, lease: &TurnLease) -> Result<bool>;
 }
 

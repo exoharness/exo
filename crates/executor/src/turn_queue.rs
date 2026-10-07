@@ -6,8 +6,8 @@ use std::sync::{
 
 use anyhow::{Context, Result, anyhow, ensure};
 use exoharness::turn_coordinator::{
-    QueuedTurn, TurnAttention, TurnAuthority, TurnControl, TurnControlOutcome, TurnCoordinator,
-    TurnLease, TurnSubmission, TurnThread,
+    QueuedTurn, TurnAttention, TurnAuthority, TurnControl, TurnControlOutcome, TurnLease,
+    TurnQueue, TurnSubmission, TurnThread,
 };
 use exoharness::{
     AgentHandle, EventData, EventQuery, EventQueryDirection, ThreadHandle, TurnRecord, Uuid7,
@@ -52,7 +52,7 @@ type ActiveTurn = (
 
 pub(crate) struct TurnQueueRuntime {
     pub(crate) admission: tokio::sync::RwLock<()>,
-    pub(crate) coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
+    pub(crate) coordinator: Arc<dyn TurnQueue<TurnWork>>,
     contexts: Mutex<HashMap<HarnessTurnKey, TurnContext>>,
     pub(crate) active: Mutex<HashMap<TurnThread, ActiveTurn>>,
     tasks: Mutex<TaskGroup>,
@@ -108,7 +108,7 @@ impl TurnQueueRuntime {
 
     pub(crate) fn new(
         host: Arc<dyn RuntimeHost>,
-        coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
+        coordinator: Arc<dyn TurnQueue<TurnWork>>,
     ) -> Self {
         Self {
             admission: Default::default(),
@@ -245,10 +245,7 @@ impl LocalProvider {
 
     /// Select queue persistence explicitly. Caller-scoped providers share this
     /// queue; sandbox ownership remains with the state implementation.
-    pub fn with_turn_coordinator(
-        mut self,
-        coordinator: Arc<dyn TurnCoordinator<TurnWork>>,
-    ) -> Self {
+    pub fn with_turn_coordinator(mut self, coordinator: Arc<dyn TurnQueue<TurnWork>>) -> Self {
         let turns = TurnQueueRuntime::new(self.host.clone(), coordinator);
         self.turns = Arc::new(turns);
         self
@@ -380,7 +377,7 @@ impl Runtime {
         let accepted = match provider
             .turns
             .coordinator
-            .enqueue(
+            .enqueue_turn(
                 scope,
                 TurnSubmission {
                     turn,
@@ -389,6 +386,7 @@ impl Runtime {
                     idempotency_key: options.idempotency_key,
                     attention: options.attention,
                 },
+                (),
             )
             .await
         {
@@ -493,7 +491,7 @@ impl Runtime {
         let Some(lease) = provider.turns.coordinator.claim(scope).await? else {
             return Ok(());
         };
-        let initial_head = provider.turns.coordinator.peek(&lease).await?;
+        let initial_head = provider.turns.coordinator.peek_turn(&lease).await?;
         let runtime = self.clone();
         let provider = provider.clone();
         let turns = provider.turns.clone();
@@ -554,7 +552,7 @@ impl Runtime {
         while !turns.draining.load(Ordering::SeqCst) {
             let head = match initial_head.take() {
                 Some(head) => head,
-                None => turns.coordinator.peek(lease).await?,
+                None => turns.coordinator.peek_turn(lease).await?,
             };
             *current_head = head
                 .as_ref()
@@ -646,7 +644,7 @@ impl Runtime {
                 status => {
                     let current = turns
                         .coordinator
-                        .peek(lease)
+                        .peek_turn(lease)
                         .await?
                         .context("queue head disappeared")?;
                     if current.control == TurnControl::Suspend {
@@ -661,7 +659,7 @@ impl Runtime {
                     turns.broadcast(key, Err(error));
                 }
             }
-            initial_head = Some(turns.coordinator.acknowledge(lease, head.turn.id).await?);
+            initial_head = Some(turns.coordinator.complete_turn(lease, head.turn.id).await?);
         }
         Ok(())
     }

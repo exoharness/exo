@@ -44,7 +44,7 @@ pub(crate) async fn create_test_credential(exoharness: &dyn exoharness::ExoHarne
 
 /// Seed a crash after queue admission using the same ordering as the runtime.
 pub(crate) async fn begin_queued_turn(
-    coordinator: &dyn exoharness::turn_coordinator::TurnCoordinator<crate::TurnWork>,
+    coordinator: &dyn exoharness::turn_coordinator::TurnQueue<crate::TurnWork>,
     agent_id: exoharness::AgentId,
     thread: &dyn exoharness::ThreadHandle,
     work: &crate::TurnWork,
@@ -64,7 +64,7 @@ pub(crate) async fn begin_queued_turn(
             .unwrap_or_else(exoharness::Uuid7::now),
     };
     coordinator
-        .enqueue(
+        .enqueue_turn(
             scope,
             TurnSubmission {
                 turn: turn.clone(),
@@ -73,6 +73,7 @@ pub(crate) async fn begin_queued_turn(
                 idempotency_key: None,
                 attention: Default::default(),
             },
+            (),
         )
         .await?;
     let lease = coordinator
