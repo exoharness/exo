@@ -10,6 +10,14 @@ import type {
 
 initSync({ module: runtimeWasm });
 
+export function threadObjectName(
+  account: string,
+  agent: string,
+  thread: string,
+): string {
+  return WorkerRuntime.thread_name(account, agent, thread);
+}
+
 interface Progress {
   calls: { id: number; request: HostRequest }[];
   cancelled: number[];
@@ -41,8 +49,9 @@ export class Runtime {
     ) => Promise<unknown>,
     private readonly waitUntil: (promise: Promise<unknown>) => void,
     private readonly emitRuntimeEvent: (event: RawRuntimeEvent) => void,
+    thread = false,
   ) {
-    this.wasm = new WorkerRuntime(masterKey);
+    this.wasm = new WorkerRuntime(masterKey, thread);
   }
 
   call<T>(

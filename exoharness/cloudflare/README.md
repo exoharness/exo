@@ -5,12 +5,14 @@ Exo's API, agent orchestration, state and credential proxy run in Workers and SQ
 ```mermaid
 flowchart LR
   Client[Exo managed agents client] --> Worker[Authenticated Worker]
-  Worker --> Provider[Durable Object: Rust Runtime + LocalProvider]
-  Provider --> IO[JavaScript host adapters]
-  IO --> SQLite[(SQLite state and encrypted vault)]
-  IO --> R2[(R2 artifacts)]
-  IO --> Model[Model Responses API]
-  IO --> Sandbox[Linux Sandbox]
+  Worker --> Provider[Account DO: Rust ExoHarness store]
+  Worker --> Thread[Thread DO: Rust Runtime + turn coordinator]
+  Thread --> Queue[(Thread queue + recovery alarm)]
+  Thread -->|ExoHarness protocol| Provider
+  Provider --> SQLite[(Records, events and encrypted vaults)]
+  Provider --> R2[(R2 artifacts)]
+  Thread --> Model[Model Responses API]
+  Provider --> Sandbox[Sandbox DO: Linux processes + snapshots]
   Sandbox --> Egress[ExoEgress Worker]
   Egress --> Provider
   Provider --> Upstream[Allowed HTTP/S upstream]
@@ -20,6 +22,7 @@ flowchart LR
 
 - The existing Rust `BasicExoHarness` store: agents, threads, sessions, turns, events, artifacts and encrypted vaults. JavaScript supplies opaque byte storage in Durable Objects and R2.
 - Managed-agent routes under `/exo` use the same Rust service functions as native Exo. The authenticated `/exo/request` endpoint dispatches the existing ExoHarness protocol in Rust.
+- Each thread has its own Durable Object running Rust's `LocalProvider` and `StoredTurnCoordinator`. Acceptance persists the queue and recovery alarm atomically before returning `202`; ordering, idempotency, interrupt and cancellation use the shared coordinator. The account object owns the ExoHarness store and sandbox manager, reached over the existing portable ExoHarness client.
 - The existing Rust basic turn loop runs in Worker WebAssembly. JavaScript supplies storage, model Responses calls and sandbox process I/O through a `ManagedSandboxBackend`. The bridge polls Rust futures and holds host I/O with `waitUntil`; it requires no Tokio runtime or native threads.
 - The existing Exo Codex harness, shared with the native deployment. Its app-server runs over native stdin/stdout/stderr with canonical shell/file/message events, ephemeral streamed text deltas and saved thread resume.
 - Thread-scoped sandbox execution using Cloudflare's managed `cloudflare/debian-trixie` image for basic agents and the existing Exo image for Codex agents. No custom image build is needed.
@@ -181,8 +184,8 @@ The agent tests create test agents and threads, exercise model/tool execution an
 
 - This deployment registers only the Cloudflare sandbox backend. The executor selects its default from the backend registry and uses the shared sandbox interface; another provider needs a wasm-compatible backend and an execution environment with the harness dependencies installed.
 - The `basic` and `codex` harnesses, OpenAI-compatible Responses models and static key credentials are supported. Vault OAuth credential refresh, GitHub CLI credentials, Claude/Pi subprocess harnesses, MCP, custom tool modules, resources, adapters, frontend tools and delivery callbacks require additional integration. Unsupported definition/request options fail explicitly. Custom execution images must be registered as named images in the deployment's Wrangler configuration.
-- The account Durable Object centralizes metadata and runs multiple thread turns. Per-user ownership and tenant isolation are not implemented.
-- A persisted alarm invokes the shared runtime recovery scan after object eviction; model calls can repeat after a crash. Tool dispatch is journaled first. If a tool's outcome is ambiguous after interruption, the sandbox is stopped and the turn ends with an error; the command is never automatically replayed. This is not exactly-once execution.
+- Thread objects own turn execution and queues independently. Records, event journals, vaults and the sandbox manager still share the account object, so state I/O remains centralized. Per-user ownership and tenant isolation are not implemented.
+- A persisted alarm wakes only its thread's durable queue after object eviction. Completed queues remove their alarms; recovery does not scan the account's agents or threads. Model calls can repeat after a crash. Tool dispatch is journaled first. If a tool's outcome is ambiguous after interruption, the sandbox is stopped and the turn ends with an error; the command is never automatically replayed. This is not exactly-once execution.
 - SSE sends canonical persisted events plus ephemeral Codex stream chunks. The basic harness collects model and shell output. Process RPC is supported through the existing ExoHarness protocol; preview/port routing is not implemented.
 - Explicit exec timeouts signal only the process Cloudflare started; child processes may keep running and hold output open. Use an image-provided process-group timeout (such as GNU `timeout`) when a command must terminate its descendants. See [Cloudflare's process termination semantics](https://developers.cloudflare.com/containers/guides/execute-commands/#stop-the-processes-a-command-starts).
 - Egress follows Exo's disabled, limited-host or unrestricted network policy. Credential bindings retain their own destination restrictions. Interception supports public HTTP/S destinations on ports 80/443; generic TCP/UDP proxying is outside this implementation.

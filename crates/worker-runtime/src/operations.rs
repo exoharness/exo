@@ -35,12 +35,17 @@ pub(crate) enum Operation {
         thread_id: ThreadId,
         request: executor::typescript_runtime::RuntimeRequest,
     },
-    HasUnfinishedTurns,
+    HasPendingTurns,
     Recover,
     Watch {
         agent_id: AgentId,
         thread_id: ThreadId,
         after: Option<exoharness::EventId>,
+    },
+    WatchState {
+        agent_id: AgentId,
+        thread_id: ThreadId,
+        after: std::ops::Bound<exoharness::EventId>,
     },
 }
 
@@ -65,7 +70,11 @@ pub(crate) async fn run(
     id: u32,
     operation: Operation,
 ) -> Result<Output> {
-    let state = runtime.exoharness_handle();
+    let service = executor::managed_agents::service::Service {
+        runtime: &runtime,
+        agent_id: None,
+        definition_updates: &updates,
+    };
     match operation {
         Operation::Request { request } => Ok(Output::Exo(Box::new(
             crate::http::request(&runtime, request).await?,
@@ -82,26 +91,25 @@ pub(crate) async fn run(
             thread_id,
             after,
         } => {
-            use futures::StreamExt;
-            let service = executor::managed_agents::service::Service {
-                runtime: &runtime,
-                agent_id: None,
-                definition_updates: &updates,
-            };
             let agent = service.agent(agent_id).await?;
             let thread = service.thread(agent.as_ref(), thread_id).await?;
-            let mut events = executor::managed_agents::service::watch_events(
+            let events = executor::managed_agents::service::watch_events(
                 thread.as_ref(),
                 progress.subscribe(),
                 after,
             )
             .await?;
-            while let Some(event) = events.next().await {
-                host.watch_events
-                    .lock()
-                    .expect("Worker watches poisoned")
-                    .push((id, serde_json::to_value(event?)?));
-            }
+            forward_watch(&host, id, events).await?;
+            Ok(Output::Unit(()))
+        }
+        Operation::WatchState {
+            agent_id,
+            thread_id,
+            after,
+        } => {
+            let agent = service.agent(agent_id).await?;
+            let thread = service.thread(agent.as_ref(), thread_id).await?;
+            forward_watch(&host, id, thread.watch_events(after).await?).await?;
             Ok(Output::Unit(()))
         }
         Operation::SandboxPolicy { request } => {
@@ -136,26 +144,23 @@ pub(crate) async fn run(
         Operation::HarnessRequest { thread_id, request } => Ok(Output::Harness(
             execution.request_runtime(thread_id, request).await?,
         )),
-        Operation::HasUnfinishedTurns => {
-            for agent in state.list_agents().await? {
-                if !agent
-                    .list_conversations(exoharness::ListConversationsRequest {
-                        unfinished_only: true,
-                        limit: Some(1),
-                        ..Default::default()
-                    })
-                    .await?
-                    .conversations
-                    .is_empty()
-                {
-                    return Ok(Output::Bool(true));
-                }
-            }
-            Ok(Output::Bool(false))
-        }
+        Operation::HasPendingTurns => Ok(Output::Bool(
+            !execution.coordinator.pending_threads().await?.is_empty(),
+        )),
         Operation::Recover => {
             runtime.recover_unfinished_turns().await?;
             Ok(Output::Unit(()))
         }
     }
+}
+
+async fn forward_watch(host: &Host, id: u32, mut events: exoharness::EventStream) -> Result<()> {
+    use futures::StreamExt;
+    while let Some(event) = events.next().await {
+        host.watch_events
+            .lock()
+            .expect("Worker watches poisoned")
+            .push((id, serde_json::to_value(event?)?));
+    }
+    Ok(())
 }

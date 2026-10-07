@@ -16,10 +16,29 @@ use wasm_bindgen::JsValue;
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum HostRequest {
-    Storage { operation: StorageOperation },
-    Sandbox { command: crate::sandbox::Command },
-    Model { request: ModelRequest },
-    Harness { payload: TypeScriptInitPayload },
+    Storage {
+        operation: StorageOperation,
+    },
+    Sandbox {
+        command: crate::sandbox::Command,
+    },
+    Model {
+        request: ModelRequest,
+    },
+    Harness {
+        payload: TypeScriptInitPayload,
+    },
+    AccountRequest {
+        request: exoharness::protocol::Request,
+    },
+    Subscribe {
+        agent_id: exoharness::AgentId,
+        thread_id: exoharness::ThreadId,
+        after: std::ops::Bound<exoharness::EventId>,
+    },
+    Subscription {
+        command: crate::account::SubscriptionCommand,
+    },
 }
 
 #[derive(Serialize)]
@@ -114,6 +133,7 @@ pub(crate) enum StorageOperation {
         #[serde(with = "serde_bytes")]
         bytes: Vec<u8>,
         blob: bool,
+        alarm: Option<bool>,
     },
     Get {
         key: String,
@@ -140,6 +160,7 @@ impl exoharness::Storage for HostStorage {
                     key: key.into(),
                     bytes,
                     blob,
+                    alarm: None,
                 },
             })
             .await

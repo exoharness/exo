@@ -33,10 +33,12 @@ type SandboxCommand =
     }
   | { type: "info" | "snapshot"; request: SandboxRequest }
   | {
-      type: "begin_activity" | "end_activity";
-      request: SandboxRequest;
+      type: "begin_activity";
+      scope: import("../../typescript/harness/client").RawResourceScope;
+      sandbox_id: string;
       id: string;
     }
+  | { type: "end_activity"; sandbox_id: string; id: string }
   | { type: "stop"; request: SandboxRequest; terminate: boolean }
   | { type: "exec" | "start"; request: SandboxRequest; command: ProcessCommand }
   | { type: "read"; process: RunningProcess; stream: "stdout" | "stderr" }
@@ -49,6 +51,9 @@ type RunningProcess = {
   stderr: ReadableStreamDefaultReader<Uint8Array>;
   ended: Set<string>;
 };
+type Subscription = Awaited<
+  ReturnType<DurableObjectStub<import("./provider").ExoProvider>["subscribe"]>
+>;
 type HarnessRequest = {
   type: "harness";
   payload: RawTypeScriptInitPayload;
@@ -67,7 +72,21 @@ export type HostRequest =
         max_output_tokens: number | null;
       };
     }
-  | HarnessRequest;
+  | HarnessRequest
+  | {
+      type: "account_request";
+      request: import("../../typescript/harness/client").RawExoRequest;
+    }
+  | {
+      type: "subscribe";
+      agent_id: string;
+      thread_id: string;
+      after: unknown;
+    }
+  | {
+      type: "subscription";
+      command: { type: "read" | "close"; subscription: Subscription };
+    };
 
 export class RuntimeIO {
   readonly harnessProcesses = new SandboxProcessClient();
@@ -83,6 +102,26 @@ export class RuntimeIO {
 
   async handle(request: HostRequest, signal: AbortSignal): Promise<unknown> {
     switch (request.type) {
+      case "account_request":
+        return this.env.PROVIDERS.getByName(this.env.ACCOUNT_ID).requestExo(
+          request.request,
+        );
+      case "subscribe":
+        return this.env.PROVIDERS.getByName(this.env.ACCOUNT_ID).subscribe(
+          request.agent_id,
+          request.thread_id,
+          request.after,
+        );
+      case "subscription": {
+        const { subscription, type } = request.command;
+        if (type === "read") return subscription.next();
+        try {
+          await subscription.close();
+        } finally {
+          subscription[Symbol.dispose]();
+        }
+        return null;
+      }
       case "storage":
         return this.storage.handle(request.operation);
       case "sandbox":
@@ -163,6 +202,29 @@ export class RuntimeIO {
           return null;
       }
     }
+    if (command.type === "begin_activity" || command.type === "end_activity") {
+      const stub = this.env.SANDBOXES.getByName(command.sandbox_id);
+      if (command.type === "end_activity") {
+        await stub.endActivity(command.id);
+        this.ctx.waitUntil(stub.waitForProcesses());
+      } else {
+        if (command.scope.type !== "thread")
+          throw new Error("Cloudflare sandboxes require a thread scope");
+        await stub.beginActivity(
+          {
+            agentId: command.scope.agent_id,
+            threadId: command.scope.thread_id,
+            sandboxId: command.sandbox_id,
+          },
+          command.id,
+        );
+        if (signal.aborted) {
+          await stub.endActivity(command.id);
+          signal.throwIfAborted();
+        }
+      }
+      return null;
+    }
     const request = command.request;
     if (request.scope.type !== "thread")
       throw new Error("Cloudflare sandboxes require a thread scope");
@@ -188,19 +250,6 @@ export class RuntimeIO {
             request.lifecycle.idle_ttl!.nanos / 1e6,
         );
       }
-      case "begin_activity":
-        await stub.beginActivity(identity, command.id);
-        if (signal.aborted) {
-          await stub.endActivity(command.id);
-          signal.throwIfAborted();
-        }
-        return null;
-      case "end_activity":
-        await stub.endActivity(command.id);
-        // Refresh the invocation keepalive after each turn so a long
-        // conversation can still use the full sandbox idle window.
-        this.ctx.waitUntil(stub.waitForProcesses());
-        return null;
       case "info":
         return stub.info(identity);
       case "snapshot":

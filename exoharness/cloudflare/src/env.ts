@@ -1,10 +1,11 @@
-import type { ExoProvider } from "./provider";
+import type { ExoProvider, ExoThread } from "./provider";
 import type { ExoSandbox } from "./sandbox";
 import type { JsonObject } from "../../typescript/harness/index";
 import type { RawResourceScope } from "../../typescript/harness/client";
 
 export interface Env {
   PROVIDERS: DurableObjectNamespace<ExoProvider>;
+  THREADS: DurableObjectNamespace<ExoThread>;
   SANDBOXES: DurableObjectNamespace<ExoSandbox>;
   ARTIFACTS: R2Bucket;
   ACCOUNT_ID: string;

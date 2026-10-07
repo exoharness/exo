@@ -252,7 +252,8 @@ async fn route(
                         let agent = service.agent(turn.agent_id).await?;
                         service.thread(agent.as_ref(), turn.thread_id).await?;
                         return json(
-                            api::cancel_turn(runtime, turn.thread_id, turn.turn_id).await?,
+                            api::cancel_turn(runtime, turn.agent_id, turn.thread_id, turn.turn_id)
+                                .await?,
                         );
                     }
                     ("POST", ["frontend-tool-result"]) => bail!(api::UnsupportedRequest(

@@ -3,30 +3,18 @@ use std::sync::Arc;
 #[cfg(feature = "http-client")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(feature = "http-client")]
 use anyhow::Context;
 #[cfg(feature = "http-client")]
 use anyhow::anyhow;
 use anyhow::bail;
 use async_trait::async_trait;
-#[cfg(feature = "basic-backend")]
-use tokio::sync::oneshot;
-#[cfg(feature = "basic-backend")]
-use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use url::Url;
 
 #[cfg(feature = "http-client")]
 use super::HTTP_EXOHARNESS_REQUEST_PATH;
-#[cfg(feature = "basic-backend")]
-use super::process::{
-    LiveHttpSandboxProcess, spawn_http_sandbox_process_event_poller,
-    spawn_http_sandbox_process_stdin_forwarder,
-};
 #[cfg(feature = "http-client")]
 use crate::HttpClient;
 use crate::ResourceScope;
-#[cfg(feature = "basic-backend")]
-use crate::SandboxProcessParts;
 #[cfg(feature = "http-client")]
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::protocol::{ConversationHandleInfo, Request, Response, SnapshotScope};
@@ -51,12 +39,20 @@ use crate::{
 #[derive(Clone)]
 pub struct HttpExoHarness {
     transport: Arc<dyn ExoHttpTransport>,
+    host: Option<Arc<dyn crate::runtime_host::RuntimeHost>>,
 }
 
 #[async_trait]
 pub trait ExoHttpTransport: Send + Sync {
     fn endpoint(&self) -> &Url;
     async fn request(&self, request: Request) -> Result<Response>;
+    async fn sandbox_activity(
+        &self,
+        _scope: ResourceScope,
+        _id: SandboxId,
+    ) -> Result<crate::SandboxActivity> {
+        Ok(crate::SandboxActivity::noop())
+    }
     async fn watch_events(
         &self,
         _agent_id: AgentId,
@@ -88,7 +84,19 @@ impl HttpExoHarness {
     }
 
     pub fn from_transport(transport: Arc<dyn ExoHttpTransport>) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            #[cfg(feature = "basic-backend")]
+            host: Some(Arc::new(crate::TokioRuntimeHost)),
+            #[cfg(not(feature = "basic-backend"))]
+            host: None,
+        }
+    }
+
+    /// Supply task scheduling for process I/O on hosts without a Tokio runtime.
+    pub fn with_runtime_host(mut self, host: Arc<dyn crate::runtime_host::RuntimeHost>) -> Self {
+        self.host = Some(host);
+        self
     }
 
     pub fn endpoint(&self) -> &Url {
@@ -414,7 +422,7 @@ async fn http_start_sandbox_process(
     }
 }
 
-async fn http_write_sandbox_process_input(
+pub(super) async fn http_write_sandbox_process_input(
     harness: &HttpExoHarness,
     scope: ResourceScope,
     request: WriteSandboxProcessInputRequest,
@@ -428,7 +436,7 @@ async fn http_write_sandbox_process_input(
     }
 }
 
-async fn http_close_sandbox_process_input(
+pub(super) async fn http_close_sandbox_process_input(
     harness: &HttpExoHarness,
     scope: ResourceScope,
     request: CloseSandboxProcessInputRequest,
@@ -442,7 +450,7 @@ async fn http_close_sandbox_process_input(
     }
 }
 
-async fn http_get_sandbox_process_events(
+pub(super) async fn http_get_sandbox_process_events(
     harness: &HttpExoHarness,
     scope: ResourceScope,
     query: SandboxProcessEventQuery,
@@ -484,12 +492,15 @@ async fn http_cancel_sandbox_process(
     }
 }
 
-#[cfg(feature = "basic-backend")]
 async fn http_run_in_sandbox(
     harness: &HttpExoHarness,
     scope: ResourceScope,
     request: RunInSandboxRequest,
 ) -> Result<Box<dyn SandboxProcess>> {
+    let host = harness
+        .host
+        .as_ref()
+        .context("sandbox process I/O requires a RuntimeHost")?;
     let sandbox_id = request.id;
     let process = http_start_sandbox_process(
         harness,
@@ -507,47 +518,13 @@ async fn http_run_in_sandbox(
         },
     )
     .await?;
-    let (stdout_reader, stdout_writer) = tokio::io::duplex(64 * 1024);
-    let (stderr_reader, stderr_writer) = tokio::io::duplex(64 * 1024);
-    let (stdin_reader, stdin_writer) = tokio::io::duplex(64 * 1024);
-    let (wait_tx, wait_rx) = oneshot::channel();
-    spawn_http_sandbox_process_event_poller(
+    Ok(super::process::open(
         harness.clone(),
-        scope,
-        sandbox_id.clone(),
-        process.id.clone(),
-        stdout_writer,
-        stderr_writer,
-        wait_tx,
-    );
-    spawn_http_sandbox_process_stdin_forwarder(
-        harness.clone(),
+        host.clone(),
         scope,
         sandbox_id,
         process.id,
-        stdin_reader,
-    );
-    Ok(Box::new(LiveHttpSandboxProcess {
-        parts: Some(SandboxProcessParts {
-            stdout: Box::pin(stdout_reader.compat()),
-            stderr: Box::pin(stderr_reader.compat()),
-            stdin: Box::pin(stdin_writer.compat_write()),
-            wait: Box::pin(async move {
-                wait_rx
-                    .await
-                    .unwrap_or_else(|_| Err(anyhow!("HTTP sandbox process poller stopped")))
-            }),
-        }),
-    }))
-}
-
-#[cfg(not(feature = "basic-backend"))]
-async fn http_run_in_sandbox(
-    _harness: &HttpExoHarness,
-    _scope: ResourceScope,
-    _request: RunInSandboxRequest,
-) -> Result<Box<dyn SandboxProcess>> {
-    unsupported("run_in_sandbox")
+    ))
 }
 
 #[async_trait]
@@ -715,6 +692,12 @@ impl SnapshotHandle for HttpAgentHandle {
 
 #[async_trait]
 impl SandboxHandle for HttpAgentHandle {
+    async fn sandbox_activity(&self, id: SandboxId) -> Result<crate::SandboxActivity> {
+        self.harness
+            .transport
+            .sandbox_activity(self.sandbox_scope(), id)
+            .await
+    }
     async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>> {
         http_list_sandboxes(&self.harness, self.sandbox_scope()).await
     }
@@ -1072,6 +1055,12 @@ impl SnapshotHandle for HttpConversationHandle {
 
 #[async_trait]
 impl SandboxHandle for HttpConversationHandle {
+    async fn sandbox_activity(&self, id: SandboxId) -> Result<crate::SandboxActivity> {
+        self.harness
+            .transport
+            .sandbox_activity(self.sandbox_scope(), id)
+            .await
+    }
     async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>> {
         http_list_sandboxes(&self.harness, self.sandbox_scope()).await
     }
@@ -1519,6 +1508,12 @@ impl SnapshotHandle for HttpSandboxHandle {
 
 #[async_trait]
 impl SandboxHandle for HttpSandboxHandle {
+    async fn sandbox_activity(&self, id: SandboxId) -> Result<crate::SandboxActivity> {
+        self.harness
+            .transport
+            .sandbox_activity(self.scope, id)
+            .await
+    }
     async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>> {
         http_list_sandboxes(&self.harness, self.scope).await
     }

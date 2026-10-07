@@ -116,6 +116,7 @@ impl ToolRuntime for WorkerTools {
 }
 
 pub(crate) struct WorkerExecutor {
+    pub coordinator: Arc<dyn exoharness::turn_coordinator::TurnQueue<executor::TurnWork>>,
     pub host: Arc<Host>,
     pub basic: BasicExecutor<WorkerModel, WorkerTools>,
     pub state: Arc<dyn exoharness::ExoHarness>,

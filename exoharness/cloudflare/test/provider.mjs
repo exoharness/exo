@@ -120,11 +120,14 @@ async function options({ accessAud, access, staticToken = token } = {}) {
   const modules = {
     "index.js": {
       type: "esm",
-      contents: `import { ExoProvider as Provider } from "./implementation.js";
+      contents: `import { ExoProvider as Provider, ExoThread as Thread } from "./implementation.js";
 export class ExoProvider extends Provider {
-  async harnessRequestForTest(thread_id, request) { try { return await this.runtime.call({type: "harness_request", thread_id, request}); } catch (error) { return {error: error.message}; } }
   // Capture the Rust error before crossing Miniflare's RPC bridge.
   async proxyForTest(identity, request) { try { const response = await this.proxy(identity, request); return {status: response.status, body: await response.text()}; } catch (error) { return {error: error.message}; } }
+}
+export class ExoThread extends Thread {
+  async harnessRequestForTest(thread_id, request) { try { return await this.runtime.call({type: "harness_request", thread_id, request}); } catch (error) { return {error: error.message}; } }
+  alarmForTest() { return this.ctx.storage.getAlarm(); }
 }
 export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
     },
@@ -170,6 +173,11 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
               worker: "exo",
               exportName: "ExoProvider",
             },
+            THREADS: {
+              type: "durable-object",
+              worker: "exo",
+              exportName: "ExoThread",
+            },
             SANDBOXES: {
               type: "durable-object",
               worker: "sandbox",
@@ -187,6 +195,7 @@ export {default, ExoSandbox, ExoEgress} from "./implementation.js";`,
           },
           exports: {
             ExoProvider: { type: "durable-object", storage: "sqlite" },
+            ExoThread: { type: "durable-object", storage: "sqlite" },
           },
         },
         dev: {
@@ -294,7 +303,9 @@ async function api(
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const value = await response.json();
+  const text = await response.text();
+  assert(text, `${method} ${path}: empty body (${response.status})`);
+  const value = JSON.parse(text);
   assert.equal(response.status, expected, JSON.stringify(value));
   return value;
 }
@@ -324,8 +335,13 @@ async function create(ask = false, harness = "basic") {
   const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
   return { agent, thread, path: `agent/${agent.id}/thread/${thread.id}` };
 }
-const sendTurn = (path, content = "Print Linux.") =>
-  api(`${path}/turn`, "POST", { input: { role: "user", content } }, 202);
+const sendTurn = (path, content = "Print Linux.", options = {}) =>
+  api(
+    `${path}/turn`,
+    "POST",
+    { input: { role: "user", content }, ...options },
+    202,
+  );
 const waitTurn = (path, id) =>
   waitEvents(path, (events) =>
     events.some(
@@ -334,11 +350,11 @@ const waitTurn = (path, id) =>
     ),
   );
 
-async function assertTurnInactive(threadId) {
-  const { PROVIDERS } = await mf.getBindings("exo");
-  const result = await PROVIDERS.getByName(
-    "test-account",
-  ).harnessRequestForTest(threadId, {
+async function assertTurnInactive(agent, thread) {
+  const { THREADS } = await mf.getBindings("exo");
+  const result = await THREADS.getByName(
+    JSON.stringify(["test-account", agent.id, thread.id]),
+  ).harnessRequestForTest(thread.id, {
     type: "authorize_tool",
     request: { function_name: "shell", arguments: { command: "uname -s" } },
   });
@@ -599,10 +615,21 @@ test("artifact versions, event cursors and encrypted vaults survive a runtime re
   await waitTurn(path);
 });
 
-test("shared runtime serializes concurrent submissions and cancellation prevents pending tools", async () => {
+test("thread coordinator accepts queued turns before execution and drains them in order", async () => {
   const { agent, thread, path } = await create(true);
   const first = await sendTurn(path);
-  const second = sendTurn(path, "Print Linux again.");
+  const { THREADS } = await mf.getBindings("exo");
+  const owner = THREADS.getByName(
+    JSON.stringify(["test-account", agent.id, thread.id]),
+  );
+  assert(
+    (await owner.alarmForTest()) > Date.now(),
+    "acceptance must already have a durable wakeup",
+  );
+  const submitted = await sendTurn(path, "Print Linux again.");
+  assert.deepEqual(await api(`${path}/turn/${submitted.turn.id}`), {
+    active: false,
+  });
   await waitEvents(path, (events) =>
     events.some(
       (event) => event.data.event_type === "agent_runtime.approval_requested",
@@ -613,7 +640,6 @@ test("shared runtime serializes concurrent submissions and cancellation prevents
       .canceled_active_turn,
     true,
   );
-  const submitted = await second;
   await waitEvents(path, (events) =>
     events.some(
       (event) =>
@@ -635,6 +661,124 @@ test("shared runtime serializes concurrent submissions and cancellation prevents
   assert.equal(
     events.filter((event) => event.data.type === "turn_started").length,
     2,
+  );
+  for (let i = 0; i < 100 && (await owner.alarmForTest()) !== null; i++)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(
+    await owner.alarmForTest(),
+    null,
+    "a drained queue removes its recovery alarm",
+  );
+});
+
+test("queued cancellation and idempotency are isolated from another thread's execution", async () => {
+  const { path } = await create(true);
+  const first = await sendTurn(path);
+  await waitEvents(path, (events) =>
+    events.some(
+      (event) => event.data.event_type === "agent_runtime.approval_requested",
+    ),
+  );
+  const queued = await sendTurn(path, "queued", {
+    idempotency_key: "queued-key",
+  });
+  const alias = path
+    .split("/")
+    .map((part, index) => (index % 2 ? part.toUpperCase() : part))
+    .join("/");
+  const duplicate = await sendTurn(alias, "duplicate", {
+    idempotency_key: "queued-key",
+  });
+  assert.deepEqual(duplicate.turn, queued.turn);
+  const independent = await create();
+  const other = await sendTurn(independent.path);
+  await waitTurn(independent.path, other.turn.id);
+  assert.deepEqual(await api(`${path}/turn/${first.turn.id}`), {
+    active: true,
+  });
+  assert.equal(
+    (await api(`${path}/turn/${queued.turn.id}/cancel`, "POST", {}))
+      .canceled_active_turn,
+    true,
+  );
+  await api(`${path}/turn/${first.turn.id}/cancel`, "POST", {});
+  const events = await waitTurn(path, queued.turn.id);
+  assert(
+    !events.some(
+      (event) =>
+        event.turn_id === queued.turn.id &&
+        event.data.event_type === "agent_runtime.approval_requested",
+    ),
+  );
+  assert.deepEqual(
+    (
+      await sendTurn(path, "completed duplicate", {
+        idempotency_key: "queued-key",
+      })
+    ).turn,
+    queued.turn,
+  );
+});
+
+test("interrupt controls the running head through the shared coordinator", async () => {
+  const { path } = await create(true);
+  const first = await sendTurn(path);
+  await waitEvents(path, (events) =>
+    events.some(
+      (event) => event.data.event_type === "agent_runtime.approval_requested",
+    ),
+  );
+  const next = await sendTurn(path, "interrupt", { attention: "interrupt" });
+  await waitTurn(path, first.turn.id);
+  await waitEvents(path, (events) =>
+    events.some(
+      (event) =>
+        event.turn_id === next.turn.id &&
+        event.data.event_type === "agent_runtime.approval_requested",
+    ),
+  );
+  await api(`${path}/turn/${next.turn.id}/cancel`, "POST", {});
+  await waitTurn(path, next.turn.id);
+});
+
+test("Worker restart preserves the thread queue and accepted turn identities", async () => {
+  const { path } = await create(true);
+  const first = await sendTurn(path);
+  await waitEvents(path, (events) =>
+    events.some(
+      (event) => event.data.event_type === "agent_runtime.approval_requested",
+    ),
+  );
+  const queued = await sendTurn(path, "queued after restart", {
+    idempotency_key: "restart-key",
+  });
+  await mf.dispose();
+  mf = new Miniflare(await options());
+  await mf.ready;
+  assert.deepEqual(
+    (
+      await sendTurn(path, "duplicate after restart", {
+        idempotency_key: "restart-key",
+      })
+    ).turn,
+    queued.turn,
+  );
+  await api(`${path}/turn/${first.turn.id}/cancel`, "POST", {});
+  await waitEvents(path, (events) =>
+    events.some(
+      (event) =>
+        event.turn_id === queued.turn.id &&
+        event.data.event_type === "agent_runtime.approval_requested",
+    ),
+  );
+  await api(`${path}/turn/${queued.turn.id}/cancel`, "POST", {});
+  const events = await waitTurn(path, queued.turn.id);
+  assert.equal(
+    events.filter(
+      (event) =>
+        event.turn_id === queued.turn.id && event.data.type === "turn_started",
+    ).length,
+    1,
   );
 });
 
@@ -698,7 +842,7 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   const first = await sendTurn(path, "run tests");
   assert.equal(first.harness, "codex-harness");
   const events = await waitTurn(path);
-  await assertTurnInactive(thread.id);
+  await assertTurnInactive(agent, thread);
   assert.match(
     (await sandboxRecord(agent, thread)).image,
     /^codex-[0-9a-f]{8}$/,
@@ -757,7 +901,9 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   assert.equal(started.data.payload.warm_thread_reused, true);
   assert.equal(await sandbox.processCount(), 1);
   const managed = finished.filter(
-    (event) => event.data.type === "sandbox_process_started",
+    (event) =>
+      event.data.type === "sandbox_process_started" &&
+      event.data.command.some((arg) => arg.includes("app-server")),
   );
   assert.equal(
     managed.length,
@@ -786,8 +932,11 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
     JSON.stringify(resumed),
   );
   assert.equal(
-    resumed.filter((event) => event.data.type === "sandbox_process_started")
-      .length,
+    resumed.filter(
+      (event) =>
+        event.data.type === "sandbox_process_started" &&
+        event.data.command.some((arg) => arg.includes("app-server")),
+    ).length,
     2,
   );
   const resumedStart = resumed.find(
@@ -812,7 +961,9 @@ test("Codex cancellation uses the shared turn lifecycle and stops its managed pr
   const sandbox = await sandboxFor(agent, thread);
   assert.equal(await sandbox.activityCount(), 1);
   const process = events.find(
-    (event) => event.data.type === "sandbox_process_started",
+    (event) =>
+      event.data.type === "sandbox_process_started" &&
+      event.data.command.some((arg) => arg.includes("app-server")),
   ).data;
   assert.equal(
     (await api(`${path}/turn/${submitted.turn.id}/cancel`, "POST", {}))
@@ -820,7 +971,7 @@ test("Codex cancellation uses the shared turn lifecycle and stops its managed pr
     true,
   );
   await waitTurn(path);
-  await assertTurnInactive(thread.id);
+  await assertTurnInactive(agent, thread);
   assert.equal(await sandbox.activityCount(), 0);
   const result = await rpc({
     type: "get_sandbox_process_events",

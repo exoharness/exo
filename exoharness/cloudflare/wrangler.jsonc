@@ -20,11 +20,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "PROVIDERS", "class_name": "ExoProvider" },
+      { "name": "THREADS", "class_name": "ExoThread" },
       { "name": "SANDBOXES", "class_name": "ExoSandbox" },
     ],
   },
   "exports": {
     "ExoProvider": { "type": "durable-object", "storage": "sqlite" },
+    "ExoThread": { "type": "durable-object", "storage": "sqlite" },
     "ExoSandbox": { "type": "durable-object", "storage": "sqlite" },
   },
   "r2_buckets": [

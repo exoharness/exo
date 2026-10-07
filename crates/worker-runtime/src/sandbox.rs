@@ -29,11 +29,12 @@ pub(crate) enum Command {
         snapshot: Option<Snapshot>,
     },
     BeginActivity {
-        request: SandboxRequest,
+        scope: exoharness::ResourceScope,
+        sandbox_id: String,
         id: String,
     },
     EndActivity {
-        request: SandboxRequest,
+        sandbox_id: String,
         id: String,
     },
     Info {
@@ -202,20 +203,12 @@ impl ManagedSandboxHandle for CloudflareHandle {
         Ok(HashMap::new())
     }
     async fn activity(&self) -> Result<exoharness::SandboxActivity> {
-        let activity = CloudflareActivity {
-            host: self.host.clone(),
-            request: self.request.clone(),
-            id: exoharness::Uuid7::now().to_string(),
-        };
-        self.host
-            .call::<()>(HostRequest::Sandbox {
-                command: Command::BeginActivity {
-                    request: activity.request.clone(),
-                    id: activity.id.clone(),
-                },
-            })
-            .await?;
-        Ok(exoharness::SandboxActivity::new(activity))
+        activity(
+            self.host.clone(),
+            self.request.scope,
+            self.request.sandbox_id.clone(),
+        )
+        .await
     }
     async fn is_running(&self) -> Result<Option<bool>> {
         let info: Info = self
@@ -330,14 +323,14 @@ impl ManagedSandboxHandle for CloudflareHandle {
 }
 struct CloudflareActivity {
     host: Arc<Host>,
-    request: SandboxRequest,
+    sandbox_id: String,
     id: String,
 }
 impl Drop for CloudflareActivity {
     fn drop(&mut self) {
         let host = self.host.clone();
         let command = Command::EndActivity {
-            request: self.request.clone(),
+            sandbox_id: self.sandbox_id.clone(),
             id: self.id.clone(),
         };
         self.host.spawn(Box::pin(async move {
@@ -346,6 +339,27 @@ impl Drop for CloudflareActivity {
             }
         }));
     }
+}
+
+pub(crate) async fn activity(
+    host: Arc<Host>,
+    scope: exoharness::ResourceScope,
+    sandbox_id: String,
+) -> Result<exoharness::SandboxActivity> {
+    let activity = CloudflareActivity {
+        host: host.clone(),
+        sandbox_id: sandbox_id.clone(),
+        id: exoharness::Uuid7::now().to_string(),
+    };
+    host.call::<()>(HostRequest::Sandbox {
+        command: Command::BeginActivity {
+            scope,
+            sandbox_id,
+            id: activity.id.clone(),
+        },
+    })
+    .await?;
+    Ok(exoharness::SandboxActivity::new(activity))
 }
 struct ProcessGuard {
     host: Arc<Host>,

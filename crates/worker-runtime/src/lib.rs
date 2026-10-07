@@ -1,11 +1,13 @@
 #![cfg(target_arch = "wasm32")]
 
+mod account;
 mod execution;
 mod host;
 mod http;
 mod operations;
 mod policy;
 mod sandbox;
+mod turn_queue;
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -55,8 +57,15 @@ pub struct WorkerRuntime {
 
 #[wasm_bindgen]
 impl WorkerRuntime {
+    /// Canonical resource IDs are essential: aliases must not create two queue owners.
+    pub fn thread_name(account: &str, agent: &str, thread: &str) -> Result<String, JsValue> {
+        let agent: exoharness::AgentId = agent.parse().map_err(js_error)?;
+        let thread: exoharness::ThreadId = thread.parse().map_err(js_error)?;
+        serde_json::to_string(&(account, agent, thread)).map_err(js_error)
+    }
+
     #[wasm_bindgen(constructor)]
-    pub fn new(master_key: &str) -> Result<WorkerRuntime, JsValue> {
+    pub fn new(master_key: &str, thread: bool) -> Result<WorkerRuntime, JsValue> {
         if master_key.len() != 64 || !master_key.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(JsValue::from_str(
                 "VAULT_KEY must be a 32-byte hex encryption key",
@@ -72,15 +81,29 @@ impl WorkerRuntime {
             Arc::new(sandbox::CloudflareBackend(host.clone())),
         )];
         let sandbox_default = backends[0].provider();
-        let state = Arc::new(
-            exoharness::BasicExoHarness::hosted(
-                Arc::new(HostStorage(host.clone())),
-                key,
-                backends,
-                host.clone(),
+        let state: Arc<dyn exoharness::ExoHarness> = if thread {
+            Arc::new(
+                exoharness::HttpExoHarness::from_transport(Arc::new(account::AccountTransport {
+                    host: host.clone(),
+                    endpoint: url::Url::parse("https://exo.internal/exo").map_err(js_error)?,
+                }))
+                .with_runtime_host(host.clone()),
             )
-            .map_err(js_error)?,
-        );
+        } else {
+            Arc::new(
+                exoharness::BasicExoHarness::hosted(
+                    Arc::new(HostStorage(host.clone())),
+                    key,
+                    backends,
+                    host.clone(),
+                )
+                .map_err(js_error)?,
+            )
+        };
+        let coordinator = Arc::new(exoharness::turn_coordinator::StoredTurnCoordinator::new(
+            Arc::new(turn_queue::QueueStore(host.clone())),
+            Arc::default(),
+        ));
         let execution = Arc::new(WorkerExecutor {
             host: host.clone(),
             state: state.clone(),
@@ -91,12 +114,13 @@ impl WorkerRuntime {
                 Arc::new(WorkerTools),
                 Arc::new(cost::PricingTable::empty()),
             ),
+            coordinator: coordinator.clone(),
         });
         let runtime = Runtime::with_tracer(
-            LocalProvider::with_host(state, execution.clone(), host.clone()),
+            LocalProvider::with_host(state, execution.clone(), host.clone())
+                .with_turn_coordinator(coordinator),
             Arc::new(executor::execution_tracing::NoopExecutionTracer),
         );
-        runtime.begin_recovery_scan();
         Ok(Self {
             runtime,
             execution,
