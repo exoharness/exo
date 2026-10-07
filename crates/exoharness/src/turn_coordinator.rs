@@ -36,8 +36,8 @@ pub struct TurnSubmission<Work> {
     pub turn: TurnRecord,
     pub work: Work,
     pub principal: Option<String>,
-    pub idempotency_key: Option<String>,
-    pub attention: TurnAttention,
+    #[serde(flatten)]
+    pub options: TurnOptions,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,14 +88,18 @@ pub enum TurnAuthority {
 pub trait TurnAdmission<Work: Send + Sync>: Send + Sync {
     /// Append in FIFO order. Interrupt atomically cancels the same principal's
     /// claimed or started head before appending. Unclaimed work is undisturbed.
-    /// Duplicate principal/key pairs return the original turn and session for
-    /// at least 24 hours, including after completion, without interrupting.
+    /// Hosts may derive turn identities from principal-scoped keys before
+    /// enqueueing, or let the coordinator retain key-to-identity receipts.
+    /// Retries must preserve the requested session. Duplicate submissions must
+    /// not interrupt and remain deduplicated for 24 hours after acceptance.
     /// The host must arrange a durable wakeup before reporting acceptance.
     async fn enqueue(&self, thread: TurnThread, turn: TurnSubmission<Work>)
     -> Result<AcceptedTurn>;
     /// Authorize the submitter or thread owner and prevent queued execution or
     /// request cancellation of the active head. Owners must observe cancellation
     /// within a bounded interval, including requests from other processes.
+    /// Queued cancellation may remove the entry or retain a tombstone; callers
+    /// must treat both as preventing execution. Worker routing stays private.
     async fn cancel(
         &self,
         thread: TurnThread,
@@ -140,14 +144,13 @@ pub trait TurnQueue<Work: Send + Sync>: TurnAdmission<Work> {
     /// backends must observe remote writes and report lost ownership or errors.
     /// Suspended heads remain unstarted until explicitly resumed.
     async fn start(&self, lease: &TurnLease, turn: TurnId) -> Result<TurnStart<Work>>;
-    /// Persist a control request. Cancellation also makes a suspended head ready
-    /// for terminalization. Resume cannot undo cancellation.
-    async fn control(
+    /// Suspend or resume pending work. Cancelled turns cannot be resumed.
+    async fn set_suspended(
         &self,
         thread: TurnThread,
         turn: TurnId,
         authority: TurnAuthority,
-        control: TurnControl,
+        suspended: bool,
     ) -> Result<TurnControlOutcome>;
     /// Call after terminal events are durable. Repeating the last acknowledgment
     /// must succeed without removing a different head. Return the next head.

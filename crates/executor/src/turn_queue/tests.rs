@@ -206,8 +206,10 @@ impl Fixture {
                 request: request(),
             },
             principal: None,
-            idempotency_key: Some(Uuid7::now().to_string()),
-            attention: TurnAttention::Wake,
+            options: TurnOptions {
+                idempotency_key: Some(Uuid7::now().to_string()),
+                attention: TurnAttention::Wake,
+            },
         })
     }
 
@@ -444,12 +446,7 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
         .await?;
     drop(turn);
     queue
-        .control(
-            scope,
-            cancelled.turn.id,
-            TurnAuthority::ThreadOwner,
-            TurnControl::Cancel,
-        )
+        .cancel(scope, cancelled.turn.id, TurnAuthority::ThreadOwner)
         .await?;
     let admitted = f.submission().await?; // Admission persisted before its journal.
     queue.enqueue(scope, admitted.clone()).await?;
@@ -642,12 +639,7 @@ async fn remote_control_changes_reach_an_executing_turn() -> Result<()> {
     let (second, second_stream) = f.start().await?;
     f.state
         .turn_coordinator::<TurnWork>()
-        .control(
-            f.scope(),
-            first.id,
-            TurnAuthority::ThreadOwner,
-            TurnControl::Cancel,
-        )
+        .cancel(f.scope(), first.id, TurnAuthority::ThreadOwner)
         .await?;
     assert!(
         finish(first_stream)
@@ -781,12 +773,7 @@ impl TurnQueue<TurnWork> for TestCoordinator {
         match &self.fault {
             QueueTestFault::CancelOnStart => {
                 self.inner
-                    .control(
-                        lease.thread,
-                        turn,
-                        TurnAuthority::ThreadOwner,
-                        TurnControl::Cancel,
-                    )
+                    .cancel(lease.thread, turn, TurnAuthority::ThreadOwner)
                     .await?;
             }
             QueueTestFault::WatchFailure { once, release }
@@ -805,14 +792,16 @@ impl TurnQueue<TurnWork> for TestCoordinator {
         }
         Ok(started)
     }
-    async fn control(
+    async fn set_suspended(
         &self,
         thread: TurnThread,
         turn: exoharness::TurnId,
         authority: TurnAuthority,
-        control: TurnControl,
+        suspended: bool,
     ) -> Result<TurnControlOutcome> {
-        self.inner.control(thread, turn, authority, control).await
+        self.inner
+            .set_suspended(thread, turn, authority, suspended)
+            .await
     }
     async fn acknowledge(
         &self,

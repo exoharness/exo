@@ -70,8 +70,7 @@ pub(crate) async fn begin_queued_turn(
                 turn: turn.clone(),
                 work: work.clone(),
                 principal: thread.caller().map(|caller| caller.principal.clone()),
-                idempotency_key: None,
-                attention: Default::default(),
+                options: Default::default(),
             },
         )
         .await?;

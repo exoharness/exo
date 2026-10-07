@@ -276,7 +276,12 @@ impl LocalProvider {
         } else {
             self.turns
                 .coordinator
-                .control(thread, key.turn_id, authority, control)
+                .set_suspended(
+                    thread,
+                    key.turn_id,
+                    authority,
+                    control == TurnControl::Suspend,
+                )
                 .await?
         };
         match outcome {
@@ -385,8 +390,7 @@ impl Runtime {
                     turn,
                     work,
                     principal,
-                    idempotency_key: options.idempotency_key,
-                    attention: options.attention,
+                    options,
                 },
             )
             .await

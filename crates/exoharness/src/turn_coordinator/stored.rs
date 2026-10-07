@@ -118,6 +118,38 @@ impl<Work: Clone + Send + Sync + 'static> StoredTurnCoordinator<Work> {
     pub fn new(store: Arc<dyn TurnQueueStore<Work>>, locks: Arc<TurnQueueLocks>) -> Self {
         Self { store, locks }
     }
+    async fn update_control(
+        &self,
+        thread: TurnThread,
+        turn: TurnId,
+        authority: TurnAuthority,
+        control: TurnControl,
+    ) -> Result<TurnControlOutcome> {
+        let state_lock = self.locks.thread(thread);
+        let mutation = state_lock.mutation.lock().await;
+        let mut state = self.store.load(thread).await?;
+        let Some(entry) = state.pending.iter_mut().find(|entry| entry.turn.id == turn) else {
+            return Ok(TurnControlOutcome::NotFound);
+        };
+        if let TurnAuthority::Submitter(principal) = authority
+            && entry.principal.as_deref() != Some(&principal)
+        {
+            return Ok(TurnControlOutcome::NotAccessible);
+        }
+        ensure!(
+            entry.control != TurnControl::Cancel || control == TurnControl::Cancel,
+            "cancelled turns cannot be resumed or suspended"
+        );
+        let outcome = if entry.started {
+            TurnControlOutcome::Running
+        } else {
+            TurnControlOutcome::Queued
+        };
+        entry.control = control;
+        self.store.save(thread, &state).await?;
+        mutation.notify(turn, control);
+        Ok(outcome)
+    }
     /// Volatile queues for embedded runtimes. Hosts requiring durability must
     /// explicitly install a coordinator backed by their persistent state.
     pub fn in_memory() -> Self {
@@ -146,7 +178,7 @@ impl<Work: Clone + Send + Sync + 'static> TurnAdmission<Work> for StoredTurnCoor
             .find(|entry| entry.turn.id == turn.turn.id)
             .map(|entry| entry.turn.clone())
             .or_else(|| {
-                turn.idempotency_key.as_ref().and_then(|key| {
+                turn.options.idempotency_key.as_ref().and_then(|key| {
                     state
                         .receipts
                         .iter()
@@ -160,7 +192,7 @@ impl<Work: Clone + Send + Sync + 'static> TurnAdmission<Work> for StoredTurnCoor
                 duplicate: true,
             });
         }
-        let interrupted = if turn.attention == TurnAttention::Interrupt {
+        let interrupted = if turn.options.attention == TurnAttention::Interrupt {
             state
                 .pending
                 .front_mut()
@@ -176,7 +208,7 @@ impl<Work: Clone + Send + Sync + 'static> TurnAdmission<Work> for StoredTurnCoor
             None
         };
         let record = turn.turn.clone();
-        if let Some(key) = turn.idempotency_key {
+        if let Some(key) = turn.options.idempotency_key {
             state.receipts.push(TurnReceipt {
                 principal: turn.principal.clone(),
                 key,
@@ -207,7 +239,7 @@ impl<Work: Clone + Send + Sync + 'static> TurnAdmission<Work> for StoredTurnCoor
         turn: TurnId,
         authority: TurnAuthority,
     ) -> Result<TurnControlOutcome> {
-        self.control(thread, turn, authority, TurnControl::Cancel)
+        self.update_control(thread, turn, authority, TurnControl::Cancel)
             .await
     }
 }
@@ -273,37 +305,19 @@ impl<Work: Clone + Send + Sync + 'static> TurnQueue<Work> for StoredTurnCoordina
             control: Box::pin(WatchStream::new(receiver).map(Ok)),
         })
     }
-    async fn control(
+    async fn set_suspended(
         &self,
         thread: TurnThread,
         turn: TurnId,
         authority: TurnAuthority,
-        control: TurnControl,
+        suspended: bool,
     ) -> Result<TurnControlOutcome> {
-        let state_lock = self.locks.thread(thread);
-        let mutation = state_lock.mutation.lock().await;
-        let mut state = self.store.load(thread).await?;
-        let Some(entry) = state.pending.iter_mut().find(|entry| entry.turn.id == turn) else {
-            return Ok(TurnControlOutcome::NotFound);
-        };
-        if let TurnAuthority::Submitter(principal) = authority
-            && entry.principal.as_deref() != Some(&principal)
-        {
-            return Ok(TurnControlOutcome::NotAccessible);
-        }
-        ensure!(
-            entry.control != TurnControl::Cancel || control == TurnControl::Cancel,
-            "cancelled turns cannot be resumed or suspended"
-        );
-        let outcome = if entry.started {
-            TurnControlOutcome::Running
+        let control = if suspended {
+            TurnControl::Suspend
         } else {
-            TurnControlOutcome::Queued
+            TurnControl::Run
         };
-        entry.control = control;
-        self.store.save(thread, &state).await?;
-        mutation.notify(turn, control);
-        Ok(outcome)
+        self.update_control(thread, turn, authority, control).await
     }
     async fn acknowledge(
         &self,

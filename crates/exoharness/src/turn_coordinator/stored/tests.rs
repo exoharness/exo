@@ -9,8 +9,10 @@ fn queued(principal: &str, attention: TurnAttention) -> TurnSubmission<u32> {
         },
         work: 42,
         principal: Some(principal.into()),
-        idempotency_key: None,
-        attention,
+        options: TurnOptions {
+            attention,
+            ..Default::default()
+        },
     }
 }
 
@@ -33,11 +35,10 @@ async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head()
     );
     assert_eq!(
         coordinator
-            .control(
+            .cancel(
                 thread,
                 first.turn.id,
-                TurnAuthority::Submitter("bob".into()),
-                TurnControl::Cancel
+                TurnAuthority::Submitter("bob".into())
             )
             .await?,
         TurnControlOutcome::NotAccessible
@@ -72,7 +73,7 @@ async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter() ->
         thread_id: Uuid7::now(),
     };
     let mut first = queued("alice", TurnAttention::Wake);
-    first.idempotency_key = Some("request-1".into());
+    first.options.idempotency_key = Some("request-1".into());
     coordinator.enqueue(thread, first.clone()).await?;
     let lease = coordinator.claim(thread).await?.unwrap();
     coordinator.acknowledge(&lease, first.turn.id).await?;
@@ -104,11 +105,11 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
     coordinator.enqueue(thread, second).await?;
     let lease = coordinator.claim(thread).await?.unwrap();
     coordinator
-        .control(
+        .set_suspended(
             thread,
             first.turn.id,
             TurnAuthority::Submitter("alice".into()),
-            TurnControl::Suspend,
+            true,
         )
         .await?;
     let started = coordinator.start(&lease, first.turn.id).await?;
@@ -128,42 +129,27 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
     );
     assert_eq!(
         coordinator
-            .control(
+            .set_suspended(
                 thread,
                 first.turn.id,
                 TurnAuthority::Submitter("bob".into()),
-                TurnControl::Run
+                false
             )
             .await?,
         TurnControlOutcome::NotAccessible
     );
     coordinator
-        .control(
-            thread,
-            first.turn.id,
-            TurnAuthority::ThreadOwner,
-            TurnControl::Run,
-        )
+        .set_suspended(thread, first.turn.id, TurnAuthority::ThreadOwner, false)
         .await?;
     let mut control = coordinator.start(&lease, first.turn.id).await?.control;
     assert_eq!(control.next().await.unwrap()?, TurnControl::Run);
     coordinator
-        .control(
-            thread,
-            first.turn.id,
-            TurnAuthority::ThreadOwner,
-            TurnControl::Cancel,
-        )
+        .cancel(thread, first.turn.id, TurnAuthority::ThreadOwner)
         .await?;
     assert_eq!(control.next().await.unwrap()?, TurnControl::Cancel);
     assert!(
         coordinator
-            .control(
-                thread,
-                first.turn.id,
-                TurnAuthority::ThreadOwner,
-                TurnControl::Run
-            )
+            .set_suspended(thread, first.turn.id, TurnAuthority::ThreadOwner, false)
             .await
             .is_err()
     );
@@ -177,8 +163,10 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
 #[cfg(feature = "basic-backend")]
 #[tokio::test]
 async fn shared_admission_contract() -> Result<()> {
+    let coordinator = StoredTurnCoordinator::in_memory();
     crate::contract_tests::turn_admission_contract(
-        &StoredTurnCoordinator::in_memory(),
+        &coordinator,
+        &coordinator,
         TurnThread {
             agent_id: Uuid7::now(),
             thread_id: Uuid7::now(),
@@ -186,4 +174,23 @@ async fn shared_admission_contract() -> Result<()> {
         42,
     )
     .await
+}
+
+#[cfg(feature = "basic-backend")]
+#[async_trait]
+impl crate::contract_tests::TurnAdmissionHooks for StoredTurnCoordinator<u32> {
+    type Claim = TurnLease;
+
+    async fn claim_head(&self, thread: TurnThread) -> Result<TurnLease> {
+        self.claim(thread).await?.context("head was not claimed")
+    }
+
+    async fn is_cancelled(&self, claim: &TurnLease, turn: TurnId) -> Result<bool> {
+        Ok(self
+            .get(claim.thread, turn)
+            .await?
+            .context("turn is missing")?
+            .control
+            == TurnControl::Cancel)
+    }
 }

@@ -15,38 +15,50 @@ use crate::{
     SandboxCommand, SandboxRequest, ThreadHandle, Uuid7, WriteArtifactRequest,
 };
 
-/// Run against an isolated thread with workers paused. Execution-specific tests
-/// must also verify FIFO draining, atomic interruption, and remote cancellation.
+/// Execution observations supplied by each backend's test fixture.
+#[async_trait::async_trait]
+pub trait TurnAdmissionHooks: Send + Sync {
+    type Claim: Send + Sync;
+    async fn claim_head(
+        &self,
+        thread: crate::turn_coordinator::TurnThread,
+    ) -> crate::Result<Self::Claim>;
+    async fn is_cancelled(&self, claim: &Self::Claim, turn: crate::TurnId) -> crate::Result<bool>;
+}
+
+/// Run with workers paused. Reuse accepted identities on retry so both
+/// deterministic-ID hosts and coordinators retaining receipts can participate.
 pub async fn turn_admission_contract<Work: Clone + Send + Sync>(
     admission: &dyn crate::turn_coordinator::TurnAdmission<Work>,
+    hooks: &impl TurnAdmissionHooks,
     thread: crate::turn_coordinator::TurnThread,
     work: Work,
 ) -> crate::Result<()> {
     use crate::turn_coordinator::{
-        TurnAttention, TurnAuthority, TurnControlOutcome, TurnSubmission,
+        TurnAttention, TurnAuthority, TurnControlOutcome, TurnOptions, TurnSubmission, TurnThread,
     };
-    let original = TurnSubmission {
+    let submission = |principal: &str, key: &str, attention| TurnSubmission {
         turn: crate::TurnRecord {
             id: Uuid7::now(),
             session_id: Uuid7::now(),
         },
-        work,
-        principal: Some("alice".into()),
-        idempotency_key: Some("request-1".into()),
-        attention: TurnAttention::Wake,
+        work: work.clone(),
+        principal: Some(principal.into()),
+        options: TurnOptions {
+            idempotency_key: Some(key.into()),
+            attention,
+        },
     };
+    let original = submission("alice", "request-1", TurnAttention::Wake);
     assert!(!admission.enqueue(thread, original.clone()).await?.duplicate);
     let mut retry = original.clone();
-    retry.turn = crate::TurnRecord {
-        id: Uuid7::now(),
-        session_id: Uuid7::now(),
-    };
-    retry.attention = TurnAttention::Interrupt;
+    retry.options.attention = TurnAttention::Interrupt;
     let duplicate = admission.enqueue(thread, retry.clone()).await?;
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn, original.turn);
-    retry.principal = Some("bob".into());
-    let other = admission.enqueue(thread, retry).await?;
+    let other = admission
+        .enqueue(thread, submission("bob", "request-1", TurnAttention::Wake))
+        .await?;
     assert!(!other.duplicate);
     assert_eq!(
         admission
@@ -83,6 +95,39 @@ pub async fn turn_admission_contract<Work: Clone + Send + Sync>(
             .await?,
         TurnControlOutcome::NotFound
     );
+
+    let unclaimed = TurnThread {
+        thread_id: Uuid7::now(),
+        ..thread
+    };
+    admission.enqueue(unclaimed, original.clone()).await?;
+    let interrupt = submission("alice", "interrupt", TurnAttention::Interrupt);
+    admission.enqueue(unclaimed, interrupt.clone()).await?;
+    let claim = hooks.claim_head(unclaimed).await?;
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    assert!(!hooks.is_cancelled(&claim, interrupt.turn.id).await?);
+
+    let claimed = TurnThread {
+        thread_id: Uuid7::now(),
+        ..thread
+    };
+    admission.enqueue(claimed, original.clone()).await?;
+    let claim = hooks.claim_head(claimed).await?;
+    let other = submission("bob", "interrupt", TurnAttention::Interrupt);
+    admission.enqueue(claimed, other.clone()).await?;
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    assert!(admission.enqueue(claimed, retry).await?.duplicate);
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    let tail = submission("alice", "tail", TurnAttention::Wake);
+    admission.enqueue(claimed, tail.clone()).await?;
+    let mut duplicate_tail = tail.clone();
+    duplicate_tail.options.attention = TurnAttention::Interrupt;
+    assert!(admission.enqueue(claimed, duplicate_tail).await?.duplicate);
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    admission.enqueue(claimed, interrupt).await?;
+    assert!(hooks.is_cancelled(&claim, original.turn.id).await?);
+    assert!(!hooks.is_cancelled(&claim, other.turn.id).await?);
+    assert!(!hooks.is_cancelled(&claim, tail.turn.id).await?);
     Ok(())
 }
 
