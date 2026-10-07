@@ -1,5 +1,5 @@
 //! Durable turn queues, independent of worker discovery and sandbox lifetime.
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -80,7 +80,7 @@ pub enum TurnAuthority {
 pub struct TurnLease {
     pub thread: TurnThread,
     pub(crate) identity: Arc<()>,
-    _guard: Arc<dyn Send + Sync>,
+    guard: Arc<dyn Any + Send + Sync>,
 }
 
 impl TurnLease {
@@ -88,8 +88,13 @@ impl TurnLease {
         Self {
             thread,
             identity: Arc::new(()),
-            _guard: Arc::new(guard),
+            guard: Arc::new(guard),
         }
+    }
+
+    /// Access the backend's ownership data, such as a distributed lease token.
+    pub fn guard<T: 'static>(&self) -> Option<&T> {
+        self.guard.downcast_ref()
     }
 }
 
