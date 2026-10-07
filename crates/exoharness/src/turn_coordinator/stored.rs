@@ -129,11 +129,7 @@ impl<Work: Clone + Send + Sync + 'static> StoredTurnCoordinator<Work> {
 }
 
 #[async_trait]
-impl<Work: Clone + Send + Sync + 'static> TurnQueue<Work> for StoredTurnCoordinator<Work> {
-    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
-        self.store.pending_threads().await
-    }
-
+impl<Work: Clone + Send + Sync + 'static> TurnAdmission<Work> for StoredTurnCoordinator<Work> {
     async fn enqueue(
         &self,
         thread: TurnThread,
@@ -168,7 +164,10 @@ impl<Work: Clone + Send + Sync + 'static> TurnQueue<Work> for StoredTurnCoordina
             state
                 .pending
                 .front_mut()
-                .filter(|head| head.started && head.principal == turn.principal)
+                .filter(|head| {
+                    (head.started || mutation.owner.upgrade().is_some())
+                        && head.principal == turn.principal
+                })
                 .map(|head| {
                     head.control = TurnControl::Cancel;
                     head.turn.id
@@ -202,6 +201,23 @@ impl<Work: Clone + Send + Sync + 'static> TurnQueue<Work> for StoredTurnCoordina
             duplicate: false,
         })
     }
+    async fn cancel(
+        &self,
+        thread: TurnThread,
+        turn: TurnId,
+        authority: TurnAuthority,
+    ) -> Result<TurnControlOutcome> {
+        self.control(thread, turn, authority, TurnControl::Cancel)
+            .await
+    }
+}
+
+#[async_trait]
+impl<Work: Clone + Send + Sync + 'static> TurnQueue<Work> for StoredTurnCoordinator<Work> {
+    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
+        self.store.pending_threads().await
+    }
+
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>> {
         let state = self.locks.thread(thread);
         let mut mutation = state.mutation.lock().await;

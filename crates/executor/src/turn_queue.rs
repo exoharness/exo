@@ -268,12 +268,18 @@ impl LocalProvider {
             Some(caller) => TurnAuthority::Submitter(caller.principal.clone()),
             None => TurnAuthority::ThreadOwner,
         };
-        match self
-            .turns
-            .coordinator
-            .control(thread, key.turn_id, authority, control)
-            .await?
-        {
+        let outcome = if control == TurnControl::Cancel {
+            self.turns
+                .coordinator
+                .cancel(thread, key.turn_id, authority)
+                .await?
+        } else {
+            self.turns
+                .coordinator
+                .control(thread, key.turn_id, authority, control)
+                .await?
+        };
+        match outcome {
             TurnControlOutcome::Queued | TurnControlOutcome::Running => {
                 self.turns.signal(key, control).await?;
                 Ok(true)

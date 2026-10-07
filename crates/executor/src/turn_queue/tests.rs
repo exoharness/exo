@@ -1,6 +1,7 @@
 use super::*;
 use crate::{AgentConfig, ConversationConfig, ExecutorStreamMode, HarnessExecutor};
 use async_trait::async_trait;
+use exoharness::turn_coordinator::TurnAdmission;
 use exoharness::turn_coordinator::TurnAttention;
 use exoharness::{BasicExoHarness, EventKind, ExoHarness, TurnHandle};
 use std::{path::Path, time::Duration};
@@ -724,10 +725,7 @@ struct TestCoordinator {
 }
 
 #[async_trait]
-impl TurnQueue<TurnWork> for TestCoordinator {
-    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
-        self.inner.pending_threads().await
-    }
+impl exoharness::turn_coordinator::TurnAdmission<TurnWork> for TestCoordinator {
     async fn enqueue(
         &self,
         thread: TurnThread,
@@ -745,6 +743,21 @@ impl TurnQueue<TurnWork> for TestCoordinator {
             release.acquire().await?.forget();
         }
         Ok(accepted)
+    }
+    async fn cancel(
+        &self,
+        thread: TurnThread,
+        turn: exoharness::TurnId,
+        authority: TurnAuthority,
+    ) -> Result<TurnControlOutcome> {
+        self.inner.cancel(thread, turn, authority).await
+    }
+}
+
+#[async_trait]
+impl TurnQueue<TurnWork> for TestCoordinator {
+    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
+        self.inner.pending_threads().await
     }
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>> {
         self.inner.claim(thread).await

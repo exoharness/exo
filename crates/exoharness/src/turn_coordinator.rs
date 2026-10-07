@@ -83,6 +83,27 @@ pub enum TurnAuthority {
     Submitter(String),
 }
 
+/// Admission semantics shared by hosts with different execution machinery.
+#[async_trait]
+pub trait TurnAdmission<Work: Send + Sync>: Send + Sync {
+    /// Append in FIFO order. Interrupt atomically cancels the same principal's
+    /// claimed or started head before appending. Unclaimed work is undisturbed.
+    /// Duplicate principal/key pairs return the original turn and session for
+    /// at least 24 hours, including after completion, without interrupting.
+    /// The host must arrange a durable wakeup before reporting acceptance.
+    async fn enqueue(&self, thread: TurnThread, turn: TurnSubmission<Work>)
+    -> Result<AcceptedTurn>;
+    /// Authorize the submitter or thread owner and prevent queued execution or
+    /// request cancellation of the active head. Owners must observe cancellation
+    /// within a bounded interval, including requests from other processes.
+    async fn cancel(
+        &self,
+        thread: TurnThread,
+        turn: TurnId,
+        authority: TurnAuthority,
+    ) -> Result<TurnControlOutcome>;
+}
+
 /// Ownership token scoped to one thread. The guard holds implementation-owned
 /// resources until the last clone is dropped. Single-owner hosts may use ().
 #[derive(Clone)]
@@ -104,17 +125,12 @@ impl TurnLease {
 
 /// Queue admission and execution control consumed by Exo's executor.
 #[async_trait]
-pub trait TurnQueue<Work: Send + Sync>: Send + Sync {
+pub trait TurnQueue<Work: Send + Sync>: TurnAdmission<Work> {
     /// Startup discovery for hosts serving multiple threads. Hosts waking a
     /// known thread can use the default and drain that thread directly.
     async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
         Ok(Vec::new())
     }
-    /// Preserve queue order and atomically apply interruption and deduplication.
-    /// The host owns durable wakeups (for example, setting a DO alarm) and must
-    /// arrange one before reporting acceptance to its caller.
-    async fn enqueue(&self, thread: TurnThread, turn: TurnSubmission<Work>)
-    -> Result<AcceptedTurn>;
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>>;
     /// Read a pending turn's accepted work and control state.
     async fn get(&self, thread: TurnThread, turn: TurnId) -> Result<Option<QueuedTurn<Work>>>;

@@ -15,6 +15,77 @@ use crate::{
     SandboxCommand, SandboxRequest, ThreadHandle, Uuid7, WriteArtifactRequest,
 };
 
+/// Run against an isolated thread with workers paused. Execution-specific tests
+/// must also verify FIFO draining, atomic interruption, and remote cancellation.
+pub async fn turn_admission_contract<Work: Clone + Send + Sync>(
+    admission: &dyn crate::turn_coordinator::TurnAdmission<Work>,
+    thread: crate::turn_coordinator::TurnThread,
+    work: Work,
+) -> crate::Result<()> {
+    use crate::turn_coordinator::{
+        TurnAttention, TurnAuthority, TurnControlOutcome, TurnSubmission,
+    };
+    let original = TurnSubmission {
+        turn: crate::TurnRecord {
+            id: Uuid7::now(),
+            session_id: Uuid7::now(),
+        },
+        work,
+        principal: Some("alice".into()),
+        idempotency_key: Some("request-1".into()),
+        attention: TurnAttention::Wake,
+    };
+    assert!(!admission.enqueue(thread, original.clone()).await?.duplicate);
+    let mut retry = original.clone();
+    retry.turn = crate::TurnRecord {
+        id: Uuid7::now(),
+        session_id: Uuid7::now(),
+    };
+    retry.attention = TurnAttention::Interrupt;
+    let duplicate = admission.enqueue(thread, retry.clone()).await?;
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.turn, original.turn);
+    retry.principal = Some("bob".into());
+    let other = admission.enqueue(thread, retry).await?;
+    assert!(!other.duplicate);
+    assert_eq!(
+        admission
+            .cancel(
+                thread,
+                original.turn.id,
+                TurnAuthority::Submitter("bob".into())
+            )
+            .await?,
+        TurnControlOutcome::NotAccessible
+    );
+    assert_eq!(
+        admission
+            .cancel(
+                thread,
+                original.turn.id,
+                TurnAuthority::Submitter("alice".into())
+            )
+            .await?,
+        TurnControlOutcome::Queued
+    );
+    let duplicate = admission.enqueue(thread, original.clone()).await?;
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.turn, original.turn);
+    assert_eq!(
+        admission
+            .cancel(thread, other.turn.id, TurnAuthority::ThreadOwner)
+            .await?,
+        TurnControlOutcome::Queued
+    );
+    assert_eq!(
+        admission
+            .cancel(thread, Uuid7::now(), TurnAuthority::ThreadOwner)
+            .await?,
+        TurnControlOutcome::NotFound
+    );
+    Ok(())
+}
+
 pub async fn supports_thread_api_and_conversation_compatibility(harness: Arc<dyn ExoHarness>) {
     let agent = harness
         .new_agent(NewAgentRequest {

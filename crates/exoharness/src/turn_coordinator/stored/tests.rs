@@ -25,7 +25,6 @@ async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head()
     coordinator.enqueue(thread, first.clone()).await?;
     let lease = coordinator.claim(thread).await?.unwrap();
     assert!(coordinator.claim(thread).await?.is_none());
-    coordinator.start(&lease, first.turn.id).await?;
     let other = queued("bob", TurnAttention::Interrupt);
     coordinator.enqueue(thread, other.clone()).await?;
     assert_eq!(
@@ -173,4 +172,18 @@ async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() 
     drop(lease);
     assert!(coordinator.locks.threads.lock().unwrap().is_empty());
     Ok(())
+}
+
+#[cfg(feature = "basic-backend")]
+#[tokio::test]
+async fn shared_admission_contract() -> Result<()> {
+    crate::contract_tests::turn_admission_contract(
+        &StoredTurnCoordinator::in_memory(),
+        TurnThread {
+            agent_id: Uuid7::now(),
+            thread_id: Uuid7::now(),
+        },
+        42,
+    )
+    .await
 }
