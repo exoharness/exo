@@ -33,7 +33,9 @@ die() {
 }
 
 exo() {
-  local args=("$1")
+  # The CLI resolves --root relative to the working directory, and exo-cli is
+  # meant to run from any repo, so point it at the checkout's state.
+  local args=("$1" --root "$ROOT_DIR/.exo")
   if [[ -f "$ENV_FILE" ]]; then
     args+=(--env-file "$ENV_FILE")
   fi
