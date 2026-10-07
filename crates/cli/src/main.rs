@@ -63,24 +63,21 @@ use tui::run_chat_repl;
 #[command(name = "exo")]
 #[command(about = "CLI for exo agents")]
 struct Cli {
+    /// Exo home directory for local state, configuration, and caches.
+    #[arg(long, global = true, env = "EXO_HOME", default_value = default_exo_home(), required = false)]
+    root: PathBuf,
     /// Override the provider and use its profile context, ignoring directory/global context (saved aliases retain theirs).
     #[arg(long = "provider", global = true)]
     provider_profile: Option<String>,
-    /// Directory containing saved provider profiles and authentication state.
+    /// Directory containing provider profiles and authentication (defaults to <root>/config).
     #[arg(long, global = true, env = "EXO_CONFIG_DIR")]
     config_dir: Option<PathBuf>,
-    /// Home directory used when --config-dir is not set.
-    #[arg(long, global = true, env = "HOME")]
-    home: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Debug, Args)]
 struct RuntimeArgs {
-    /// Directory containing local Exo state.
-    #[arg(long, global = true, default_value = ".exo")]
-    root: PathBuf,
     /// Store used to protect vault credentials.
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
@@ -90,6 +87,15 @@ struct RuntimeArgs {
     /// Load environment variables from a file.
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
+}
+
+fn default_exo_home() -> clap::builder::Resettable<clap::builder::OsStr> {
+    match std::env::var_os("HOME").filter(|home| !home.is_empty()) {
+        Some(home) => clap::builder::Resettable::Value(
+            PathBuf::from(home).join(".exo").into_os_string().into(),
+        ),
+        None => clap::builder::Resettable::Reset,
+    }
 }
 
 #[derive(Debug, Args)]
@@ -139,6 +145,12 @@ struct FirecrackerArgs {
     /// Maximum number of Firecracker VMs this Exo process may own.
     #[arg(long = "firecracker-max-machines", value_name = "COUNT")]
     max_machines: Option<NonZeroUsize>,
+    /// Disable sudo and other privilege elevation inside Firecracker guests.
+    #[arg(
+        long = "firecracker-disable-guest-root",
+        env = "EXO_FIRECRACKER_DISABLE_GUEST_ROOT"
+    )]
+    disable_guest_root: bool,
     /// Firecracker VMM executable.
     #[arg(
         long = "firecracker-binary",
@@ -271,6 +283,7 @@ impl FirecrackerArgs {
             dns_server: self.dns_server,
             allowed_egress_cidrs,
             network_device_policy: Default::default(),
+            allow_guest_root: !self.disable_guest_root,
             allowed_local_images,
             allowed_registries: self.allowed_registries.clone(),
             network_bytes_per_second: self.network_bytes_per_second,
@@ -396,7 +409,7 @@ fn read_config_file<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> R
     .with_context(|| format!("parsing {}", path.display()))
 }
 
-fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
+fn build_exo_config(cli: &Cli, state_root: &Path) -> Result<BasicExoHarnessConfig> {
     let secret_backend = match cli
         .runtime()
         .secret_backend
@@ -425,7 +438,7 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         .map(|path| read_config_file(path))
         .transpose()?;
     Ok(BasicExoHarnessConfig {
-        root: cli.runtime().root.join("exoharness"),
+        root: state_root.join("exoharness"),
         secret_backend,
         sandbox_default: default_local_sandbox_provider(),
         sandbox_policy,
@@ -489,28 +502,28 @@ impl From<SandboxScopeArg> for SandboxScope {
     }
 }
 
-// Provider and FirecrackerBridge return from run before runtime options are accessed.
-macro_rules! runtime_accessor {
-    ($name:ident $(, $mutable:tt)?) => {
-        fn $name(&$($mutable)? self) -> &$($mutable)? RuntimeArgs {
-            match &$($mutable)? self.command {
-                Commands::Environment { runtime, .. }
-                | Commands::Vault { runtime, .. }
-                | Commands::Serve { runtime, .. }
-                | Commands::Agent { runtime, .. }
-                | Commands::Conversation { runtime, .. }
-                => runtime,
-                Commands::Provider { .. } | Commands::FirecrackerBridge => {
-                    unreachable!("command does not use runtime options")
-                }
+impl Cli {
+    // Provider and FirecrackerBridge return before runtime options are accessed.
+    fn runtime(&self) -> &RuntimeArgs {
+        match &self.command {
+            Commands::Environment { runtime, .. }
+            | Commands::Vault { runtime, .. }
+            | Commands::Serve { runtime, .. }
+            | Commands::Agent { runtime, .. }
+            | Commands::Conversation { runtime, .. } => runtime,
+            Commands::Provider { .. } | Commands::FirecrackerBridge => {
+                unreachable!("command does not use runtime options")
             }
         }
-    };
-}
+    }
 
-impl Cli {
-    runtime_accessor!(runtime);
-    runtime_accessor!(runtime_mut, mut);
+    fn state_root(&self) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.root)
+            .with_context(|| format!("creating local state directory {}", self.root.display()))?;
+        self.root
+            .canonicalize()
+            .with_context(|| format!("resolving local state directory {}", self.root.display()))
+    }
 
     fn execution(&self) -> Option<&ExecutionArgs> {
         match &self.command {
@@ -925,7 +938,7 @@ async fn main() -> Result<(), CliError> {
             ..
         }
     ) {
-        turn_display::init_progress().map_err(|error| CliError { error, verbose })?;
+        turn_display::init_progress(verbose).map_err(|error| CliError { error, verbose })?;
     }
     run(cli).await.map_err(|error| CliError { error, verbose })
 }
@@ -943,14 +956,10 @@ async fn run(mut cli: Cli) -> Result<()> {
         #[cfg(not(feature = "firecracker"))]
         bail!("Firecracker bridge support requires building Exo with --features firecracker");
     }
-    let config_directory = match cli.config_dir.clone() {
-        Some(path) => path,
-        None => cli
-            .home
-            .as_ref()
-            .context("--config-dir or --home is required")?
-            .join(".config/exo"),
-    };
+    let config_directory = cli
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| cli.root.join("config"));
     let mut provider_store = providers::Store::load(config_directory)?;
     if let Commands::Provider { command } = &cli.command {
         return providers::run(command.as_ref(), &mut provider_store).await;
@@ -995,7 +1004,7 @@ async fn run_selected(
                 (Some(client), account)
             }
             providers::Connection::Local { root } => {
-                cli.runtime_mut().root = root.clone();
+                cli.root = root.clone();
                 (None, root.display().to_string())
             }
         };
@@ -1064,9 +1073,16 @@ async fn run_selected(
     {
         bail!("--egress-policy is local-only; put the policy in the remote environment definition");
     }
-    let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
+    let state_root = local.then(|| cli.state_root()).transpose()?;
+    let harness = providers::runtime(
+        &cli,
+        http_client,
+        definition.as_ref(),
+        &env,
+        state_root.as_deref(),
+    )
+    .await?;
     let env_vars = env.into_vars();
-    let root = cli.runtime().root.clone();
     let result: Result<()> = async {
     match cli.command {
         Commands::Environment { command, .. } => environment::run(harness.exoharness_handle().as_ref(), command).await?,
@@ -1112,7 +1128,7 @@ async fn run_selected(
             }
         }
         Commands::Serve { args, .. } => {
-            serve::run(harness.clone(), &root, *args).await?;
+            serve::run(harness.clone(), state_root.as_deref().context("server requires local state")?, *args).await?;
         }
         Commands::Agent { command, .. } => match command {
             AgentCommands::Run { .. } => unreachable!(),
@@ -2515,6 +2531,29 @@ mod command_tests {
             chat_command("support", "saved"),
             "exo agent run --agent support --thread saved"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_symlink_keeps_the_existing_keychain_account() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        let saved = temp.path().join("saved-state");
+        std::fs::create_dir_all(&home)?;
+        std::fs::create_dir_all(&saved)?;
+        std::os::unix::fs::symlink(&saved, home.join(".exo"))?;
+        let cli = Cli::try_parse_from([
+            "exo",
+            "--root",
+            home.join(".exo").to_str().context("home path")?,
+            "agent",
+            "list",
+        ])?;
+        assert_eq!(
+            build_exo_config(&cli, &cli.state_root()?)?.root,
+            saved.canonicalize()?.join("exoharness")
+        );
+        Ok(())
     }
 
     #[test]

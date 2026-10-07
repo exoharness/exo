@@ -1,5 +1,6 @@
 use std::{net::TcpListener, ops::Bound, sync::Arc};
 
+use crate::managed_agents::service::{AgentPath, ThreadPath, TurnPath, VaultPath};
 use actix_web::{
     App, Error, HttpMessage, HttpRequest, HttpResponse, HttpServer,
     body::MessageBody,
@@ -15,17 +16,12 @@ use actix_web::{
 use anyhow::{Context, Result, bail};
 use exo_managed_agents::http::{RUNTIME_PATH, protocol::*, sse};
 use exoharness::{
-    AgentHandle, AgentId, Event, EventData, EventQuery, EventQueryDirection, EventStream,
-    ThreadHandle, ThreadId, TurnId, Uuid7,
+    AgentHandle, AgentId, Event, EventData, EventStream, ThreadHandle, ThreadId, Uuid7,
 };
 use futures::StreamExt;
-use serde::Deserialize;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::{
-    AgentConfig, AgentHarnessKind, ConversationModelConfig, ExecutionStreamEvent, Runtime,
-    SendRequest, harness::HarnessTurnKey,
-};
+use crate::{ExecutionStreamEvent, Runtime};
 
 // Thread creation can include a large environment definition. Bytes buffers the request.
 const OPTIONAL_JSON_BODY_LIMIT: usize = 256 * 1024 * 1024;
@@ -54,7 +50,7 @@ fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
 pub struct RuntimeHttpService {
     runtime: Arc<Runtime>,
     agent_id: Option<AgentId>,
-    authorization: Option<HeaderValue>,
+    bearer_token: Option<String>,
     progress: broadcast::Sender<Event>,
     definition_updates: Arc<tokio::sync::Mutex<()>>,
     auth: Option<Arc<crate::remote::AuthServer>>,
@@ -65,6 +61,13 @@ pub struct RuntimeHttpService {
 }
 
 impl RuntimeHttpService {
+    fn shared(&self) -> crate::managed_agents::service::Service<'_> {
+        crate::managed_agents::service::Service {
+            runtime: &self.runtime,
+            agent_id: self.agent_id,
+            definition_updates: &self.definition_updates,
+        }
+    }
     pub fn new(runtime: Arc<Runtime>, token: Option<&str>) -> Result<Self> {
         if token.is_some_and(|token| token.trim().is_empty()) {
             bail!("runtime HTTP service bearer token must not be empty");
@@ -77,8 +80,10 @@ impl RuntimeHttpService {
             account_id: "local".into(),
             session: None,
             agent_id: None,
-            authorization: token
-                .map(|token| HeaderValue::from_str(&format!("Bearer {token}")))
+            bearer_token: token
+                .map(|token| {
+                    HeaderValue::from_str(&format!("Bearer {token}")).map(|_| token.to_owned())
+                })
                 .transpose()?,
             progress: broadcast::channel(1024).0,
             definition_updates: Default::default(),
@@ -144,15 +149,6 @@ impl RuntimeHttpService {
     pub fn for_agent(mut self, agent_id: AgentId) -> Self {
         self.agent_id = Some(agent_id);
         self
-    }
-
-    fn require_full_provider(&self) -> Result<(), Error> {
-        if self.agent_id.is_some() {
-            return Err(actix_web::error::ErrorForbidden(
-                "this service serves one saved agent",
-            ));
-        }
-        Ok(())
     }
 
     async fn agent(&self, id: AgentId) -> Result<Arc<dyn AgentHandle>, Error> {
@@ -308,8 +304,13 @@ async fn authorize(
     let service = req
         .app_data::<web::Data<Arc<RuntimeHttpService>>>()
         .ok_or_else(|| ErrorInternalServerError("runtime service not configured"))?;
-    if let Some(authorization) = &service.authorization
-        && req.headers().get(AUTHORIZATION) != Some(authorization)
+    if let Some(token) = &service.bearer_token
+        && req
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            != Some(token.as_str())
     {
         return Err(ErrorUnauthorized("runtime bearer token required"));
     }
@@ -371,36 +372,14 @@ impl actix_web::FromRequest for Service {
     }
 }
 
-#[derive(Deserialize)]
-struct AgentPath {
-    agent_id: AgentId,
-}
-#[derive(Deserialize)]
-struct ThreadPath {
-    agent_id: AgentId,
-    thread_id: ThreadId,
-}
-#[derive(Deserialize)]
-struct TurnPath {
-    agent_id: AgentId,
-    thread_id: ThreadId,
-    turn_id: TurnId,
-}
-
 async fn list_agents(
     service: Service,
     query: web::Query<AgentsQuery>,
 ) -> Result<web::Json<ListAgentsResult>, Error> {
-    let mut agents = service
-        .runtime
-        .list_agents()
+    crate::managed_agents::service::list_agents(&service.shared(), query.into_inner())
         .await
-        .map_err(ErrorInternalServerError)?;
-    agents.retain(|agent| service.agent_id.is_none_or(|id| agent.id == id));
-    if let Some(slug) = &query.slug {
-        agents.retain(|agent| &agent.slug == slug);
-    }
-    Ok(web::Json(ListAgentsResult { agents }))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn identity(service: Service) -> web::Json<ProviderIdentity> {
@@ -409,259 +388,140 @@ async fn identity(service: Service) -> web::Json<ProviderIdentity> {
     })
 }
 
-#[derive(Deserialize)]
-struct VaultPath {
-    agent_id: Option<AgentId>,
-    thread_id: Option<ThreadId>,
-    vault_id: Option<exoharness::vault::VaultId>,
-    secret_id: Option<exoharness::SecretId>,
-}
-
-async fn scoped_vaults(
-    service: &RuntimeHttpService,
-    path: &VaultPath,
-) -> Result<Vec<Arc<dyn exoharness::vault::VaultHandle>>, Error> {
-    if let Some(id) = path.agent_id.or(service.agent_id) {
-        let agent = service.agent(id).await?;
-        if let Some(thread_id) = path.thread_id {
-            return service
-                .thread(agent.as_ref(), thread_id)
-                .await?
-                .list_vaults()
-                .await
-                .map_err(ErrorBadRequest);
-        }
-        return agent.list_vaults().await.map_err(ErrorBadRequest);
-    }
-    service
-        .runtime
-        .exoharness_handle()
-        .list_vaults()
-        .await
-        .map_err(ErrorBadRequest)
-}
-
 async fn list_environments(
     service: Service,
 ) -> Result<web::Json<Vec<exoharness::EnvironmentDefinition>>, Error> {
-    Ok(web::Json(
-        service
-            .runtime
-            .exoharness_handle()
-            .list_environments()
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::list_environments(&service.shared())
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 async fn put_environment(
     service: Service,
     body: web::Json<exoharness::EnvironmentDefinition>,
 ) -> Result<web::Json<bool>, Error> {
-    service.require_full_provider()?;
-    service
-        .runtime
-        .exoharness_handle()
-        .put_environment(body.into_inner())
+    crate::managed_agents::service::put_environment(&service.shared(), body.into_inner())
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(true))
+        .map(web::Json)
+        .map_err(request_error)
 }
 async fn delete_environment(
     service: Service,
     name: web::Path<String>,
 ) -> Result<web::Json<bool>, Error> {
-    service.require_full_provider()?;
-    Ok(web::Json(
-        service
-            .runtime
-            .exoharness_handle()
-            .delete_environment(&name)
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::delete_environment(&service.shared(), &name)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn list_vaults(
     service: Service,
     path: web::Path<VaultPath>,
 ) -> Result<web::Json<Vec<exoharness::vault::VaultRecord>>, Error> {
-    Ok(web::Json(
-        scoped_vaults(&service, &path)
-            .await?
-            .iter()
-            .map(|vault| vault.record().clone())
-            .collect(),
-    ))
+    crate::managed_agents::service::list_vaults(&service.shared(), &path)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn create_vault(
     service: Service,
     body: web::Json<CreateVaultBody>,
 ) -> Result<web::Json<exoharness::vault::VaultRecord>, Error> {
-    service.require_full_provider()?;
-    let vault = service
-        .runtime
-        .exoharness_handle()
-        .create_vault(&body.name)
+    crate::managed_agents::service::create_vault(&service.shared(), body.into_inner())
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(vault.record().clone()))
+        .map(web::Json)
+        .map_err(request_error)
 }
 async fn delete_vault(
     service: Service,
     path: web::Path<VaultPath>,
 ) -> Result<web::Json<bool>, Error> {
-    service.require_full_provider()?;
-    service
-        .runtime
-        .exoharness_handle()
-        .delete_vault(
-            &path
-                .vault_id
-                .ok_or_else(|| ErrorBadRequest("vault ID missing"))?,
-        )
+    crate::managed_agents::service::delete_vault(&service.shared(), &path)
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(true))
+        .map(web::Json)
+        .map_err(request_error)
 }
-async fn writable_vault(
-    service: &RuntimeHttpService,
-    path: &VaultPath,
-) -> Result<Arc<dyn exoharness::vault::VaultHandle>, Error> {
-    service.require_full_provider()?;
-    scoped_vaults(service, path)
-        .await?
-        .into_iter()
-        .find(|v| Some(v.record().id) == path.vault_id)
-        .ok_or_else(|| ErrorNotFound("vault is unavailable"))
-}
+
 async fn put_secret(
     service: Service,
     path: web::Path<VaultPath>,
     body: web::Json<exoharness::PutSecretRequest>,
 ) -> Result<web::Json<exoharness::SecretId>, Error> {
-    exoharness::vault::require_portable_secret(&body.secret).map_err(ErrorBadRequest)?;
-    let vault = writable_vault(&service, &path).await?;
-    Ok(web::Json(
-        vault
-            .put_secret(body.into_inner())
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::put_secret(&service.shared(), &path, body.into_inner())
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 async fn update_secret(
     service: Service,
     path: web::Path<VaultPath>,
     body: web::Json<exoharness::UpdateSecretRequest>,
 ) -> Result<web::Json<exoharness::SecretMetadata>, Error> {
-    if let Some(secret) = &body.secret {
-        exoharness::vault::require_portable_secret(secret).map_err(ErrorBadRequest)?;
-    }
-    let vault = writable_vault(&service, &path).await?;
-    Ok(web::Json(
-        vault
-            .update_secret(
-                &path
-                    .secret_id
-                    .ok_or_else(|| ErrorBadRequest("secret ID missing"))?,
-                body.into_inner(),
-            )
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::update_secret(&service.shared(), &path, body.into_inner())
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 async fn delete_secret(
     service: Service,
     path: web::Path<VaultPath>,
 ) -> Result<web::Json<bool>, Error> {
-    let vault = writable_vault(&service, &path).await?;
-    vault
-        .delete_secret(
-            &path
-                .secret_id
-                .ok_or_else(|| ErrorBadRequest("secret ID missing"))?,
-        )
+    crate::managed_agents::service::delete_secret(&service.shared(), &path)
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(true))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn list_secrets(
     service: Service,
     path: web::Path<VaultPath>,
 ) -> Result<web::Json<Vec<exoharness::SecretMetadata>>, Error> {
-    let vault = scoped_vaults(&service, &path)
-        .await?
-        .into_iter()
-        .find(|vault| Some(vault.record().id) == path.vault_id)
-        .ok_or_else(|| ErrorNotFound("vault not available in this context"))?;
-    Ok(web::Json(
-        vault.list_secrets().await.map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::list_secrets(&service.shared(), &path)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn create_agent(
     service: Service,
     body: web::Json<exoharness::NewAgentRequest>,
 ) -> Result<web::Json<exoharness::AgentRecord>, Error> {
-    service.require_full_provider()?;
-    let agent = service
-        .runtime
-        .exoharness_handle()
-        .new_agent(body.into_inner())
+    crate::managed_agents::service::create_agent(&service.shared(), body.into_inner())
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(agent.record().clone()))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn get_agent(
     service: Service,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<Option<exoharness::AgentRecord>>, Error> {
-    if service
-        .agent_id
-        .is_some_and(|agent_id| agent_id != path.agent_id)
-    {
-        return Err(ErrorNotFound("agent not found"));
-    }
-    Ok(web::Json(
-        service
-            .runtime
-            .exoharness_handle()
-            .get_agent(&path.agent_id)
-            .await
-            .map_err(ErrorBadRequest)?
-            .map(|agent| agent.record().clone()),
-    ))
+    crate::managed_agents::service::get_agent(&service.shared(), &path)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn delete_agent(
     service: Service,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<bool>, Error> {
-    service.require_full_provider()?;
-    Ok(web::Json(
-        service
-            .runtime
-            .exoharness_handle()
-            .delete_agent(&path.agent_id)
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::delete_agent(&service.shared(), &path)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn list_artifacts(
     service: Service,
     path: web::Path<AgentPath>,
 ) -> Result<web::Json<Vec<exoharness::ArtifactVersion>>, Error> {
-    Ok(web::Json(
-        service
-            .agent(path.agent_id)
-            .await?
-            .list_artifacts()
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::list_artifacts(&service.shared(), &path)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn read_artifact(
@@ -669,25 +529,20 @@ async fn read_artifact(
     path: web::Path<AgentPath>,
     query: web::Query<exoharness::ReadArtifactRequest>,
 ) -> Result<web::Json<Option<exoharness::Artifact>>, Error> {
-    Ok(web::Json(
-        service
-            .agent(path.agent_id)
-            .await?
-            .read_artifact(query.into_inner())
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::read_artifact(&service.shared(), &path, query.into_inner())
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn list_thread_artifacts(
     service: Service,
     path: web::Path<ThreadPath>,
 ) -> Result<web::Json<Vec<exoharness::ArtifactVersion>>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    Ok(web::Json(
-        thread.list_artifacts().await.map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::list_thread_artifacts(&service.shared(), &path)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn read_thread_artifact(
@@ -695,14 +550,14 @@ async fn read_thread_artifact(
     path: web::Path<ThreadPath>,
     query: web::Query<exoharness::ReadArtifactRequest>,
 ) -> Result<web::Json<Option<exoharness::Artifact>>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    Ok(web::Json(
-        thread
-            .read_artifact(query.into_inner())
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::read_thread_artifact(
+        &service.shared(),
+        &path,
+        query.into_inner(),
+    )
+    .await
+    .map(web::Json)
+    .map_err(request_error)
 }
 
 async fn write_artifact(
@@ -710,37 +565,20 @@ async fn write_artifact(
     path: web::Path<AgentPath>,
     body: web::Json<exoharness::WriteArtifactRequest>,
 ) -> Result<web::Json<exoharness::ArtifactVersion>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let request = body.into_inner();
-    if request.path != exo_managed_agents::AGENT_DEFINITION_PATH {
-        return Err(ErrorBadRequest(
-            "only the managed-agent definition can be written through this provider",
-        ));
-    }
-    let definition = exo_managed_agents::AgentDefinition::parse(
-        String::from_utf8(request.contents.clone()).map_err(ErrorBadRequest)?,
-    )
-    .map_err(ErrorBadRequest)?;
-    let _guard = service.definition_updates.lock().await;
-    Ok(web::Json(
-        service
-            .runtime
-            .update_managed_agent(&agent, &definition)
-            .await
-            .map_err(ErrorBadRequest)?,
-    ))
+    crate::managed_agents::service::write_artifact(&service.shared(), &path, body.into_inner())
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn get_thread(
     service: Service,
     path: web::Path<ThreadPath>,
 ) -> Result<web::Json<ThreadResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    Ok(web::Json(ThreadResult {
-        agent: agent.record().clone(),
-        thread: thread.record().clone(),
-    }))
+    crate::managed_agents::service::get_thread(&service.shared(), &path)
+        .await
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn list_threads(
@@ -748,67 +586,10 @@ async fn list_threads(
     path: web::Path<AgentPath>,
     query: web::Query<ThreadsQuery>,
 ) -> Result<web::Json<ListThreadsResult>, Error> {
-    if query.automation_id.is_some() {
-        return Err(ErrorNotImplemented(
-            "local runtime does not have automation-owned threads",
-        ));
-    }
-    let agent = service.agent(path.agent_id).await?;
-    let result = agent
-        .list_threads(exoharness::ListThreadsRequest {
-            cursor: query.cursor,
-            limit: Some(query.limit.unwrap_or(100)),
-            ..Default::default()
-        })
+    crate::managed_agents::service::list_threads(&service.shared(), &path, query.into_inner())
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(ListThreadsResult {
-        agent: agent.record().clone(),
-        threads: result
-            .threads
-            .into_iter()
-            .map(|thread| thread.record().clone())
-            .collect(),
-        next_cursor: result.next_cursor,
-    }))
-}
-
-fn harness_name(config: &AgentConfig) -> &str {
-    match config.harness {
-        AgentHarnessKind::Basic => "basic",
-        AgentHarnessKind::Rlm => "rlm",
-        AgentHarnessKind::Exo => "exo",
-        AgentHarnessKind::TypeScript => config
-            .typescript
-            .as_ref()
-            .and_then(|config| std::path::Path::new(&config.module_path).file_stem())
-            .and_then(|name| name.to_str())
-            .unwrap_or("typescript"),
-    }
-}
-
-async fn check_harness(
-    agent: &dyn AgentHandle,
-    config: &AgentConfig,
-    requested: Option<&str>,
-) -> Result<(), Error> {
-    let Some(requested) = requested else {
-        return Ok(());
-    };
-    let definition = exo_managed_agents::load_definition(agent)
-        .await
-        .map_err(ErrorBadRequest)?;
-    let actual = definition
-        .as_ref()
-        .map(|d| d.frontmatter.harness.as_str())
-        .unwrap_or_else(|| harness_name(config));
-    if requested != actual && !(requested == "native" && config.harness == AgentHarnessKind::Basic)
-    {
-        return Err(ErrorNotImplemented(
-            "choose the harness in the saved agent definition",
-        ));
-    }
-    Ok(())
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn create_thread(
@@ -818,54 +599,11 @@ async fn create_thread(
     body: web::Bytes,
 ) -> Result<web::Json<CreateThreadResult>, Error> {
     let body: CreateThreadBody = optional_json_body(&request, &body)?;
-    if body.thread_id.is_some()
-        || body.endpoint_name.is_some()
-        || body.reasoning_effort.is_some()
-        || body.visibility != ThreadVisibility::Owner
-        || body.source.is_some()
-    {
-        return Err(ErrorNotImplemented(
-            "local runtime does not support supplied thread IDs, endpoint/reasoning overrides, or shared/automation threads",
-        ));
-    }
     let agent = service.agent(path.agent_id).await?;
-    let config = service
-        .runtime
-        .get_agent_config(agent.as_ref())
+    crate::managed_agents::service::create_thread(&service.runtime, &agent, body)
         .await
-        .map_err(ErrorBadRequest)?;
-    check_harness(agent.as_ref(), &config, body.harness.as_deref()).await?;
-    let thread = service
-        .runtime
-        .open_managed_thread(
-            &agent,
-            None,
-            exoharness::NewThreadRequest {
-                environment: body.environment,
-                vaults: body.vaults,
-                slug: body.thread_slug,
-                name: body.thread_name,
-            },
-        )
-        .await
-        .map_err(ErrorBadRequest)?
-        .thread;
-    if let Some(model) = body.model {
-        crate::put_conversation_model_override(
-            thread.as_ref(),
-            Some(ConversationModelConfig {
-                model,
-                max_output_tokens: None,
-            }),
-        )
-        .await
-        .map_err(ErrorBadRequest)?;
-    }
-    Ok(web::Json(CreateThreadResult {
-        agent: agent.record().clone(),
-        thread: thread.record().clone(),
-        harness: harness_name(&config).to_owned(),
-    }))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn update_thread_environment(
@@ -873,23 +611,14 @@ async fn update_thread_environment(
     path: web::Path<ThreadPath>,
     body: web::Json<exoharness::EnvironmentDefinition>,
 ) -> Result<web::Json<ThreadResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let opened = service
-        .runtime
-        .open_managed_thread(
-            &agent,
-            Some(&path.thread_id.to_string()),
-            exoharness::NewThreadRequest {
-                environment: Some(body.into_inner()),
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(ThreadResult {
-        agent: agent.record().clone(),
-        thread: opened.thread.record().clone(),
-    }))
+    crate::managed_agents::service::update_thread_environment(
+        &service.shared(),
+        &path,
+        body.into_inner(),
+    )
+    .await
+    .map(web::Json)
+    .map_err(request_error)
 }
 
 async fn attach_thread_vaults(
@@ -897,33 +626,24 @@ async fn attach_thread_vaults(
     path: web::Path<ThreadPath>,
     body: web::Json<AttachThreadVaultsBody>,
 ) -> Result<web::Json<ThreadResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service
-        .thread(agent.as_ref(), path.thread_id)
-        .await?
-        .attach_vaults(body.into_inner().vaults)
-        .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(ThreadResult {
-        agent: agent.record().clone(),
-        thread: thread.record().clone(),
-    }))
+    crate::managed_agents::service::attach_thread_vaults(
+        &service.shared(),
+        &path,
+        body.into_inner(),
+    )
+    .await
+    .map(web::Json)
+    .map_err(request_error)
 }
 
 async fn delete_thread(
     service: Service,
     path: web::Path<ThreadPath>,
 ) -> Result<web::Json<DeleteThreadResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let deleted = agent
-        .delete_thread(&path.thread_id)
+    crate::managed_agents::service::delete_thread(&service.shared(), &path)
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(DeleteThreadResult {
-        agent: agent.record().clone(),
-        thread_id: path.thread_id,
-        deleted,
-    }))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn fork_thread(
@@ -932,20 +652,14 @@ async fn fork_thread(
     request: HttpRequest,
     body: web::Bytes,
 ) -> Result<web::Json<ThreadResult>, Error> {
-    let body: ForkThreadBody = optional_json_body(&request, &body)?;
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let forked = thread
-        .fork(exoharness::ForkThreadRequest {
-            name: body.thread_name,
-            ..Default::default()
-        })
-        .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(ThreadResult {
-        agent: agent.record().clone(),
-        thread: forked.record().clone(),
-    }))
+    crate::managed_agents::service::fork_thread(
+        &service.shared(),
+        &path,
+        optional_json_body::<ForkThreadBody>(&request, &body)?,
+    )
+    .await
+    .map(web::Json)
+    .map_err(request_error)
 }
 
 async fn submit_turn(
@@ -954,61 +668,29 @@ async fn submit_turn(
     body: web::Json<SubmitTurnBody>,
 ) -> Result<HttpResponse, Error> {
     let body = body.into_inner();
-    if body.idempotency_key.is_some()
-        || body.attention != TurnAttention::Wake
-        || body.parent.is_some()
-        || body.endpoint_name.is_some()
-        || body.reasoning_effort.is_some()
-        || body.frontend_tools.is_some()
-        || body.auto_approve_tools.is_some()
-        || body.page_scope.is_some()
-        || body.reset_history
-        || body.delivery_callback.is_some()
-    {
-        return Err(ErrorNotImplemented(
-            "local runtime does not support the requested turn options",
-        ));
-    }
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let mut config = service
-        .runtime
-        .get_agent_config(agent.as_ref())
-        .await
-        .map_err(ErrorBadRequest)?;
-    check_harness(agent.as_ref(), &config, body.harness.as_deref()).await?;
-    if let Some(model) = crate::get_conversation_model_override(thread.as_ref())
-        .await
-        .map_err(ErrorBadRequest)?
-    {
-        config.model = model.model;
-        config.max_output_tokens = model.max_output_tokens;
-    }
-    if let Some(model) = body.model {
-        config.model = model;
-    }
-    if let Some(prompt) = body.system_prompt {
-        config.instructions = vec![crate::harness_helpers::system_message(&prompt)];
-    }
-    let harness = harness_name(&config).to_owned();
+    let prepared = crate::managed_agents::service::prepare_turn(
+        &service.runtime,
+        agent.as_ref(),
+        thread.as_ref(),
+        body,
+    )
+    .await
+    .map_err(request_error)?;
     let runtime = service.runtime.clone();
     let progress = service.progress.clone();
     let (receipt, received) = oneshot::channel();
     tokio::spawn(async move {
-        let request = SendRequest {
-            input: body.input.map(OneOrMany::into_vec).unwrap_or_default(),
-            session_id: body.session_id,
-        };
-        let admitted = runtime
-            .start_turn(
-                Arc::clone(&agent),
-                Arc::clone(&thread),
-                request,
-                true,
-                Some(config),
-            )
-            .await;
-        let (turn, mut events) = match admitted {
+        let admitted = crate::managed_agents::service::submit_turn(
+            &runtime,
+            agent,
+            thread.clone(),
+            prepared,
+            true,
+        )
+        .await;
+        let (result, mut events) = match admitted {
             Ok(admitted) => admitted,
             Err(error) => {
                 if receipt.send(Err(error)).is_err() {
@@ -1017,12 +699,7 @@ async fn submit_turn(
                 return;
             }
         };
-        let result = SubmitTurnResult {
-            agent: agent.record().clone(),
-            thread: thread.record().clone(),
-            turn: turn.clone(),
-            harness,
-        };
+        let turn = result.turn.clone();
         if receipt.send(Ok(result)).is_err() {
             tracing::debug!(turn_id = %turn.id, "turn requester disconnected after admission");
         }
@@ -1057,14 +734,10 @@ async fn turn_status(
     service: Service,
     path: web::Path<TurnPath>,
 ) -> Result<web::Json<TurnStatusResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let active = service
-        .runtime
-        .is_turn_active(thread.as_ref(), path.turn_id)
+    crate::managed_agents::service::turn_status(&service.shared(), &path)
         .await
-        .map_err(ErrorInternalServerError)?;
-    Ok(web::Json(TurnStatusResult { active }))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn cancel_turn(
@@ -1087,14 +760,10 @@ async fn cancel_turn(
     } else {
         service.runtime.clone()
     };
-    let canceled_active_turn = runtime
-        .cancel_turn(HarnessTurnKey::new(path.thread_id, path.turn_id))
+    crate::managed_agents::service::cancel_turn(&runtime, path.thread_id, path.turn_id)
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(CancelTurnResult {
-        canceled_active_turn,
-        finished_event_id: None,
-    }))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn approval_response(
@@ -1102,14 +771,10 @@ async fn approval_response(
     path: web::Path<TurnPath>,
     body: web::Json<ApprovalResponseBody>,
 ) -> Result<web::Json<EventResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    service.thread(agent.as_ref(), path.thread_id).await?;
-    let event_id = service
-        .runtime
-        .approval_response(path.agent_id, path.thread_id, path.turn_id, &body)
+    crate::managed_agents::service::approval_response(&service.shared(), &path, body.into_inner())
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(EventResult { event_id }))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn unsupported_interaction(_service: Service) -> Result<HttpResponse, Error> {
@@ -1123,27 +788,10 @@ async fn events(
     path: web::Path<ThreadPath>,
     query: web::Query<EventsQuery>,
 ) -> Result<web::Json<exoharness::GetEventsResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let query = query.into_inner();
-    let result = thread
-        .get_events(Some(EventQuery {
-            cursor: query.after,
-            direction: Some(query.direction.unwrap_or(EventQueryDirection::Asc)),
-            limit: Some(query.limit.unwrap_or(100)),
-            types: query.event_type.map(|names| {
-                names
-                    .split(',')
-                    .filter(|name| !name.is_empty())
-                    .map(|name| exoharness::EventKind::custom(name.to_owned()))
-                    .collect()
-            }),
-            session_id: query.session_id,
-            turn_id: query.turn_id,
-        }))
+    crate::managed_agents::service::events(&service.shared(), &path, query.into_inner())
         .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(result))
+        .map(web::Json)
+        .map_err(request_error)
 }
 
 async fn watch(
@@ -1214,6 +862,13 @@ fn progress_stream(receiver: broadcast::Receiver<Event>, thread_id: ThreadId) ->
             }
         },
     ))
+}
+
+fn request_error(error: anyhow::Error) -> Error {
+    let status =
+        actix_web::http::StatusCode::from_u16(crate::managed_agents::service::error_status(&error))
+            .expect("valid request status");
+    actix_web::error::InternalError::new(error, status).into()
 }
 
 #[cfg(test)]

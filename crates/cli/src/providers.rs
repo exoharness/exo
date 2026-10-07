@@ -19,10 +19,11 @@ pub(crate) async fn runtime(
     client: Option<RuntimeClient>,
     definition: Option<&exo_managed_agents::AgentDefinition>,
     env: &crate::env::CliEnvironment,
+    state_root: Option<&Path>,
 ) -> Result<std::sync::Arc<executor::Runtime>> {
     use crate::{AgentCommands, Commands, HarnessSelection, managed_agents};
     use executor::managed_agents::LocalAgentSetup;
-    use exoharness::{BasicExoHarness, ExoHarness};
+    use exoharness::BasicExoHarness;
     use std::sync::Arc;
 
     let thread = match &cli.command {
@@ -56,9 +57,15 @@ pub(crate) async fn runtime(
             .map(managed_agents::harness_selection)
             .transpose()?,
     };
-    let config = crate::build_exo_config(cli)?;
-    let env_vars = env.clone().into_vars();
-    let state: Arc<dyn ExoHarness> = Arc::new(BasicExoHarness::new(config.clone()).await?);
+    let state_root = state_root.context("local provider requires a state root")?;
+    let config = crate::build_exo_config(cli, state_root)?;
+    let mut env_vars = env.clone().into_vars();
+    env_vars.insert("EXO_HOME".into(), state_root.to_string_lossy().into_owned());
+    let state = Arc::new(
+        BasicExoHarness::new(config.clone())
+            .await?
+            .with_local_sessions(state_root.to_owned()),
+    );
     if let Some(reference) = thread.and_then(|args| args.agent.as_deref())
         && let Some(selection) = selection.as_ref()
     {
@@ -85,21 +92,34 @@ pub(crate) async fn runtime(
             .unwrap_or_default(),
     };
     let pricing = Arc::new(match execution {
-        Some(args) => cost::load(args.pricing_path.clone(), args.pricing_url.clone()).await,
+        Some(args) => {
+            cost::load(
+                args.pricing_path.clone(),
+                args.pricing_url.clone(),
+                &state_root.join("cache/litellm_prices.json"),
+            )
+            .await
+        }
         None => cost::PricingTable::empty(),
     });
-    let provider = executor::LocalProvider::managed(state, config, env_vars, pricing)?
+    let provider = executor::LocalProvider::managed(state.clone(), config, env_vars, pricing)?
         .with_managed_agents(setup);
-    Ok(Arc::new(executor::Runtime::new(
-        provider,
-        execution.and_then(|args| {
-            env.braintrust_runtime_config(
-                args.braintrust_api_key.clone(),
-                args.braintrust_app_url.clone(),
-                args.braintrust_api_url.clone(),
-            )
+    Ok(Arc::new(
+        executor::Runtime::new(
+            provider,
+            execution.and_then(|args| {
+                env.braintrust_runtime_config(
+                    args.braintrust_api_key.clone(),
+                    args.braintrust_app_url.clone(),
+                    args.braintrust_api_url.clone(),
+                )
+            }),
+        )
+        .with_shutdown_hook(move || {
+            let state = state.clone();
+            async move { state.release_local_sessions().await }
         }),
-    )))
+    ))
 }
 
 pub(crate) fn validate_http_command(command: &crate::Commands) -> Result<()> {
@@ -174,11 +194,14 @@ pub enum ProviderCommands {
     Get {
         name: Option<String>,
     },
-    /// Clear the global provider selection without deleting profiles or credentials.
+    /// Clear the active directory selection, or the global selection when none applies.
     Clear {
-        /// Clear only the selection saved in this directory.
-        #[arg(long)]
+        /// Clear the directory selection that applies here without changing the global selection.
+        #[arg(long, conflicts_with = "global")]
         local: bool,
+        /// Clear only the global selection without changing directory selections.
+        #[arg(long, conflicts_with = "local")]
+        global: bool,
     },
     Create(ConfigureArgs),
     Update(ConfigureArgs),
@@ -719,13 +742,19 @@ pub async fn run(command: Option<&ProviderCommands>, store: &mut Store) -> Resul
     let command = command.unwrap_or(&current);
     match command {
         ProviderCommands::Get { name: None } => print_selection(store)?,
-        ProviderCommands::Clear { local } => {
-            let directory = local.then(std::env::current_dir).transpose()?;
+        ProviderCommands::Clear { local, global } => {
+            let cwd = std::env::current_dir()?;
             store.update(|config| {
-                if let Some(directory) = &directory {
+                let directory = (!global)
+                    .then(|| {
+                        cwd.ancestors()
+                            .find(|path| config.directory_defaults.contains_key(*path))
+                    })
+                    .flatten();
+                if let Some(directory) = directory {
                     config.directory_defaults.remove(directory);
                     config.directory_contexts.remove(directory);
-                } else {
+                } else if !local {
                     config.default = None;
                     config.default_context = None;
                 }

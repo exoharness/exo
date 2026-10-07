@@ -211,9 +211,13 @@ export class CodexAppServer {
     }
   }
 
-  close(): void {
+  get isRunning(): boolean {
+    return !this.closing && !this.finished;
+  }
+
+  async close(): Promise<void> {
     this.closing = true;
-    void this.transport.close();
+    await this.transport.close();
   }
 
   private async readLoop(): Promise<void> {

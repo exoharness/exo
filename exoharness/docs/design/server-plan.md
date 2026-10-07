@@ -197,7 +197,7 @@ without learning a second host-specific API
 The following code is the wrong long-term shape and should be removed once the IPC-backed exoharness client exists:
 
 - the bespoke TypeScript executor bridge in:
-  - `crates/executor/src/typescript.rs`
+  - `crates/executor/src/native/typescript.rs`
 
 - the custom host request protocol in:
   - `exoharness/typescript/harness/runner.ts`
@@ -264,7 +264,7 @@ So the Rust side stops pretending that a TS harness is a normal Rust executor im
 
 Remove:
 
-- `crates/executor/src/typescript.rs`
+- `crates/executor/src/native/typescript.rs`
 - the bespoke JSONL host request protocol
 - the bespoke `HarnessContext` SDK
 

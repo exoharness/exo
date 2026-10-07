@@ -1,5 +1,5 @@
 import { type ResponseInput } from "openai/resources/responses/responses";
-import { type JsonValue, type Message, toJsonValue } from "../harness";
+import { type JsonValue, type Message, toJsonValue } from "../harness/index";
 import { linguaMessagesToResponsesInput } from "../model-runtime/responses";
 import { isRecord } from "../model-runtime/shared";
 import { type CodexNotification } from "./app-server";
@@ -53,7 +53,7 @@ export function codexReplayItems(messages: Message[]): CodexReplayItem[] {
 
 export function codexReplayChunks(
   items: CodexReplayItem[],
-  maxChars = 64_000,
+  maxChars = 256_000,
 ): CodexReplayItem[][] {
   const units: CodexReplayItem[][] = [];
   let unit: CodexReplayItem[] = [];
@@ -112,7 +112,7 @@ async function compactThread(
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
           () => reject(new Error("Codex history compaction timed out")),
-          120_000,
+          600_000,
         );
       }),
     ]);

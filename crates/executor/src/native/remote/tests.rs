@@ -396,6 +396,9 @@ async fn rmcp_login_private_vaults_and_session_revocation() -> Result<()> {
         .await?;
     assert!(bob_client.get_agent(agent.id).await?.is_none());
     assert!(bob_client.delete_agent(agent.id).await.is_err());
+    assert!(alice_client.get_agent(agent.id).await?.is_some());
+    assert!(alice_client.delete_agent(agent.id).await?);
+    assert!(alice_client.get_agent(agent.id).await?.is_none());
     assert!(
         bob_client
             .create_agent(&NewAgentRequest {
@@ -805,6 +808,55 @@ async fn browser_login_requires_its_cookie_and_mutations_require_csrf() -> Resul
         401
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn caller_shutdown_keeps_thread_ownership_until_server_shutdown() -> Result<()> {
+    let f = Fixture::new(false).await?;
+    let credentials = f.login("alice@example.com", "alice-sub").await?;
+    let principal = f.client(&credentials)?.identity().await?.account_id;
+    let root = f._temp.path().join("state");
+    let config = crate::test_support::local_test_config(root.clone());
+    let state = Arc::new(f.harness.as_ref().clone().with_local_sessions(root.clone()));
+    let server = crate::Runtime::new(
+        crate::LocalProvider::managed(
+            state.clone(),
+            config.clone(),
+            Default::default(),
+            Arc::new(cost::PricingTable::empty()),
+        )?,
+        None,
+    )
+    .with_shutdown_hook(move || {
+        let state = state.clone();
+        async move { state.release_local_sessions().await }
+    });
+    let caller = server.with_caller(f.auth.caller(principal, false))?;
+    let agent =
+        exoharness::test_support::new_test_agent(caller.exoharness_handle().as_ref(), "shutdown")
+            .await?;
+    let thread = agent.new_thread(Default::default()).await?;
+    thread
+        .create_sandbox(exoharness::test_support::sandbox_request())
+        .await?;
+    caller.shutdown().await?;
+    assert!(thread.list_sandboxes().await?[0].running);
+
+    let contender = BasicExoHarness::new(config)
+        .await?
+        .with_local_sessions(root);
+    let busy = contender
+        .get_agent(&agent.record().id)
+        .await?
+        .unwrap()
+        .get_thread(&thread.record().id)
+        .await?
+        .unwrap();
+    assert!(busy.activate_caller().await.is_err());
+    server.shutdown().await?;
+    assert!(!thread.list_sandboxes().await?[0].running);
+    busy.activate_caller().await?;
+    contender.release_local_sessions().await
 }
 
 #[tokio::test]

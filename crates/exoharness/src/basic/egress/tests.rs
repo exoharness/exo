@@ -1,4 +1,5 @@
 use super::*;
+use crate::SandboxNetworkPolicy;
 use crate::vault::CredentialDestination;
 
 #[test]

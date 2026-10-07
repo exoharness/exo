@@ -56,6 +56,9 @@ impl ManagedSandboxHandle for ProcessManagedSandbox {
     async fn is_running(&self) -> Result<Option<bool>> {
         self.handle.is_running().await
     }
+    async fn activity(&self) -> Result<crate::SandboxActivity> {
+        self.handle.activity().await
+    }
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         self.handle.exec(command).await
     }

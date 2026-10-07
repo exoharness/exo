@@ -2,6 +2,11 @@ use super::*;
 use crate::test_support::local_test_config;
 use crate::vault::{VaultContext, global_vault};
 use crate::{BasicExoHarness, ExoHarness, ForkThreadRequest, NewAgentRequest, NewThreadRequest};
+use std::path::PathBuf;
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 use tempfile::TempDir;
 
 fn key(value: &str) -> Secret {
@@ -15,6 +20,30 @@ fn request(name: &str, value: &str, target: Option<CredentialDestination>) -> Pu
         secret: key(value),
         policy: target.map(Into::into),
     }
+}
+
+#[tokio::test]
+async fn default_file_key_is_scoped_to_the_configured_root_and_reopens() -> Result<()> {
+    let temp = TempDir::new()?;
+    let mut config = local_test_config(temp.path().join("state"));
+    config.secret_backend = crate::SecretBackendChoice::File { path: None };
+    let harness = BasicExoHarness::new(config.clone()).await?;
+    let vault = harness.create_vault("test").await?;
+    let id = vault
+        .put_secret(request("key", "test-secret", None))
+        .await?;
+    assert!(config.root.join("master.key").is_file());
+    config
+        .validate_secret_mount(&config.root)
+        .expect_err("key must not be mounted");
+    drop(harness);
+    let reopened = BasicExoHarness::new(config).await?;
+    let reopened_vault = reopened.get_vault(&vault.record().id).await?.unwrap();
+    assert_eq!(
+        reopened_vault.get_secret(&id).await?,
+        Some(key("test-secret"))
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -279,10 +308,7 @@ async fn metadata_tampering_cannot_redirect_secrets() -> Result<()> {
 async fn legacy_secrets_move_into_global_vault_with_stable_ids() -> Result<()> {
     let temp = TempDir::new()?;
     let config = local_test_config(temp.path());
-    let cipher = crate::basic::build_secret_cipher(
-        config.secret_backend.clone(),
-        temp.path().to_string_lossy().into_owned(),
-    )?;
+    let cipher = crate::basic::build_secret_cipher(config.secret_backend.clone(), temp.path());
     #[derive(Serialize)]
     struct LegacySecret {
         metadata: SecretMetadata,
@@ -676,7 +702,7 @@ printf 'read\n' >> "$root/calls"
     assert_eq!(calls()?, 3);
     std::fs::write(directory.join("token"), "after-expiry")?;
     for (age, expected, reads) in [(86_340, "rotated", 3), (86_400, "after-expiry", 4)] {
-        store.inner.github_checked.lock().unwrap().insert(
+        store.inner.native.github_checked.lock().unwrap().insert(
             id,
             (
                 unchanged.revision,

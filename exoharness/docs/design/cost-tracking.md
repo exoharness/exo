@@ -104,12 +104,13 @@ there is no cross-boundary coupling.
 
 Each loader resolves the table once and holds it as plain data, in this order:
 explicit `EXO_LITELLM_PRICES_PATH` (or `--pricing-path` on the CLI) → fresh
-on-disk cache (`$XDG_CACHE_HOME/exo/litellm_prices.json`, 24h TTL) → HTTP fetch
+on-disk cache (`<Exo home>/cache/litellm_prices.json`, 24h TTL) → HTTP fetch
 (`EXO_LITELLM_PRICES_URL` or the LiteLLM default, cached on success) → stale cache
 → none. A corrupt cache or unparseable fetch degrades to no table (cost stays
-null, tokens persist); the cache is written only when a fetched body parses. The
-two loaders share the same cache _path_ by convention, but neither requires the
-other to have written it.
+null, tokens persist); the cache is written only when a fetched body parses.
+Rust receives the cache path from the CLI; the TypeScript runner receives the
+resolved home as `EXO_HOME`. Both use the same cache path, and neither requires
+the other to have written it.
 
 ### Per-provider cost math
 

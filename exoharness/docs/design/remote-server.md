@@ -210,4 +210,4 @@ Ship these as separate reviewable changes. Automated validation covers the share
 - [Omnigent auth and SSO](https://omnigent.ai/docs/collaborate/auth) and [login routes](https://github.com/omnigent-ai/omnigent/blob/main/omnigent/server/routes/auth.py): embedded login and operator-controlled admission; Exo retains its existing CLI OAuth contract.
 - [`openidconnect`](https://docs.rs/openidconnect/latest/openidconnect/) and [`oxide-auth`](https://docs.rs/oxide-auth/latest/oxide_auth/): Rust OIDC client and OAuth server library candidates; validate coverage in the first login checkpoint.
 - [OIDC stable identity](https://openid.net/specs/openid-connect-core-1_0.html#ClaimStability): use issuer and subject for identity.
-- Existing code: `crates/cli/src/serve.rs`, `crates/cli/src/providers/oauth.rs`, `crates/executor/src/http_service.rs`, and `crates/exoharness/src/vault.rs`.
+- Existing code: `crates/cli/src/serve.rs`, `crates/cli/src/providers/oauth.rs`, `crates/executor/src/native/http_service.rs`, and `crates/exoharness/src/vault.rs`.

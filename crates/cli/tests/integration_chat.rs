@@ -219,50 +219,24 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             .collect::<Vec<_>>()
     );
 
-    // `agents/` holds the `by-slug/` index next to the agent-id dirs, and
-    // readdir order is not deterministic — pick the entry that actually has a
-    // `conversations` subdir instead of whatever comes back first.
-    let conv_root = root_dir
-        .path()
-        .join("exoharness/agents")
-        .read_dir()
-        .expect("agents dir exists")
-        .flatten()
-        .map(|entry| entry.path().join("conversations"))
-        .find(|path| path.is_dir())
-        .expect("at least one agent with a conversations dir");
-    let conv_dir = conv_root
-        .read_dir()
-        .expect("conversations dir exists")
-        .next()
-        .expect("at least one conversation")
-        .unwrap()
-        .path();
-    let events_dir = conv_dir.join("events");
-    let mut found_assistant_text = false;
-    for entry in events_dir.read_dir().expect("events dir exists").flatten() {
-        let raw = std::fs::read(entry.path()).expect("event file readable");
-        let event: Value = serde_json::from_slice(&raw).expect("event is valid json");
-        let Some(messages) = event
-            .pointer("/data/messages")
-            .and_then(Value::as_array)
-            .cloned()
-        else {
-            continue;
+    let output = run_exo(&["thread", "events", "test-agent", "first"], &root, &xdg);
+    let history: exoharness::GetEventsResult =
+        serde_json::from_slice(&output.stdout).expect("valid thread event history");
+    let found_assistant_text = history.events.iter().any(|event| {
+        let exoharness::EventData::Messages { messages, .. } = &event.data else {
+            return false;
         };
-        for message in messages {
-            if message.get("role").and_then(Value::as_str) == Some("assistant") {
-                let text = serde_json::to_string(&message).unwrap_or_default();
-                if text.contains("Hello from the mock OpenAI server.") {
-                    found_assistant_text = true;
-                }
-            }
-        }
-    }
+        messages.iter().any(|message| {
+            let lingua::Message::Assistant { content, .. } = message else {
+                return false;
+            };
+            serde_json::to_string(content)
+                .is_ok_and(|text| text.contains("Hello from the mock OpenAI server."))
+        })
+    });
     assert!(
         found_assistant_text,
-        "expected mocked assistant text in persisted events under {}",
-        events_dir.display()
+        "expected mocked assistant text in persisted thread events"
     );
 
     run_exo(&["thread", "delete", "test-agent", "first"], &root, &xdg);

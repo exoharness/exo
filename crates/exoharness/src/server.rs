@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use anyhow::anyhow;
+#[cfg(feature = "basic-backend")]
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 
-use crate::protocol::{
-    ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage, SnapshotScope,
-};
+#[cfg(feature = "basic-backend")]
+use crate::protocol::{ClientMessage, ServerMessage};
+use crate::protocol::{ConversationHandleInfo, Request, Response, SnapshotScope};
 use crate::vault::{VaultContext, require_vault};
 use crate::{
     AgentHandle, AgentId, AttachSandboxRequest, CancelSandboxProcessRequest,
@@ -539,6 +540,7 @@ impl ExoHarnessServer {
         }
     }
 
+    #[cfg(feature = "basic-backend")]
     pub async fn serve_jsonl<R, W>(&self, reader: R, writer: W) -> Result<()>
     where
         R: AsyncRead + Unpin,

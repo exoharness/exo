@@ -9,7 +9,7 @@ use exoharness::{
 use crate::{AgentConfig, BraintrustTracingConfig, ModelRequest, ModelResponse};
 
 #[async_trait]
-pub(crate) trait ExecutionTracer: Send + Sync {
+pub trait ExecutionTracer: Send + Sync {
     async fn flush(&self) -> Result<()>;
 
     async fn start_turn(
@@ -25,7 +25,7 @@ pub(crate) trait ExecutionTracer: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait TurnExecutionTrace: Send + Sync {
+pub trait TurnExecutionTrace: Send + Sync {
     fn export_parent(&self) -> Option<String> {
         None
     }
@@ -48,14 +48,14 @@ pub(crate) trait TurnExecutionTrace: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait LlmExecutionTrace: Send + Sync {
+pub trait LlmExecutionTrace: Send + Sync {
     async fn finish_success(self: Box<Self>, response: &ModelResponse, ttft: Option<Duration>);
 
     async fn finish_error(self: Box<Self>, error: &anyhow::Error);
 }
 
 #[async_trait]
-pub(crate) trait ToolExecutionTrace: Send + Sync {
+pub trait ToolExecutionTrace: Send + Sync {
     async fn finish_success(self: Box<Self>, result: &ToolResult);
 
     async fn finish_error(self: Box<Self>, error: &anyhow::Error);

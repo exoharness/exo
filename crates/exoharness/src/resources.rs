@@ -205,7 +205,6 @@ mod local;
 pub use local::ResourceStore;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub(crate) use local::host_git_credential;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MaterializeResourcesRequest {
     pub agent: crate::AgentId,
@@ -216,7 +215,6 @@ pub struct MaterializeResourcesRequest {
     pub resume: bool,
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 #[derive(Serialize, Deserialize)]
 pub struct GitCredential {
     pub identity: String,
@@ -224,7 +222,6 @@ pub struct GitCredential {
     pub token: String,
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 impl std::fmt::Debug for GitCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GitCredential")

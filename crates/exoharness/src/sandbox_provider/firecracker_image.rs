@@ -32,7 +32,7 @@ use tempfile::{Builder as TempBuilder, NamedTempFile};
 use tokio::io::AsyncWriteExt;
 use tracing::Instrument;
 
-const MATERIALIZER_VERSION: u32 = 5;
+const MATERIALIZER_VERSION: u32 = 6;
 const EXT4_MAGIC_OFFSET: u64 = 1024 + 0x38;
 const EXT4_MAGIC: [u8; 2] = [0x53, 0xef];
 const GUEST_UID: u32 = 10_001;
@@ -865,7 +865,7 @@ fn apply_layer(rootfs: &Path, layer: &CachedLayer, decompressed_budget: u64) -> 
     let whiteouts = collect_whiteouts(layer, decompressed_budget)?;
     for whiteout in whiteouts {
         match whiteout {
-            Whiteout::Remove(path) => remove_whiteout_target(rootfs, &path)?,
+            Whiteout::Remove(path) => remove_layer_target(rootfs, &path)?,
             Whiteout::Opaque(path) => clear_opaque_directory(rootfs, &path)?,
         }
     }
@@ -875,9 +875,8 @@ fn apply_layer(rootfs: &Path, layer: &CachedLayer, decompressed_budget: u64) -> 
     archive.set_preserve_permissions(true);
     archive.set_preserve_ownerships(true);
     archive.set_preserve_mtime(true);
-    // Do not materialize xattrs: extraction runs as root, and an image-supplied
-    // security.capability xattr would otherwise grant file capabilities that
-    // only the guest's nosuid mounts keep inert.
+    // File capabilities are not materialized on the host. Guest-root access
+    // uses ordinary setuid binaries such as sudo inside the VM.
     archive.set_unpack_xattrs(false);
     archive.set_overwrite(true);
     // The byte budget alone does not bound inodes: tar headers are 512 bytes,
@@ -910,23 +909,32 @@ fn apply_layer(rootfs: &Path, layer: &CachedLayer, decompressed_budget: u64) -> 
                 path.display()
             );
         }
-        let mode = entry.header().mode()?;
+        if entry_type.is_hard_link() {
+            // tar's overwrite mode does not unlink hard-link destinations.
+            let name = path
+                .file_name()
+                .context("OCI hard link has no destination filename")?;
+            let parent = rootfs.join(path.parent().unwrap_or_else(|| Path::new("")));
+            match fs::canonicalize(parent) {
+                Ok(parent) => {
+                    let rootfs = fs::canonicalize(rootfs)?;
+                    let relative_parent = parent.strip_prefix(&rootfs).with_context(|| {
+                        format!(
+                            "OCI hard-link destination escapes the root filesystem: {}",
+                            path.display()
+                        )
+                    })?;
+                    remove_layer_target(&rootfs, &relative_parent.join(name))?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         if !entry.unpack_in(rootfs)? {
             bail!(
                 "OCI layer entry escapes the root filesystem: {}",
                 path.display()
             );
-        }
-        // Image content is untrusted, so setuid/setgid never survive into the
-        // filesystem. Guest workloads run with no_new_privs on nosuid mounts,
-        // which makes these bits unusable anyway; stripping them here keeps
-        // that true even if a future mount option changes.
-        if mode & 0o6000 != 0 && (entry_type.is_file() || entry_type.is_dir()) {
-            let target = rootfs.join(&path);
-            let metadata = fs::symlink_metadata(&target)?;
-            if !metadata.file_type().is_symlink() {
-                fs::set_permissions(&target, Permissions::from_mode(metadata.mode() & 0o1777))?;
-            }
         }
     }
     Ok(())
@@ -1137,7 +1145,7 @@ fn validate_archive_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_whiteout_target(rootfs: &Path, relative: &Path) -> Result<()> {
+fn remove_layer_target(rootfs: &Path, relative: &Path) -> Result<()> {
     let target = jailed_path(rootfs, relative, true)?;
     let metadata = match fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
@@ -1554,6 +1562,79 @@ mod tests {
     }
 
     #[test]
+    fn layers_replace_existing_hard_links() {
+        for destination in ["usr/bin/tool-version", "bin/tool-version"] {
+            let directory = tempfile::tempdir().unwrap();
+            let rootfs = directory.path().join("rootfs");
+            fs::create_dir(&rootfs).unwrap();
+            std::os::unix::fs::symlink("usr/bin", rootfs.join("bin")).unwrap();
+            let metadata = fs::metadata(directory.path()).unwrap();
+
+            for (name, contents) in [("base.tar", b"old"), ("upper.tar", b"new")] {
+                let mut builder = Builder::new(Vec::new());
+                append_file(
+                    &mut builder,
+                    "usr/bin/tool",
+                    contents,
+                    u64::from(metadata.uid()),
+                    u64::from(metadata.gid()),
+                );
+                let mut header = Header::new_gnu();
+                header.set_entry_type(EntryType::Link);
+                header.set_size(0);
+                builder
+                    .append_link(&mut header, destination, "usr/bin/tool")
+                    .unwrap();
+                let path = directory.path().join(name);
+                fs::write(&path, builder.into_inner().unwrap()).unwrap();
+                let layer = CachedLayer {
+                    path,
+                    media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
+                };
+
+                apply_layer(&rootfs, &layer, TEST_LAYER_BUDGET).unwrap();
+                assert_eq!(fs::read(rootfs.join(destination)).unwrap(), contents);
+                assert_eq!(
+                    fs::metadata(rootfs.join(destination)).unwrap().ino(),
+                    fs::metadata(rootfs.join("usr/bin/tool")).unwrap().ino()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hard_link_replacement_rejects_unsafe_destinations() {
+        let directory = tempfile::tempdir().unwrap();
+        let rootfs = directory.path().join("rootfs");
+        let victim = directory.path().join("victim");
+        fs::create_dir(&rootfs).unwrap();
+        fs::create_dir(&victim).unwrap();
+        fs::write(rootfs.join("source"), b"source").unwrap();
+        fs::write(victim.join("precious"), b"safe").unwrap();
+        std::os::unix::fs::symlink(&victim, rootfs.join("escape")).unwrap();
+
+        for destination in ["escape/precious", "."] {
+            let mut builder = Builder::new(Vec::new());
+            let mut header = Header::new_gnu();
+            header.set_entry_type(EntryType::Link);
+            header.set_size(0);
+            builder
+                .append_link(&mut header, destination, "source")
+                .unwrap();
+            let path = directory.path().join("hostile.tar");
+            fs::write(&path, builder.into_inner().unwrap()).unwrap();
+            let layer = CachedLayer {
+                path,
+                media_type: "application/vnd.oci.image.layer.v1.tar".to_string(),
+            };
+
+            assert!(apply_layer(&rootfs, &layer, TEST_LAYER_BUDGET).is_err());
+            assert_eq!(fs::read(victim.join("precious")).unwrap(), b"safe");
+            assert_eq!(fs::read(rootfs.join("source")).unwrap(), b"source");
+        }
+    }
+
+    #[test]
     fn layers_apply_whiteouts_before_extracting_new_entries() {
         let directory = tempfile::tempdir().unwrap();
         let rootfs = directory.path().join("rootfs");
@@ -1642,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn setuid_and_setgid_bits_are_stripped_from_layers() {
+    fn setuid_and_setgid_bits_survive_for_guest_privilege_elevation() {
         let directory = tempfile::tempdir().unwrap();
         let rootfs = directory.path().join("rootfs");
         fs::create_dir(&rootfs).unwrap();
@@ -1650,7 +1731,7 @@ mod tests {
         let mut builder = Builder::new(Vec::new());
         append_file_with_mode(
             &mut builder,
-            "bin/backdoor",
+            "bin/sudo",
             b"#!/bin/sh",
             u64::from(metadata.uid()),
             u64::from(metadata.gid()),
@@ -1673,10 +1754,10 @@ mod tests {
         };
 
         apply_layer(&rootfs, &layer, TEST_LAYER_BUDGET).unwrap();
-        let suid_mode = fs::metadata(rootfs.join("bin/backdoor")).unwrap().mode();
+        let suid_mode = fs::metadata(rootfs.join("bin/sudo")).unwrap().mode();
         let sgid_mode = fs::metadata(rootfs.join("bin/sgid")).unwrap().mode();
-        assert_eq!(suid_mode & 0o7777, 0o755, "setuid bit must be stripped");
-        assert_eq!(sgid_mode & 0o7777, 0o755, "setgid bit must be stripped");
+        assert_eq!(suid_mode & 0o7777, 0o4755);
+        assert_eq!(sgid_mode & 0o7777, 0o2755);
     }
 
     #[test]
@@ -1783,7 +1864,7 @@ mod tests {
         let digest = format!("sha256:{}", "a".repeat(64));
         assert_eq!(
             cache_image_dir(Path::new("/cache"), "linux-arm64", &digest).unwrap(),
-            Path::new("/cache/v5/linux-arm64").join("a".repeat(64))
+            Path::new("/cache/v6/linux-arm64").join("a".repeat(64))
         );
         assert!(cache_image_dir(Path::new("/cache"), "linux-arm64", "latest").is_err());
     }

@@ -5,20 +5,30 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["client"]
+client = [
+  "exo-mcp/client",
+  "exoharness/http-client",
+  "dep:reqwest",
+  "dep:tokio",
+  "dep:tokio-util",
+]
+
 [dependencies]
 futures.workspace = true
-exo-mcp = { path = "../mcp" }
+exo-mcp = { path = "../mcp", default-features = false }
 anyhow.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
-exoharness = { path = "../exoharness", features = ["http-client"] }
+exoharness = { path = "../exoharness" }
 lingua.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
-tokio.workspace = true
-tokio-util = { workspace = true, features = ["io"] }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, features = ["io"], optional = true }
 url.workspace = true
 
 [dev-dependencies]

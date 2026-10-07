@@ -6,26 +6,9 @@ use exoharness::{AgentHandle, ConversationHandle, Result, ToolRequest, ToolResul
 
 use crate::{AgentConfig, ConversationConfig, ToolDefinition, ToolRuntime};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeMcpServer {
-    pub name: String,
-    pub url: String,
-    pub environment_variable: Option<String>,
-    pub tools: Vec<NativeMcpTool>,
-    pub disabled_tools: Vec<String>,
-}
+use crate::{NativeMcpServer, NativeMcpTool};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NativeMcpTool {
-    pub name: String,
-    pub exposed_name: String,
-}
-
-pub(crate) fn credential_variable(id: &exoharness::SecretId) -> String {
-    format!("EXO_MCP_{}", id.to_string().replace('-', "_"))
-}
+pub(crate) use crate::mcp_types::credential_variable;
 
 pub struct McpToolRuntime<T> {
     inner: T,

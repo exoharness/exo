@@ -116,7 +116,7 @@ async fn daytona_snapshot_and_rewind_round_trip() {
     // Phase 4: rewind to the snapshot.
     conv.start_sandbox(StartSandboxRequest {
         id: sandbox_id.clone(),
-        snapshot_id,
+        snapshot_id: Some(snapshot_id),
         idle_seconds: None,
         provider: None,
     })

@@ -2126,9 +2126,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
- "getrandom 0.4.2",
  "hybrid-array",
- "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -2701,6 +2699,7 @@ dependencies = [
  "bytes",
  "chrono",
  "cost",
+ "encoding_rs",
  "exo-managed-agents",
  "exo-mcp",
  "exoharness",
@@ -2721,6 +2720,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "web-time",
  "wiremock",
 ]
 
@@ -2852,6 +2852,7 @@ dependencies = [
  "flate2",
  "futures",
  "hickory-proto",
+ "http 1.4.0",
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",
@@ -2868,6 +2869,7 @@ dependencies = [
  "rustix 1.1.4",
  "semver",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
  "smolmachines",
@@ -6302,6 +6304,16 @@ dependencies = [
  "js-sys",
  "serde",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

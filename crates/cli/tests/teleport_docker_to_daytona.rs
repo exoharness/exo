@@ -116,7 +116,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
     // 3. Restore under Daytona via the provider override (-> bridge).
     conv.start_sandbox(StartSandboxRequest {
         id: sandbox_id.clone(),
-        snapshot_id,
+        snapshot_id: Some(snapshot_id),
         idle_seconds: None,
         provider: Some(SandboxProvider::Daytona),
     })
@@ -178,7 +178,7 @@ async fn teleport_docker_sandbox_to_daytona_keeps_files() {
     let error = conv
         .start_sandbox(StartSandboxRequest {
             id: mounted_id.clone(),
-            snapshot_id,
+            snapshot_id: Some(snapshot_id),
             idle_seconds: None,
             provider: Some(SandboxProvider::Daytona),
         })

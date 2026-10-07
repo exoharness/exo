@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use exoharness::{
-    AddEventsResult, ArtifactVersion, ConversationHandle, EventData, EventId, SandboxId,
+    AddEventsResult, ArtifactVersion, ConversationHandle, Event, EventData, EventId, SandboxId,
     SnapshotHandle, SnapshotId, StartSandboxRequest, TurnHandle, TurnRecord, WriteArtifactRequest,
 };
 use futures::StreamExt;
@@ -149,15 +149,32 @@ impl ActiveEventTurn {
         if events.is_empty() {
             return Ok(HarnessEventAck::default());
         }
-        let result = self.turn.add_events(events).await?;
-        let events: Vec<_> =
-            futures::future::try_join_all(result.event_ids.into_iter().map(|id| async move {
-                self.thread
-                    .get_event(id)
-                    .await?
-                    .ok_or_else(|| anyhow!("appended harness event is missing: {id}"))
-            }))
-            .await?;
+        let result = self.turn.add_events(events.clone()).await?;
+        ensure!(
+            result.event_ids.len() == events.len(),
+            "harness event append returned {} ids for {} events",
+            result.event_ids.len(),
+            events.len()
+        );
+        // The append returns IDs in input order. Echo the submitted payloads
+        // instead of fetching every event back from storage for the ACK.
+        let events = result
+            .event_ids
+            .into_iter()
+            .zip(events)
+            .map(|(id, data)| {
+                Ok(Event {
+                    id,
+                    thread_id: self.thread.record().id,
+                    session_id: Some(self.turn.record().session_id),
+                    turn_id: Some(self.turn.record().id),
+                    created_at: id
+                        .timestamp()
+                        .context("appended event id has no timestamp")?,
+                    data,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         if let Some(stream) = &self.stream {
             for event in &events {
                 if let Some(output) = execution_stream_event(event.data.clone()) {

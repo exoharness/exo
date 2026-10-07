@@ -85,7 +85,7 @@ pub fn model_credential_destination(config: &AgentConfig) -> Result<Option<Crede
             Some(url) => url::Url::parse(url)?,
             None => exoharness::vault::model_endpoint(
                 None,
-                if crate::harness_runtime::is_anthropic_model(&config.model) {
+                if crate::model_config::is_anthropic_model(&config.model) {
                     "ANTHROPIC_API_KEY"
                 } else {
                     "OPENAI_API_KEY"
@@ -100,15 +100,18 @@ pub fn model_credential_destination(config: &AgentConfig) -> Result<Option<Crede
     )?))
 }
 
-pub(crate) fn installation() -> Result<PathBuf> {
-    crate::typescript::typescript_workspace_root()
+pub trait HarnessModules: Send + Sync {
+    fn installation(&self) -> Result<PathBuf>;
+    fn resolve(&self, path: &Path) -> Result<PathBuf>;
+    fn preset_image(&self, preset: TypeScriptHarnessPreset) -> Option<String>;
 }
 
-pub fn agent_config(
+pub fn agent_config_with_modules(
     definition: &AgentDefinition,
     sandbox: SandboxProvider,
     harness: Option<&str>,
     model: Option<&str>,
+    modules: &dyn HarnessModules,
 ) -> Result<AgentConfig> {
     let explicit_harness = harness.is_some();
     let harness = harness.unwrap_or(&definition.frontmatter.harness);
@@ -134,8 +137,8 @@ pub fn agent_config(
                 .and_then(Path::parent)
                 .unwrap_or(Path::new("."))
                 .join(path);
-            let path = path
-                .canonicalize()
+            let path = modules
+                .resolve(&path)
                 .with_context(|| format!("resolving harness module {}", path.display()))?;
             (
                 if harness == "exo" {
@@ -151,7 +154,7 @@ pub fn agent_config(
         }
         _ => {
             let module = if let Some(preset) = preset {
-                installation()?.join(preset.module_path())
+                modules.installation()?.join(preset.module_path())
             } else {
                 let path = Path::new(harness);
                 if !harness.contains(std::path::MAIN_SEPARATOR)
@@ -172,7 +175,7 @@ pub fn agent_config(
                 };
                 base.join(path)
             };
-            let module = module.canonicalize().with_context(|| {
+            let module = modules.resolve(&module).with_context(|| {
                 format!(
                     "resolving harness module {} on this provider",
                     module.display()
@@ -201,8 +204,8 @@ pub fn agent_config(
             .iter()
             .map(|path| {
                 let path = base.join(path);
-                Ok(path
-                    .canonicalize()
+                Ok(modules
+                    .resolve(&path)
                     .with_context(|| {
                         format!("resolving tool module {} on this provider", path.display())
                     })?
@@ -232,9 +235,7 @@ pub fn agent_config(
             &definition.system_prompt(),
         )],
         sandbox: AgentSandboxConfig {
-            image: preset
-                .and_then(TypeScriptHarnessPreset::sandbox_image)
-                .map(str::to_string),
+            image: preset.and_then(|preset| modules.preset_image(preset)),
             provider: sandbox,
             scope: Default::default(),
             mounts: vec![],

@@ -1,21 +1,35 @@
 use std::ops::Bound;
 use std::sync::Arc;
+#[cfg(feature = "http-client")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::{Context, anyhow, bail};
+#[cfg(feature = "http-client")]
+use anyhow::Context;
+#[cfg(feature = "http-client")]
+use anyhow::anyhow;
+use anyhow::bail;
 use async_trait::async_trait;
+#[cfg(feature = "basic-backend")]
 use tokio::sync::oneshot;
+#[cfg(feature = "basic-backend")]
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use url::Url;
 
+#[cfg(feature = "http-client")]
 use super::HTTP_EXOHARNESS_REQUEST_PATH;
+#[cfg(feature = "basic-backend")]
 use super::process::{
     LiveHttpSandboxProcess, spawn_http_sandbox_process_event_poller,
     spawn_http_sandbox_process_stdin_forwarder,
 };
-use crate::protocol::{
-    ClientMessage, ConversationHandleInfo, Request, Response, ServerMessage, SnapshotScope,
-};
+#[cfg(feature = "http-client")]
+use crate::HttpClient;
+use crate::ResourceScope;
+#[cfg(feature = "basic-backend")]
+use crate::SandboxProcessParts;
+#[cfg(feature = "http-client")]
+use crate::protocol::{ClientMessage, ServerMessage};
+use crate::protocol::{ConversationHandleInfo, Request, Response, SnapshotScope};
 use crate::vault::{
     CredentialDestination, ResolvedSecret, VaultContext, VaultHandle, VaultId, VaultRecord,
 };
@@ -28,13 +42,11 @@ use crate::{
     GetEventsResult, GetSandboxProcessEventsResult, ListConversationsRequest,
     ListConversationsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
     ReadArtifactRequest, RestoreSandboxRequest, Result, RunInSandboxRequest, SandboxAttachment,
-    SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessParts,
-    SandboxProcessRecord, SandboxProcessStatus, SandboxRecord, Secret, SecretId, SecretMetadata,
-    SessionId, SnapshotHandle, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest,
-    TurnHandle, TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest,
-    WriteSandboxProcessInputRequest,
+    SandboxHandle, SandboxId, SandboxProcess, SandboxProcessEventQuery, SandboxProcessRecord,
+    SandboxProcessStatus, SandboxRecord, Secret, SecretId, SecretMetadata, SessionId,
+    SnapshotHandle, SnapshotId, StartSandboxProcessRequest, StartSandboxRequest, TurnHandle,
+    TurnRecord, WaitSandboxProcessRequest, WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
-use crate::{HttpClient, ResourceScope};
 
 #[derive(Clone)]
 pub struct HttpExoHarness {
@@ -55,6 +67,7 @@ pub trait ExoHttpTransport: Send + Sync {
     }
 }
 
+#[cfg(feature = "http-client")]
 #[derive(Clone)]
 struct RpcTransport {
     http: HttpClient,
@@ -62,6 +75,7 @@ struct RpcTransport {
 }
 
 impl HttpExoHarness {
+    #[cfg(feature = "http-client")]
     pub fn new(base_url: impl AsRef<str>, bearer_token: Option<String>) -> Result<Self> {
         let mut http = HttpClient::new(request_endpoint(base_url.as_ref())?)?;
         if let Some(token) = bearer_token {
@@ -86,6 +100,7 @@ impl HttpExoHarness {
     }
 }
 
+#[cfg(feature = "http-client")]
 #[async_trait]
 impl ExoHttpTransport for RpcTransport {
     fn endpoint(&self) -> &Url {
@@ -471,6 +486,7 @@ async fn http_cancel_sandbox_process(
     }
 }
 
+#[cfg(feature = "basic-backend")]
 async fn http_run_in_sandbox(
     harness: &HttpExoHarness,
     scope: ResourceScope,
@@ -525,6 +541,15 @@ async fn http_run_in_sandbox(
             }),
         }),
     }))
+}
+
+#[cfg(not(feature = "basic-backend"))]
+async fn http_run_in_sandbox(
+    _harness: &HttpExoHarness,
+    _scope: ResourceScope,
+    _request: RunInSandboxRequest,
+) -> Result<Box<dyn SandboxProcess>> {
+    unsupported("run_in_sandbox")
 }
 
 #[async_trait]
@@ -1243,6 +1268,7 @@ impl TurnHandle for HttpTurnHandle {
     }
 }
 
+#[cfg(feature = "http-client")]
 fn request_endpoint(base_url: &str) -> Result<Url> {
     let mut url = Url::parse(base_url).context("invalid HTTP exoharness URL")?;
     url.set_query(None);
@@ -1469,5 +1495,123 @@ impl VaultContext for HttpConversationHandle {
         self.harness
             .get_scoped_vault(self.sandbox_scope(), *id)
             .await
+    }
+}
+
+/// A sandbox transport scoped independently of agent metadata. Hosted stores use
+/// this with their host transport; all RPC encoding stays in the shared client.
+pub struct HttpSandboxHandle {
+    harness: HttpExoHarness,
+    scope: ResourceScope,
+}
+impl HttpExoHarness {
+    pub fn sandbox_handle(&self, scope: ResourceScope) -> HttpSandboxHandle {
+        HttpSandboxHandle {
+            harness: self.clone(),
+            scope,
+        }
+    }
+}
+#[async_trait]
+impl SnapshotHandle for HttpSandboxHandle {
+    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+        http_snapshot_sandbox(
+            &self.harness,
+            SnapshotScope::Resource { scope: self.scope },
+            id,
+        )
+        .await
+    }
+
+    async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
+        http_start_sandbox(
+            &self.harness,
+            SnapshotScope::Resource { scope: self.scope },
+            request,
+        )
+        .await
+    }
+}
+
+#[async_trait]
+impl SandboxHandle for HttpSandboxHandle {
+    async fn list_sandboxes(&self) -> Result<Vec<SandboxRecord>> {
+        http_list_sandboxes(&self.harness, self.scope).await
+    }
+
+    async fn create_sandbox(&self, request: CreateSandboxRequest) -> Result<SandboxId> {
+        http_create_sandbox(&self.harness, self.scope, request).await
+    }
+
+    async fn fork_sandbox(&self, request: ForkSandboxRequest) -> Result<SandboxId> {
+        http_fork_sandbox(&self.harness, self.scope, request).await
+    }
+
+    async fn restore_sandbox(&self, request: RestoreSandboxRequest) -> Result<SandboxId> {
+        http_restore_sandbox(&self.harness, self.scope, request).await
+    }
+    async fn terminate_sandbox(&self, id: SandboxId) -> Result<()> {
+        http_terminate_sandbox(&self.harness, self.scope, id).await
+    }
+
+    async fn attach_sandbox(&self, request: AttachSandboxRequest) -> Result<SandboxId> {
+        http_attach_sandbox(&self.harness, self.scope, request).await
+    }
+
+    async fn detach_sandbox(&self, id: SandboxId) -> Result<SandboxAttachment> {
+        http_detach_sandbox(&self.harness, self.scope, id).await
+    }
+
+    async fn stop_sandbox(&self, id: SandboxId) -> Result<()> {
+        http_stop_sandbox(&self.harness, self.scope, id).await
+    }
+
+    async fn start_sandbox_process(
+        &self,
+        request: StartSandboxProcessRequest,
+    ) -> Result<SandboxProcessRecord> {
+        http_start_sandbox_process(&self.harness, self.scope, request).await
+    }
+
+    async fn write_sandbox_process_input(
+        &self,
+        request: WriteSandboxProcessInputRequest,
+    ) -> Result<()> {
+        http_write_sandbox_process_input(&self.harness, self.scope, request).await
+    }
+
+    async fn close_sandbox_process_input(
+        &self,
+        request: CloseSandboxProcessInputRequest,
+    ) -> Result<()> {
+        http_close_sandbox_process_input(&self.harness, self.scope, request).await
+    }
+
+    async fn get_sandbox_process_events(
+        &self,
+        query: SandboxProcessEventQuery,
+    ) -> Result<GetSandboxProcessEventsResult> {
+        http_get_sandbox_process_events(&self.harness, self.scope, query).await
+    }
+
+    async fn wait_sandbox_process(
+        &self,
+        request: WaitSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        http_wait_sandbox_process(&self.harness, self.scope, request).await
+    }
+
+    async fn cancel_sandbox_process(
+        &self,
+        request: CancelSandboxProcessRequest,
+    ) -> Result<SandboxProcessStatus> {
+        http_cancel_sandbox_process(&self.harness, self.scope, request).await
+    }
+
+    async fn run_in_sandbox(
+        &self,
+        request: RunInSandboxRequest,
+    ) -> Result<Box<dyn SandboxProcess>> {
+        http_run_in_sandbox(&self.harness, self.scope, request).await
     }
 }
