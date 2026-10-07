@@ -1024,7 +1024,7 @@ impl AgentHandle for BasicAgentHandle {
             .storage
             .list_keys(conversation_dir.join("events"))
             .await?;
-        refresh_conversation_record(&self.harness.inner.storage, &event_keys, &mut record).await?;
+        record.latest_event_id = latest_event_id_from_keys(&event_keys);
         Ok(Some(Arc::new(BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.record.id,
@@ -1695,6 +1695,15 @@ impl ConversationHandle for BasicConversationHandle {
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         let conversation_dir = self.conversation_dir();
+        if record.name.is_empty() {
+            let keys = self
+                .harness
+                .inner
+                .storage
+                .list_keys(self.events_dir())
+                .await?;
+            refresh_conversation_record(&self.harness.inner.storage, &keys, &mut record).await?;
+        }
         let name = if record.name.is_empty() {
             thread_name_from_messages(&request.input)
         } else {
@@ -2622,7 +2631,9 @@ async fn load_conversation_record(
         .get_json::<ConversationRecord>(conversation_dir.join("record.json"))
         .await?;
     let keys = storage.list_keys(conversation_dir.join("events")).await?;
-    refresh_conversation_record(storage, &keys, &mut record).await?;
+    // Sandbox lifecycle operations need the committed head without reading history.
+    // Generated titles are recovered by thread listings and before admitting input.
+    record.latest_event_id = latest_event_id_from_keys(&keys);
     Ok(record)
 }
 
@@ -2943,7 +2954,12 @@ mod thread_name_tests {
         let reopened =
             BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
         let agent = reopened.get_agent(&agent.record().id).await?.unwrap();
-        let saved = agent.get_thread(&thread.record().id).await?.unwrap();
+        let listed = agent.list_threads(Default::default()).await?;
+        let saved = listed
+            .threads
+            .iter()
+            .find(|saved| saved.record().id == thread.record().id)
+            .unwrap();
         assert_eq!(saved.record().name, "Investigate autoevals #223");
         Ok(())
     }
