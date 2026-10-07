@@ -313,6 +313,7 @@ pub enum ExecutionStreamEvent {
         result: ToolResult,
     },
     Completed(SendResult),
+    Suspended(exoharness::TurnRecord),
 }
 
 impl Stream for ExecutionStreamHandle {

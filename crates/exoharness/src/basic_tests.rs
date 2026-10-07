@@ -37,56 +37,6 @@ use crate::{
 const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
 
 #[tokio::test]
-async fn unfinished_turn_index_survives_restart_and_excludes_finished_threads() -> crate::Result<()>
-{
-    let temp = TempDir::new()?;
-    let harness = BasicExoHarness::new(local_test_config(temp.path())).await?;
-    let agent = harness
-        .new_agent(NewAgentRequest {
-            vaults: vec![],
-            slug: "indexed-turns".to_string(),
-            name: "Indexed turns".to_string(),
-        })
-        .await?;
-    let finished_thread = agent
-        .new_conversation(NewConversationRequest::default())
-        .await?;
-    let finished = finished_thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
-    finished.finish().await?;
-    let unfinished_thread = agent
-        .new_conversation(NewConversationRequest::default())
-        .await?;
-    let unfinished = unfinished_thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
-    let agent_id = agent.record().id;
-    let thread_id = unfinished_thread.record().id;
-    let turn_record = unfinished.record().clone();
-    let query = crate::ListThreadsRequest {
-        unfinished_only: true,
-        ..Default::default()
-    };
-    assert_eq!(agent.list_threads(query.clone()).await?.threads.len(), 1);
-
-    drop(unfinished);
-    drop(unfinished_thread);
-    drop(finished);
-    drop(finished_thread);
-    drop(agent);
-    drop(harness);
-
-    let reopened = BasicExoHarness::new(local_test_config(temp.path())).await?;
-    let agent = reopened.get_agent(&agent_id).await?.expect("agent exists");
-    assert_eq!(agent.list_threads(query.clone()).await?.threads.len(), 1);
-    let thread = agent.get_thread(&thread_id).await?.expect("thread exists");
-    thread.turn_handle(turn_record).await?.finish().await?;
-    assert!(agent.list_threads(query).await?.threads.is_empty());
-    Ok(())
-}
-
-#[tokio::test]
 async fn in_memory_state_does_not_create_files_or_survive_reopening() -> crate::Result<()> {
     let temp = TempDir::new()?;
     let root = temp.path().join("unused");
@@ -103,9 +53,10 @@ async fn in_memory_state_does_not_create_files_or_survive_reopening() -> crate::
         .await?;
     let turn = thread
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("remember this")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await?;
     turn.write_artifact(WriteArtifactRequest {
@@ -178,6 +129,31 @@ async fn unsupported_backend_fork_is_an_error() {
     };
     assert!(error.to_string().contains("does not support forking"));
     assert!(backend.requests.lock().await.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_basic_coordinator() -> crate::Result<()> {
+    use crate::turn_coordinator::{TurnThread, contract_tests};
+
+    let tempdir = TempDir::new()?;
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path())).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            vaults: vec![],
+            slug: "queue-contracts".into(),
+            name: "Queue contracts".into(),
+        })
+        .await?;
+    let thread = agent.new_thread(crate::NewThreadRequest::default()).await?;
+    contract_tests::test_turn_coordinator(
+        harness.turn_coordinator(),
+        TurnThread {
+            agent_id: agent.record().id,
+            thread_id: thread.record().id,
+        },
+        42,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1019,9 +995,10 @@ async fn turn_events_continue_after_artifact_writes() {
 
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("ping")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("turn");
@@ -1091,7 +1068,7 @@ async fn rebuilding_a_turn_uses_the_committed_event_head_for_its_next_sandbox_ev
             idle_seconds: Some(60),
         })
         .await?;
-    let turn = thread.begin_turn(BeginTurnRequest::default()).await?;
+    let turn = crate::test_support::begin_test_turn(thread.as_ref()).await?;
     let turn_record = turn.record().clone();
 
     let added = turn
@@ -1139,9 +1116,10 @@ async fn turn_artifact_write_allows_interleaved_conversation_writes() {
         .expect("conversation");
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("ping")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("turn");
@@ -1575,9 +1553,10 @@ async fn conversation_create_sandbox_is_not_turn_scoped() {
         .expect("conversation");
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("start turn")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("turn should begin");

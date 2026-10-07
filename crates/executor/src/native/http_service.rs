@@ -96,23 +96,22 @@ impl RuntimeHttpService {
         self
     }
 
-    pub fn spawn_recovery(&self) {
-        self.runtime.begin_recovery_scan();
+    pub fn spawn_recovery(&self) -> Result<()> {
+        // Incoming turns can wake older queue entries before discovery finishes.
+        if self.auth.is_some() {
+            let service = self.clone();
+            self.runtime
+                .set_recovery_resolver(Arc::new(move |principal: String| {
+                    service.caller_runtime(principal)
+                }))?;
+        }
         let service = self.clone();
         tokio::spawn(async move {
-            let resolver = service.auth.as_ref().map(|_| {
-                let service = service.clone();
-                Arc::new(move |principal: String| service.caller_runtime(principal))
-                    as crate::harness_executor::RecoveryRuntimeResolver
-            });
-            if let Err(error) = service
-                .runtime
-                .recover_unfinished_turns_with_resolver(resolver)
-                .await
-            {
+            if let Err(error) = service.runtime.recover_unfinished_turns().await {
                 tracing::error!(%error, "failed to recover unfinished turns");
             }
         });
+        Ok(())
     }
 
     pub fn caller_runtime(&self, principal: String) -> Result<Arc<Runtime>> {
@@ -190,7 +189,9 @@ pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::i
         })
     })
     .listen(listener)?;
-    recovery_service.spawn_recovery();
+    recovery_service
+        .spawn_recovery()
+        .map_err(std::io::Error::other)?;
     Ok(server.run())
 }
 
@@ -784,10 +785,15 @@ async fn cancel_turn(
     } else {
         service.runtime.clone()
     };
-    crate::managed_agents::service::cancel_turn(&runtime, path.thread_id, path.turn_id)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
+    crate::managed_agents::service::cancel_turn(
+        &runtime,
+        path.agent_id,
+        path.thread_id,
+        path.turn_id,
+    )
+    .await
+    .map(web::Json)
+    .map_err(request_error)
 }
 
 async fn approval_response(

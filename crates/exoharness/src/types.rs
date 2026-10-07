@@ -301,10 +301,6 @@ pub struct NewThreadRequest {
 pub struct ListThreadsRequest {
     pub cursor: Option<EventId>,
     pub limit: Option<usize>,
-    /// Return threads with a durable unfinished-turn marker. A crash between
-    /// TurnEnded and marker deletion can leave a finished turn as a candidate.
-    #[serde(default)]
-    pub unfinished_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -350,9 +346,12 @@ pub struct TurnRecord {
     pub session_id: SessionId,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeginTurnRequest {
-    pub session_id: Option<SessionId>,
+    /// Identity allocated by the caller before execution starts.
+    pub turn: TurnRecord,
+    /// Emit SessionStarted when this turn opens a new session.
+    pub new_session: bool,
     pub input: Vec<Message>,
     /// Events committed in the same write as TurnStarted and the input.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

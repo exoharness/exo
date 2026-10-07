@@ -158,6 +158,13 @@ impl HarnessExecutor for ManagedExecutor {
         config.harness == AgentHarnessKind::Basic
     }
 
+    fn can_suspend_turn(&self, config: &AgentConfig) -> bool {
+        matches!(
+            config.harness,
+            AgentHarnessKind::Basic | AgentHarnessKind::TypeScript
+        )
+    }
+
     fn can_reconcile_unresolved_tool_call(&self, config: &AgentConfig) -> bool {
         config.harness == AgentHarnessKind::TypeScript
     }

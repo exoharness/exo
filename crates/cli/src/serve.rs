@@ -38,9 +38,6 @@ pub struct ServeArgs {
     /// Maximum number of adapter workers.
     #[arg(long, default_value_t = 10)]
     adapter_limit: usize,
-    /// Concurrent agent listings during recovery.
-    #[arg(long, default_value = "4")]
-    recovery_agent_concurrency: NonZeroUsize,
     /// Concurrent thread resumptions during recovery.
     #[arg(long, default_value = "4")]
     recovery_thread_concurrency: NonZeroUsize,
@@ -57,10 +54,7 @@ pub struct ServeArgs {
 }
 
 pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<()> {
-    runtime.set_recovery_concurrency(
-        args.recovery_agent_concurrency,
-        args.recovery_thread_concurrency,
-    );
+    runtime.set_recovery_concurrency(args.recovery_thread_concurrency)?;
     anyhow::ensure!(
         args.adapters_only || args.bind.ip().is_loopback() || args.auth_file.is_some(),
         "non-loopback serving requires --auth-file"
@@ -131,7 +125,7 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         executor::run_adapters_watch(adapter_runtime.clone(), store, adapter_options).await
     };
     if args.adapters_only {
-        service.spawn_recovery();
+        service.spawn_recovery()?;
         if let Some(auth) = &auth {
             let caller = auth.caller(auth.owner().await, args.multiplayer);
             caller.policy.default_vault(&caller.principal).await?;
