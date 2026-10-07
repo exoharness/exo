@@ -9,7 +9,7 @@ An **agent** is a configurable bundle of system instructions, [Model Context Pro
 resources (eg git repositories), and defaults (harness, model).
 
 A **thread** is an instance of that agent, containing its conversation history, execution state, filesystem state, and configuration
-(harness, model, environment, vaults).
+(environment, vaults, and overrides from the default agent settings).
 
 A **session** represents a client’s interaction with an agent within a thread and can span multiple **turns**. A turn begins
 with submitted input and includes the agent’s work in response. A thread or even a turn can continue across multiple sessions.
@@ -35,8 +35,8 @@ issue. If it does, try to reproduce it, explain what you found, and
 suggest a workaround.
 ```
 
-The available configuration fields are ____. The text below the frontmatter is the system instructions
-sent to the agent.
+The following sections walk through the various ways to configure an agent, which belong in its frontmatter. The text below
+that contains system instructions sent to the agent.
 
 ### Harness and model
 
@@ -47,8 +47,6 @@ TypeScript module path, eg. `harness: ./my-harness.ts`.
 The `model` object supplies the model name and its configuration. `credential` names a secret in one of the thread's vaults.
 You can also set `base_url` for a custom model endpoint, or `max_output_tokens` to limit the output. Codex supports
 `reasoning_effort`, eg. `high` or `max`. The model and its settings need to be supported by the harness you choose.
-
-These values are the default for new threads, but threads can override them or even switch mid-conversation.
 
 ### MCP servers
 
@@ -85,23 +83,27 @@ You can also use `blocked_tools` to exclude specific tools.
 
 ### Custom tools
 
-Custom tools can be declared directly in the agent's frontmatter:
+Custom tools are passed to the agent and once invoked, are executed outside of Exo, either in your client code or in the
+agent's environment.
 
-```yaml
-<put a custom tool in here>
-```
-
-By default, custom tools are expected to be resolved by the client talking to the agent. This is a good way to push tool calls
-up to an application, e.g. to push a button or solicit some user input, and delegate them away from the harness.
-
-If you specify ____, then instead, these tools can be run server in the agent's environment. For example, you can add
+To add one, declare it in the agent's frontmatter:
 
 ```yaml
 tools:
-  - ./tools.ts
+  - name: ask_user
+    description: Ask the user a question and return their answer.
+    parameters:
+      type: object
+      properties:
+        question: {type: string}
+      required: [question]
+      additionalProperties: false
 ```
 
-to include tools defined in `tools.ts` according to <link?> format.
+By default, a custom tool call will be sent through the agent's event stream, and it's up to the client to execute the tool and
+provide a result. This allows you to implement features like pushing a button in a UI or soliciting some interactive feedback
+from a user. Alternatively, you can implement the tool in the agent's [environment](#tool-implementations), in which case it
+will automatically run there.
 
 ### Resources
 
@@ -112,7 +114,6 @@ resources:
   - name: autoevals
     type: git_repository
     url: https://github.com/braintrustdata/autoevals
-    mount_path: /workspace/autoevals
   - name: fixtures
     type: directory
     path: ./fixtures
@@ -120,12 +121,12 @@ resources:
     mode: ro
 ```
 
-`mount_path` is where the resource appears inside the sandbox. Each thread gets its own isolated copy, so edits are localized
-to the thread. Resources are writable by default; `mode: ro` makes a resource read-only.
+`mount_path` is where the resource appears inside the sandbox. A git repository defaults to `/workspace/<repo name>`. Each thread
+gets its own isolated copy, so edits are localized to the thread. Resources are writable by default, so `mode: ro` makes it read-only.
 
-For a git URL, a new thread starts from the repository's default branch. You can set `checkout` to a branch (`type: branch`,
-`name`) or a full commit ID (`type: commit`, `sha`). Exo caches the source and uses copy-on-write storage for thread copies.
-Resuming a thread keeps its existing checkout, including any changes the agent made.
+For a git URL, a new thread starts from the repository's default branch. You can set `checkout` to a branch name, tag, or
+commit ID, eg. `checkout: main`. Exo resolves it when creating the thread, caches the source, and uses copy-on-write storage
+for thread copies. Resuming a thread keeps its existing checkout, including any changes the agent made.
 
 For private repositories, set `credential: github` on the resource and attach a vault containing that credential. The
 credential needs permission to access the git server's origin, eg. `https://github.com`.
@@ -175,9 +176,33 @@ existing threads.
 An accepted turn served over HTTP continues if the client disconnects. You can reconnect and read its events later, or explicitly
 cancel it. The HTTP examples below show how to do this.
 
-### Thread configuration
+### Configuration overrides
 
-You can override the harness and model when opening or resuming a thread:
+The agent definition supplies the defaults. An `overrides` object lets a thread save configuration changes, and a
+turn supply temporary overrides on top of those. Overrides use the same field names and types as the agent definition, so
+this applies to the harness, model, tools, MCP servers, etc.
+
+The rules are the same for each field:
+
+- Omit a field to inherit its value.
+- Supply a field to replace its value in full, including objects and lists.
+- Supply `[]` to clear a list.
+
+Configuration is resolved in order: agent defaults, then thread overrides, then turn overrides. Thread overrides persist when
+you resume; turn overrides apply only to that turn. For example, a thread could select a different harness and model:
+
+```json
+{
+  "overrides": {
+    "harness": "pi",
+    "model": {"name": "gpt-6.1-sol", "credential": "openai"}
+  }
+}
+```
+
+The same object can override the `tools` declarations. An override doesn't change the saved agent definition or other threads.
+
+The CLI lets you override the harness and model when opening or resuming a thread:
 
 ```bash
 exo agent run --agent support-analyst --thread THREAD \
@@ -187,8 +212,8 @@ exo agent run --agent support-analyst --thread THREAD \
 These choices are saved on the thread and used when you resume it again. Switching harnesses keeps the same thread and its
 conversation history. The model and credentials still need to work with the selected harness.
 
-The HTTP API also accepts `harness` and `model` when creating a thread. Setting them on a turn request overrides them for that
-turn only. A thread without an explicit harness or model override uses the agent's current defaults.
+The HTTP API accepts `overrides` when creating a thread or submitting a turn. Omitted fields use the agent's current defaults,
+with any saved thread overrides applied before the turn's overrides.
 
 ### Forking
 
@@ -254,6 +279,28 @@ substitution and network controls used by managed coding agents. Filesystem reso
 
 An environment's definition is saved with the thread. Updating a named environment affects subsequent selections of that
 environment; an existing thread keeps its saved definition until you select an updated one for it.
+
+### Tool implementations
+
+An environment can supply implementations for tools declared by the agent, using TypeScript modules:
+
+```yaml
+name: support-analyst-env
+config:
+  tool_modules:
+    - ./tools.ts
+```
+
+Each module exports a tool, or a collection of tools, using the [TypeScript tool format](../tutorials/write-your-own-agent#step-2-add-a-custom-tool).
+Exo matches the exported tools to the agent's declarations by name. A tool's `initialize()` method returns a handler with an
+`execute(args, execution)` method, which runs when the harness calls the tool.
+
+Module handlers run on the runtime host. They can use `execution.context` to run commands in the thread's sandbox, read its
+events, or write artifacts. Relative module paths resolve from the environment file; with a remote provider, the modules need
+to be available on that provider's host.
+
+The same agent can use different implementations in different environments. Any declared tools without an environment
+implementation are handled by the client.
 
 ## Vaults and credentials
 
@@ -390,6 +437,28 @@ curl -fsS -X POST "$BASE/agent/$AGENT_ID/thread/$THREAD_ID/turn/$TURN_ID/cancel"
 When binding to a non-loopback address, configure authentication with `--auth-file`. You can also serve a single agent with
 `exo serve --agent support-analyst`.
 
+### Handling client tool calls
+
+The application handles calls to [custom tools](#custom-tools) that aren't implemented by the environment. Their declarations are
+inherited from the agent definition and can be replaced with `overrides.tools` on a thread or turn.
+
+When the harness calls one, Exo emits a `tool_requested` event and waits for the result. The application handles the call and
+posts to `/exo/agent/AGENT_ID/thread/THREAD_ID/turn/TURN_ID/frontend-tool-result`:
+
+```json
+{
+  "session_id": "SESSION_ID",
+  "tool_call_id": "TOOL_CALL_ID",
+  "result": {
+    "type": "frontend_tool_success",
+    "output": {"answer": "The problem started after yesterday's release."}
+  }
+}
+```
+
+Use the session ID from the turn receipt and the tool call ID from the event. The result is saved in the thread's history, and
+the harness continues with it. The tool's implementation and any UI interaction belong to the application.
+
 ### Providers
 
 A **provider** executes an agent on top of an **exoharness** which manages thread state, environments, vaults, and integrations.
@@ -415,6 +484,13 @@ to run your agents; moving existing agents and threads between providers require
 
 ## Planned additions
 
+- [ ] Accept resource `checkout` as a Git ref string (branch, tag, or commit), replacing the tagged branch/commit object.
+- [ ] Support tool declarations in agent frontmatter and inherit them during execution.
+- [ ] Move TypeScript tool module registration and path resolution into environments, bind implementations by declared tool
+  name, and route calls without an environment implementation to the client.
+- [ ] Load environment tool implementations in the Codex, Claude Code, and Pi harnesses.
+- [ ] Implement one partial agent definition `overrides` schema for threads and turns: persist thread overrides, apply turn
+  overrides temporarily, inherit omitted fields, replace supplied fields in full, and use `[]` to clear lists.
 - [ ] Skills in agent definitions
 - [ ] Memory store
 - [ ] Support remote outbound connections, so that you can have a local environment that receives commands from a remote agent server
