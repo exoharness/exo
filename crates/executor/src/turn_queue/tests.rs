@@ -376,6 +376,34 @@ async fn accepts_while_running_and_dropped_observers_do_not_cancel_work() -> Res
 }
 
 #[tokio::test]
+async fn shutdown_preserves_explicit_cancellation() -> Result<()> {
+    let (_temp, mut f) = fixture().await?;
+    f.runtime.shutdown().await?;
+    let provider = LocalProvider::new(f.state.clone(), f.executor.clone())
+        .with_turn_coordinator(f.state.turn_coordinator());
+    f.runtime = Runtime::new(provider.clone(), None);
+    let (turn, stream) = f.start().await?;
+    f.started(turn.id).await?;
+    provider
+        .harness
+        .submit(HarnessCommand::CancelTurn { key: f.key(&turn) })
+        .await?;
+    provider.harness.shutdown().await?;
+    assert!(
+        finish(stream)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cancel")
+    );
+    assert!(matches!(
+        journal_status(f.thread.as_ref(), &turn).await?,
+        JournalStatus::Finished(Err(error)) if error.to_string().contains("cancel")
+    ));
+    f.runtime.shutdown().await
+}
+
+#[tokio::test]
 async fn queued_cancellation_skips_execution_and_interrupt_starts_its_replacement() -> Result<()> {
     let (_temp, mut f) = fixture().await?;
     let (first, first_stream) = f.start().await?;

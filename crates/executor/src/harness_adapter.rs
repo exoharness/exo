@@ -115,7 +115,9 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
             let mut active = self.active.lock().expect("active harness turns poisoned");
             active.stopping = true;
             for cancel in active.turns.values() {
-                cancel.send_replace(Some(StopReason::Shutdown));
+                if !matches!(*cancel.borrow(), Some(StopReason::Cancel)) {
+                    cancel.send_replace(Some(StopReason::Shutdown));
+                }
             }
         }
         loop {

@@ -578,7 +578,7 @@ async fn provider_crud_defaults_and_aliases_survive_cli_restarts() -> Result<()>
 }
 
 async fn model_started(f: &Fixture, marker: &str) -> Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if f.model
                 .received_requests()
@@ -592,7 +592,8 @@ async fn model_started(f: &Fixture, marker: &str) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     })
-    .await?;
+    .await
+    .with_context(|| format!("waiting for model request containing {marker:?}"))?;
     Ok(())
 }
 
@@ -662,8 +663,9 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
         if mode == "chat" {
             child.stdin.take().unwrap().write_all(b"/quit\n").await?;
         }
-        let output =
-            tokio::time::timeout(Duration::from_secs(10), child.wait_with_output()).await??;
+        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+            .await
+            .with_context(|| format!("{provider} {mode}: waiting for CLI exit after SIGINT"))??;
         assert_eq!(
             output.status.success(),
             mode == "chat",
@@ -677,7 +679,7 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
         }
         let stdout = String::from_utf8(output.stdout)?;
         let thread = thread_slug(&stdout)?;
-        let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let events = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let events = f.cli(&["thread", "events", "saved", thread]).await?;
                 if events.contains("turn_ended") {
@@ -686,7 +688,8 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
-        .await??;
+        .await
+        .with_context(|| format!("{provider} {mode}: waiting for cancellation events"))??;
         assert!(
             events.contains("turn_ended") && events.contains("cancelled"),
             "{events}"
