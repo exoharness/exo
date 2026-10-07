@@ -1514,11 +1514,16 @@ impl HttpExoHarness {
 }
 #[async_trait]
 impl SnapshotHandle for HttpSandboxHandle {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotId> {
         http_snapshot_sandbox(
             &self.harness,
             SnapshotScope::Resource { scope: self.scope },
             id,
+            kind,
         )
         .await
     }

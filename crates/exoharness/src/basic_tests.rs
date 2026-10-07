@@ -1113,7 +1113,9 @@ async fn rebuilding_a_turn_uses_the_committed_event_head_for_its_next_sandbox_ev
     // Appends do not rewrite record.json. A rebuilt turn must derive its head
     // from the committed event batch before recording another sandbox event.
     let rebuilt = thread.turn_handle(turn_record).await?;
-    rebuilt.snapshot_sandbox(sandbox_id).await?;
+    rebuilt
+        .snapshot_sandbox(sandbox_id, crate::SnapshotKind::Filesystem)
+        .await?;
     let refreshed = agent
         .get_thread(&thread.record().id)
         .await?
