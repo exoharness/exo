@@ -2,6 +2,31 @@ use super::*;
 use crate::Uuid7;
 use futures::StreamExt;
 
+pub async fn test_turn_coordinator<Work: Clone + Send + Sync>(
+    coordinator: Arc<dyn TurnQueue<Work>>,
+    thread: TurnThread,
+    work: Work,
+) -> Result<()> {
+    interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head(
+        coordinator.as_ref(),
+        thread,
+        work.clone(),
+    )
+    .await?;
+    idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter(
+        coordinator.as_ref(),
+        thread,
+        work.clone(),
+    )
+    .await?;
+    suspension_preserves_order_and_control_watch_has_no_registration_gap(
+        coordinator.as_ref(),
+        thread,
+        work,
+    )
+    .await
+}
+
 fn submission<Work>(work: Work, principal: &str, attention: TurnAttention) -> TurnSubmission<Work> {
     TurnSubmission {
         turn: TurnRecord {
@@ -17,7 +42,7 @@ fn submission<Work>(work: Work, principal: &str, attention: TurnAttention) -> Tu
     }
 }
 
-pub async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head<
+async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head<
     Work: Clone + Send + Sync,
 >(
     coordinator: &dyn TurnQueue<Work>,
@@ -68,7 +93,7 @@ pub async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_he
     Ok(())
 }
 
-pub async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter<
+async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter<
     Work: Clone + Send + Sync,
 >(
     coordinator: &dyn TurnQueue<Work>,
@@ -97,7 +122,7 @@ pub async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter<
     Ok(())
 }
 
-pub async fn suspension_preserves_order_and_control_watch_has_no_registration_gap<
+async fn suspension_preserves_order_and_control_watch_has_no_registration_gap<
     Work: Clone + Send + Sync,
 >(
     coordinator: &dyn TurnQueue<Work>,

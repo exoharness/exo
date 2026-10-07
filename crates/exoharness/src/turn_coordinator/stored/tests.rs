@@ -18,48 +18,13 @@ fn queued(principal: &str, attention: TurnAttention) -> TurnSubmission<u32> {
 }
 
 #[tokio::test]
-async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head() -> Result<()> {
-    let coordinator = StoredTurnCoordinator::in_memory();
+async fn test_in_memory_coordinator() -> Result<()> {
+    let coordinator = Arc::new(StoredTurnCoordinator::in_memory());
     let thread = TurnThread {
         agent_id: Uuid7::now(),
         thread_id: Uuid7::now(),
     };
-    contract_tests::interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head(
-        &coordinator,
-        thread,
-        42,
-    )
-    .await
-}
-
-#[tokio::test]
-async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter() -> Result<()> {
-    let coordinator = StoredTurnCoordinator::in_memory();
-    let thread = TurnThread {
-        agent_id: Uuid7::now(),
-        thread_id: Uuid7::now(),
-    };
-    contract_tests::idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter(
-        &coordinator,
-        thread,
-        42,
-    )
-    .await
-}
-
-#[tokio::test]
-async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() -> Result<()> {
-    let coordinator = StoredTurnCoordinator::in_memory();
-    let thread = TurnThread {
-        agent_id: Uuid7::now(),
-        thread_id: Uuid7::now(),
-    };
-    contract_tests::suspension_preserves_order_and_control_watch_has_no_registration_gap(
-        &coordinator,
-        thread,
-        42,
-    )
-    .await
+    contract_tests::test_turn_coordinator(coordinator, thread, 42).await
 }
 
 #[tokio::test]

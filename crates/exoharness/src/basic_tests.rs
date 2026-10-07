@@ -132,7 +132,7 @@ async fn unsupported_backend_fork_is_an_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn basic_backend_turn_queue_contracts() -> crate::Result<()> {
+async fn test_basic_coordinator() -> crate::Result<()> {
     use crate::turn_coordinator::{TurnThread, contract_tests};
 
     let tempdir = TempDir::new()?;
@@ -144,29 +144,13 @@ async fn basic_backend_turn_queue_contracts() -> crate::Result<()> {
             name: "Queue contracts".into(),
         })
         .await?;
-    let queue = harness.turn_coordinator::<u32>();
-    let new_thread = || async {
-        let thread = agent.new_thread(crate::NewThreadRequest::default()).await?;
-        Ok::<_, crate::Error>(TurnThread {
+    let thread = agent.new_thread(crate::NewThreadRequest::default()).await?;
+    contract_tests::test_turn_coordinator(
+        harness.turn_coordinator(),
+        TurnThread {
             agent_id: agent.record().id,
             thread_id: thread.record().id,
-        })
-    };
-    contract_tests::interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head(
-        queue.as_ref(),
-        new_thread().await?,
-        42,
-    )
-    .await?;
-    contract_tests::idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter(
-        queue.as_ref(),
-        new_thread().await?,
-        42,
-    )
-    .await?;
-    contract_tests::suspension_preserves_order_and_control_watch_has_no_registration_gap(
-        queue.as_ref(),
-        new_thread().await?,
+        },
         42,
     )
     .await
