@@ -257,7 +257,6 @@ pub async fn list_threads(agent: &dyn AgentHandle) -> Result<Vec<Arc<dyn ThreadH
             .list_threads(ListThreadsRequest {
                 cursor,
                 limit: None,
-                ..Default::default()
             })
             .await?;
         threads.extend(page.threads);
@@ -274,19 +273,27 @@ pub async fn list_threads(agent: &dyn AgentHandle) -> Result<Vec<Arc<dyn ThreadH
     }
 }
 
+pub async fn get_thread(
+    agent: &dyn AgentHandle,
+    reference: &str,
+) -> Result<Option<Arc<dyn ThreadHandle>>> {
+    if let Ok(id) = reference.parse::<Uuid7>()
+        && let Some(thread) = agent.get_thread(&id).await?
+    {
+        return Ok(Some(thread));
+    }
+    Ok(list_threads(agent)
+        .await?
+        .into_iter()
+        .find(|thread| thread.record().slug == reference))
+}
+
 pub async fn find_thread(
     agent: &dyn AgentHandle,
     reference: &str,
 ) -> Result<Arc<dyn ThreadHandle>> {
-    if let Ok(id) = reference.parse::<Uuid7>()
-        && let Some(thread) = agent.get_thread(&id).await?
-    {
-        return Ok(thread);
-    }
-    list_threads(agent)
+    get_thread(agent, reference)
         .await?
-        .into_iter()
-        .find(|thread| thread.record().slug == reference)
         .ok_or_else(|| anyhow!("thread not found: {reference}"))
 }
 

@@ -166,7 +166,7 @@ async fn filesystem_snapshot_and_rewind_round_trip() {
     conversation
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id.clone(),
-            snapshot_id,
+            snapshot_id: Some(snapshot_id),
             idle_seconds: None,
             provider: None,
         })

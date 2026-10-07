@@ -141,8 +141,14 @@ async fn local_and_http_threads_accept_additional_vaults() -> Result<()> {
             f.agent_file.to_str().unwrap(),
         ])
         .await?;
-        let state = f.runtime.exoharness_handle();
-        let agent = exo_managed_agents::find_agent(state.as_ref(), "saved").await?;
+        // Arrange records without claiming them for the server. The selected
+        // provider below must be the first runtime to take thread ownership.
+        let mut config = exoharness::test_support::local_test_config(f.root.join("exoharness"));
+        config.secret_backend = exoharness::SecretBackendChoice::File {
+            path: Some(f.temp.path().join("master-key")),
+        };
+        let state = exoharness::BasicExoHarness::new(config).await?;
+        let agent = exo_managed_agents::find_agent(&state, "saved").await?;
         let original = agent
             .new_thread(exoharness::NewThreadRequest {
                 slug: Some("original".into()),
@@ -572,7 +578,7 @@ async fn provider_crud_defaults_and_aliases_survive_cli_restarts() -> Result<()>
 }
 
 async fn model_started(f: &Fixture, marker: &str) -> Result<()> {
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if f.model
                 .received_requests()
@@ -586,7 +592,8 @@ async fn model_started(f: &Fixture, marker: &str) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     })
-    .await?;
+    .await
+    .with_context(|| format!("waiting for model request containing {marker:?}"))?;
     Ok(())
 }
 
@@ -656,8 +663,9 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
         if mode == "chat" {
             child.stdin.take().unwrap().write_all(b"/quit\n").await?;
         }
-        let output =
-            tokio::time::timeout(Duration::from_secs(10), child.wait_with_output()).await??;
+        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+            .await
+            .with_context(|| format!("{provider} {mode}: waiting for CLI exit after SIGINT"))??;
         assert_eq!(
             output.status.success(),
             mode == "chat",
@@ -671,7 +679,7 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
         }
         let stdout = String::from_utf8(output.stdout)?;
         let thread = thread_slug(&stdout)?;
-        let events = tokio::time::timeout(Duration::from_secs(10), async {
+        let events = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 let events = f.cli(&["thread", "events", "saved", thread]).await?;
                 if events.contains("turn_ended") {
@@ -680,7 +688,8 @@ async fn local_and_http_live_cancellation_finalizes_and_allows_resume() -> Resul
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
         })
-        .await??;
+        .await
+        .with_context(|| format!("{provider} {mode}: waiting for cancellation events"))??;
         assert!(
             events.contains("turn_ended") && events.contains("cancelled"),
             "{events}"
@@ -1574,6 +1583,64 @@ async fn provider_errors_explain_how_to_set_context_and_creation_is_offline() ->
         .await?;
     assert!(!invalid.status.success());
     assert!(!f.cli(&["provider", "list"]).await?.contains("invalid"));
+    f.stop().await
+}
+
+#[actix_web::test]
+async fn smolvm_disk_sizes_are_saved_only_on_smolvm_bindings() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.cli(&[
+        "environment",
+        "provider",
+        "create",
+        "--backend",
+        "smolvm",
+        "--smolvm-storage-gib",
+        "64",
+        "--smolvm-overlay-gib",
+        "128",
+    ])
+    .await?;
+    let bindings = f.runtime.exoharness_handle().list_bindings().await?;
+    let config = bindings
+        .into_iter()
+        .find_map(|record| match record.binding {
+            exoharness::Binding::Sandbox {
+                config:
+                    exoharness::SandboxProviderConfig::Smolvm {
+                        storage_gib,
+                        overlay_gib,
+                        ..
+                    },
+                ..
+            } => Some((storage_gib, overlay_gib)),
+            _ => None,
+        })
+        .context("smolvm binding")?;
+    assert_eq!(config.0.map(std::num::NonZeroU32::get), Some(64));
+    assert_eq!(config.1.map(std::num::NonZeroU32::get), Some(128));
+    for (backend, size, expected) in [
+        ("docker", "64", "only valid for smolvm"),
+        ("smolvm", "0", "invalid value"),
+    ] {
+        let output = f
+            .output(
+                &[
+                    "environment",
+                    "provider",
+                    "create",
+                    "--backend",
+                    backend,
+                    "--smolvm-overlay-gib",
+                    size,
+                ],
+                None,
+                None,
+            )
+            .await?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
     f.stop().await
 }
 

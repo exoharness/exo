@@ -1,3 +1,4 @@
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -39,8 +40,17 @@ pub enum EnvironmentCommands {
 pub fn load(path: &Path) -> Result<EnvironmentDefinition> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading environment {}", path.display()))?;
-    let definition: EnvironmentDefinition =
+    let mut definition: EnvironmentDefinition =
         serde_yaml_ng::from_str(&source).context("invalid environment definition")?;
+    for mount in definition.config.file_system_mounts.iter_mut().flatten() {
+        let host_path = Path::new(&mount.host_path);
+        if host_path.is_relative() {
+            let base = path.parent().context("environment file has no parent")?;
+            mount.host_path = crate::canonicalize_directory(&base.join(host_path))?
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
     definition.validate()?;
     Ok(definition)
 }
@@ -178,6 +188,12 @@ pub struct ProviderConfigureArgs {
     /// `--smolvm-binary`, else that binary itself.
     #[arg(long = "smolvm-boot-binary", env = "SMOLVM_BOOT_BINARY")]
     smolvm_boot_binary: Option<PathBuf>,
+    /// SmolVM storage disk capacity for OCI layers and container data, in GiB.
+    #[arg(long)]
+    smolvm_storage_gib: Option<NonZeroU32>,
+    /// SmolVM disk capacity for persistent root filesystem changes, in GiB.
+    #[arg(long)]
+    smolvm_overlay_gib: Option<NonZeroU32>,
     /// Sprites sprite HTTP URL auth: sprite | public.
     #[arg(long)]
     url_auth: Option<String>,
@@ -211,11 +227,18 @@ async fn configure_provider(state: &dyn ExoHarness, command: ProviderCommands) -
                 default_image,
                 smolvm_binary,
                 smolvm_boot_binary,
+                smolvm_storage_gib,
+                smolvm_overlay_gib,
                 url_auth,
                 labels,
             } = *args;
             let binding_name =
                 name.unwrap_or_else(|| SandboxProvider::from(provider).as_str().to_string());
+            if !matches!(provider, BackendArg::Smolvm)
+                && (smolvm_storage_gib.is_some() || smolvm_overlay_gib.is_some())
+            {
+                bail!("--smolvm-storage-gib and --smolvm-overlay-gib are only valid for smolvm");
+            }
             if !matches!(provider, BackendArg::AwsAgentCore) && session_storage_mount_path.is_some()
             {
                 bail!("--session-storage-mount-path is only valid for aws-agentcore");
@@ -272,6 +295,8 @@ async fn configure_provider(state: &dyn ExoHarness, command: ProviderCommands) -
                     default_image: default_image.unwrap_or_else(default_docker_image),
                     binary: smolvm_binary,
                     boot_binary: smolvm_boot_binary,
+                    storage_gib: smolvm_storage_gib,
+                    overlay_gib: smolvm_overlay_gib,
                 },
                 BackendArg::Firecracker => SandboxProviderConfig::Firecracker {
                     default_image: default_image.unwrap_or_else(default_firecracker_image),
@@ -343,6 +368,28 @@ fn aws_region_from_arn(resource_arn: &str, expected_service: &str) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_mounts_are_resolved_against_the_environment_file() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let environments = directory.path().join("environments");
+        let scripts = directory.path().join("scripts");
+        std::fs::create_dir(&environments)?;
+        std::fs::create_dir(&scripts)?;
+        let file = environments.join("dev.yaml");
+        std::fs::write(
+            &file,
+            "name: dev\nconfig:\n  image: dev\n  file_system_mounts:\n    - host_path: ../scripts\n      mount_path: /opt/scripts\n      mode: ro\n",
+        )?;
+        let environment = load(&file)?;
+        let mounts = environment.config.file_system_mounts.context("mounts")?;
+        assert_eq!(
+            Path::new(&mounts[0].host_path),
+            scripts.canonicalize()?.as_path()
+        );
+        assert_eq!(mounts[0].mount_path, "/opt/scripts");
+        Ok(())
+    }
 
     #[test]
     fn environment_file_defaults_to_smolvm() -> Result<()> {

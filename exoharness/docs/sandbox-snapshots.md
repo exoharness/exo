@@ -20,7 +20,7 @@ it, and the restore path that actually consumes it.
 
 - `ConversationHandle::snapshot_sandbox(id)` actually captures the live
   container's filesystem and persists it.
-- `ConversationHandle::start_sandbox(StartSandboxRequest { id, snapshot_id, .. })`
+- `ConversationHandle::start_sandbox(StartSandboxRequest { id, snapshot_id: Some(snapshot_id), .. })`
   starts a fresh container whose filesystem is sourced from the snapshot,
   preserving the original sandbox's mounts, network policy, and lifecycle.
 - A chat-REPL slash-command surface — `/snapshot`, `/snapshots`, `/rewind <id>`,
@@ -61,11 +61,39 @@ ConversationHandle             ManagedSandboxHandle           ManagedSandboxBack
   start_sandbox(req) ─── load manifest + payload ──► acquire_from_snapshot(req, payload)
 ```
 
-`ConversationHandle` orchestrates: it locates the live handle, asks for a
-payload, persists the bytes, updates sandbox metadata, and emits the
+`ConversationHandle` orchestrates snapshot capture: it locates the live handle,
+asks for a payload, persists the bytes, updates sandbox metadata, and emits the
 `SandboxSnapshotted` event. `ManagedSandboxHandle::snapshot` and
 `ManagedSandboxBackend::acquire_from_snapshot` are the backend-specific
 methods that produce and consume the bytes.
+
+### Resuming without a snapshot
+
+`start_sandbox` can also resume an existing managed sandbox using its retained
+provider state. Pass `snapshot_id: None` in Rust, or omit `snapshot_id` in JSON:
+
+```rust
+conversation
+    .start_sandbox(StartSandboxRequest {
+        id: sandbox_id,
+        snapshot_id: None,
+        idle_seconds: None,
+        provider: None,
+    })
+    .await?;
+```
+
+This path acquires the existing sandbox without loading a snapshot. With SmolVM,
+it restarts the stopped VM using its retained disks; development services need
+their startup command again. `idle_seconds` can override the stored lifecycle
+setting. An omitted `provider` retains the current provider; a different provider
+requires `snapshot_id: Some(snapshot_id)` and a supported snapshot format.
+Attached sandboxes remain externally owned and cannot be resumed through this
+path.
+
+Passing `snapshot_id: Some(snapshot_id)` restores the selected snapshot as
+described above. Both paths update the recorded running state and emit
+`SandboxStarted`; the resume path records no snapshot ID.
 
 ### SnapshotPayload and SnapshotFormat
 

@@ -46,9 +46,10 @@ chrono.workspace = true
 cost = { path = "../cost" }
 exo-mcp = { path = "../mcp", optional = true }
 exo-managed-agents = { path = "../managed-agents", default-features = false }
-exoharness = { path = "../exoharness" }
+exoharness = { path = "../exoharness", features = ["store"] }
 encoding_rs = "0.8.35"
 futures.workspace = true
+httparse = "1.10"
 lingua.workspace = true
 reqwest = { workspace = true, optional = true }
 openidconnect = { version = "4.0.1", optional = true }
@@ -70,6 +71,7 @@ web-time = "1.1"
 libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
+exoharness = { path = "../exoharness", features = ["contract-tests"] }
 tokio.workspace = true
 rsa = { version = "0.9", features = ["getrandom"] }
 rmcp = { workspace = true, features = ["auth"] }

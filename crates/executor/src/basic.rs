@@ -401,6 +401,10 @@ where
         true
     }
 
+    fn can_suspend_turn(&self, _config: &AgentConfig) -> bool {
+        true
+    }
+
     async fn prepare_conversation(
         &self,
         agent: &dyn AgentHandle,

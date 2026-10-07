@@ -15,6 +15,122 @@ use crate::{
     SandboxCommand, SandboxRequest, ThreadHandle, Uuid7, WriteArtifactRequest,
 };
 
+/// Execution observations supplied by each backend's test fixture.
+#[async_trait::async_trait]
+pub trait TurnAdmissionHooks: Send + Sync {
+    type Claim: Send + Sync;
+    async fn claim_head(
+        &self,
+        thread: crate::turn_coordinator::TurnThread,
+    ) -> crate::Result<Self::Claim>;
+    async fn is_cancelled(&self, claim: &Self::Claim, turn: crate::TurnId) -> crate::Result<bool>;
+}
+
+/// Run with workers paused. Reuse accepted identities on retry so both
+/// deterministic-ID hosts and coordinators retaining receipts can participate.
+pub async fn turn_admission_contract<Work: Clone + Send + Sync>(
+    admission: &dyn crate::turn_coordinator::TurnAdmission<Work>,
+    hooks: &impl TurnAdmissionHooks,
+    thread: crate::turn_coordinator::TurnThread,
+    work: Work,
+) -> crate::Result<()> {
+    use crate::turn_coordinator::{
+        TurnAttention, TurnAuthority, TurnControlOutcome, TurnOptions, TurnSubmission, TurnThread,
+    };
+    let submission = |principal: &str, key: &str, attention| TurnSubmission {
+        turn: crate::TurnRecord {
+            id: Uuid7::now(),
+            session_id: Uuid7::now(),
+        },
+        work: work.clone(),
+        principal: Some(principal.into()),
+        options: TurnOptions {
+            idempotency_key: Some(key.into()),
+            attention,
+        },
+    };
+    let original = submission("alice", "request-1", TurnAttention::Wake);
+    assert!(!admission.enqueue(thread, original.clone()).await?.duplicate);
+    let mut retry = original.clone();
+    retry.options.attention = TurnAttention::Interrupt;
+    let duplicate = admission.enqueue(thread, retry.clone()).await?;
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.turn, original.turn);
+    let other = admission
+        .enqueue(thread, submission("bob", "request-1", TurnAttention::Wake))
+        .await?;
+    assert!(!other.duplicate);
+    assert_eq!(
+        admission
+            .cancel(
+                thread,
+                original.turn.id,
+                TurnAuthority::Submitter("bob".into())
+            )
+            .await?,
+        TurnControlOutcome::NotAccessible
+    );
+    assert_eq!(
+        admission
+            .cancel(
+                thread,
+                original.turn.id,
+                TurnAuthority::Submitter("alice".into())
+            )
+            .await?,
+        TurnControlOutcome::Queued
+    );
+    let duplicate = admission.enqueue(thread, original.clone()).await?;
+    assert!(duplicate.duplicate);
+    assert_eq!(duplicate.turn, original.turn);
+    assert_eq!(
+        admission
+            .cancel(thread, other.turn.id, TurnAuthority::ThreadOwner)
+            .await?,
+        TurnControlOutcome::Queued
+    );
+    assert_eq!(
+        admission
+            .cancel(thread, Uuid7::now(), TurnAuthority::ThreadOwner)
+            .await?,
+        TurnControlOutcome::NotFound
+    );
+
+    let unclaimed = TurnThread {
+        thread_id: Uuid7::now(),
+        ..thread
+    };
+    admission.enqueue(unclaimed, original.clone()).await?;
+    let interrupt = submission("alice", "interrupt", TurnAttention::Interrupt);
+    admission.enqueue(unclaimed, interrupt.clone()).await?;
+    let claim = hooks.claim_head(unclaimed).await?;
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    assert!(!hooks.is_cancelled(&claim, interrupt.turn.id).await?);
+
+    let claimed = TurnThread {
+        thread_id: Uuid7::now(),
+        ..thread
+    };
+    admission.enqueue(claimed, original.clone()).await?;
+    let claim = hooks.claim_head(claimed).await?;
+    let other = submission("bob", "interrupt", TurnAttention::Interrupt);
+    admission.enqueue(claimed, other.clone()).await?;
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    assert!(admission.enqueue(claimed, retry).await?.duplicate);
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    let tail = submission("alice", "tail", TurnAttention::Wake);
+    admission.enqueue(claimed, tail.clone()).await?;
+    let mut duplicate_tail = tail.clone();
+    duplicate_tail.options.attention = TurnAttention::Interrupt;
+    assert!(admission.enqueue(claimed, duplicate_tail).await?.duplicate);
+    assert!(!hooks.is_cancelled(&claim, original.turn.id).await?);
+    admission.enqueue(claimed, interrupt).await?;
+    assert!(hooks.is_cancelled(&claim, original.turn.id).await?);
+    assert!(!hooks.is_cancelled(&claim, other.turn.id).await?);
+    assert!(!hooks.is_cancelled(&claim, tail.turn.id).await?);
+    Ok(())
+}
+
 pub async fn supports_thread_api_and_conversation_compatibility(harness: Arc<dyn ExoHarness>) {
     let agent = harness
         .new_agent(NewAgentRequest {
@@ -251,7 +367,6 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .list_conversations(ListConversationsRequest {
             cursor: None,
             limit: Some(2),
-            ..Default::default()
         })
         .await
         .expect("first page");
@@ -270,7 +385,6 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .list_conversations(ListConversationsRequest {
             cursor: page.next_cursor,
             limit: Some(2),
-            ..Default::default()
         })
         .await
         .expect("second page");
@@ -299,9 +413,10 @@ pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness
 
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("ping")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("turn");
@@ -368,9 +483,10 @@ pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarn
 
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("ping")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("turn");

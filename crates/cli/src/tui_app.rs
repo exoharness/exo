@@ -831,6 +831,7 @@ impl TuiApp {
             {
                 Ok(mut stream) => {
                     while let Some(event) = stream.next().await {
+                        let suspended = matches!(&event, Ok(ExecutionStreamEvent::Suspended(_)));
                         let app_event = match event {
                             Ok(event) => {
                                 match &event {
@@ -853,6 +854,9 @@ impl TuiApp {
                         };
                         if tx.send(app_event).is_err() {
                             return;
+                        }
+                        if suspended {
+                            break;
                         }
                     }
                 }
@@ -958,6 +962,14 @@ impl TuiApp {
                             .push(style_transcript_line(line.to_string()));
                     }
                 }
+            }
+            ExecutionStreamEvent::Suspended(turn) => {
+                self.approvals.clear();
+                self.session_id = Some(turn.session_id);
+                self.transcript.push(style_transcript_line(format!(
+                    "turn suspended: {}",
+                    turn.id
+                )));
             }
             ExecutionStreamEvent::Completed(result) => {
                 self.approvals.clear();
@@ -1447,7 +1459,7 @@ mod tests {
             })
             .await?;
         let thread = agent.new_conversation(Default::default()).await?;
-        let turn = thread.begin_turn(Default::default()).await?;
+        let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(

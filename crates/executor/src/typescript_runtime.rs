@@ -42,6 +42,7 @@ struct RunningSandboxProcess {
     sandbox_id: SandboxId,
     process_id: SandboxProcessId,
     event_task: AbortHandle,
+    reusable: bool,
 }
 impl Drop for RunningSandboxProcess {
     fn drop(&mut self) {
@@ -118,6 +119,48 @@ impl TypeScriptRuntime {
             result?;
         }
         Ok(())
+    }
+
+    pub async fn reusable_processes_are_running(&self) -> Result<bool> {
+        let processes = self
+            .processes
+            .lock()
+            .expect("TypeScript processes poisoned")
+            .values()
+            .filter(|process| process.reusable)
+            .map(|process| (process.sandbox_id.clone(), process.process_id.clone()))
+            .collect::<Vec<_>>();
+        if processes.is_empty() {
+            return Ok(true);
+        }
+        let sandboxes = self.thread.list_sandboxes().await?;
+        for (sandbox_id, process_id) in processes {
+            if !sandboxes
+                .iter()
+                .any(|sandbox| sandbox.id == sandbox_id && sandbox.running)
+            {
+                return Ok(false);
+            }
+            let status = self
+                .thread
+                .get_sandbox_process_events(SandboxProcessEventQuery {
+                    sandbox_id,
+                    process_id,
+                    after: None,
+                    limit: Some(1),
+                    follow: Some(false),
+                })
+                .await;
+            match status {
+                Ok(status) if status.status.is_running() => {}
+                Ok(_) => return Ok(false),
+                Err(error) => {
+                    tracing::debug!(%error, "cached sandbox process is unavailable");
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Process I/O can outlive a turn; authorization, execution and process
@@ -255,6 +298,7 @@ impl TypeScriptRuntime {
             conversation_config.shell_program.as_deref(),
         )
         .await?;
+        let reusable = reuse_key.is_some();
         let reusable_process = match reuse_key.as_deref() {
             Some(reuse_key) => {
                 reusable_sandbox_process(conversation, reuse_key, &sandbox_id).await?
@@ -318,6 +362,7 @@ impl TypeScriptRuntime {
                     sandbox_id: sandbox_id.clone(),
                     process_id: sandbox_process_id.clone(),
                     event_task,
+                    reusable,
                 },
             );
         Ok(RuntimeResponsePayload::SandboxProcessStarted {

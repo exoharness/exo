@@ -999,25 +999,7 @@ fn durable_file_system_root(configured_root: Option<&Path>) -> Result<PathBuf> {
     if let Some(root) = configured_root {
         return Ok(root.to_path_buf());
     }
-    if let Some(value) = std::env::var_os("XDG_DATA_HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path.join("exo").join("durable-filesystems"));
-        }
-    }
-    if let Some(value) = std::env::var_os("HOME") {
-        let path = PathBuf::from(value);
-        if !path.as_os_str().is_empty() {
-            return Ok(path
-                .join(".local")
-                .join("share")
-                .join("exo")
-                .join("durable-filesystems"));
-        }
-    }
-    bail!(
-        "could not determine durable file system root: set {DURABLE_FILE_SYSTEM_ROOT_ENV}, XDG_DATA_HOME, or HOME"
-    )
+    bail!("durable file system root must be configured on the sandbox backend")
 }
 
 pub(crate) fn stable_fnv1a_hex(input: &str) -> String {
@@ -2096,13 +2078,13 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn container_creation_preserves_omitted_and_explicit_resources() -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp = tempfile::tempdir()?;
         let cli = temp.path().join("container");
         let args = temp.path().join("container.args");
-        std::fs::write(&cli, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\n")?;
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))?;
+        crate::test_support::write_test_executable(
+            &cli,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$0.args\"\n",
+        )?;
         for resources in [None, Some(crate::SandboxResourceShape::default())] {
             let request = SandboxRequest {
                 sandbox_id: "sandbox".into(),

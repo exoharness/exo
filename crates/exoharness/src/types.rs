@@ -301,10 +301,6 @@ pub struct NewThreadRequest {
 pub struct ListThreadsRequest {
     pub cursor: Option<EventId>,
     pub limit: Option<usize>,
-    /// Return threads with a durable unfinished-turn marker. A crash between
-    /// TurnEnded and marker deletion can leave a finished turn as a candidate.
-    #[serde(default)]
-    pub unfinished_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -350,9 +346,12 @@ pub struct TurnRecord {
     pub session_id: SessionId,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeginTurnRequest {
-    pub session_id: Option<SessionId>,
+    /// Identity allocated by the caller before execution starts.
+    pub turn: TurnRecord,
+    /// Emit SessionStarted when this turn opens a new session.
+    pub new_session: bool,
     pub input: Vec<Message>,
     /// Events committed in the same write as TurnStarted and the input.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -586,6 +585,10 @@ pub enum EventData {
         #[serde(default)]
         durable_file_systems: Vec<DurableFileSystem>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        resources: Option<SandboxResourceShape>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tcp_ports: Vec<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         policy: Option<EgressPolicy>,
         enable_networking: bool,
         idle_seconds: u64,
@@ -774,6 +777,9 @@ pub struct SandboxRecord {
     pub name: Option<String>,
     pub provider: SandboxProvider,
     pub image: String,
+    /// Guest TCP ports published by the sandbox backend.
+    pub tcp_ports: Vec<u16>,
+    /// The harness's recorded running state, not a service health check.
     pub running: bool,
 }
 
@@ -1005,11 +1011,11 @@ impl FromStr for SandboxProvider {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartSandboxRequest {
     pub id: SandboxId,
-    pub snapshot_id: SnapshotId,
+    /// Restore a snapshot, or resume the existing sandbox when omitted.
+    pub snapshot_id: Option<SnapshotId>,
     pub idle_seconds: Option<u64>,
-    // If unspecified, starts sandbox where it was last run. If specified, will attempt to
-    // start the sandbox on the specified provider, if supported. If successful, the
-    // sandbox will start there going forward.
+    /// Omit to retain the current provider. Changing providers requires a
+    /// snapshot ID and a snapshot format supported by the destination backend.
     #[serde(default)]
     pub provider: Option<SandboxProvider>,
 }
@@ -1326,6 +1332,12 @@ pub enum SandboxProviderConfig {
         /// is a wrapper script. Omitted derives it from `binary`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         boot_binary: Option<PathBuf>,
+        /// Storage disk capacity for OCI layers and container data, in GiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage_gib: Option<NonZeroU32>,
+        /// Disk capacity for persistent root filesystem changes, in GiB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        overlay_gib: Option<NonZeroU32>,
     },
     Firecracker {
         #[serde(default = "crate::sandbox_provider::default_firecracker_image")]

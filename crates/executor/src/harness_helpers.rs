@@ -85,7 +85,6 @@ pub(crate) async fn list_conversation_handles(
             .list_conversations(exoharness::ListConversationsRequest {
                 cursor,
                 limit: None,
-                ..Default::default()
             })
             .await?;
         conversations.extend(page.conversations);

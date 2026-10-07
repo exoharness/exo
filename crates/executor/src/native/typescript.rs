@@ -73,6 +73,10 @@ where
         config.typescript.is_some()
     }
 
+    fn can_suspend_turn(&self, config: &AgentConfig) -> bool {
+        config.typescript.is_some()
+    }
+
     async fn cancel_turn(
         &self,
         thread: &dyn ConversationHandle,
@@ -183,9 +187,19 @@ where
         }
 
         let key = format!("{}:{}", turn.conversation.record().id, module_path);
-        let runner = self
+        let mut runner = self
             .runner(&key, &module_path, Arc::clone(&turn.conversation))
             .await?;
+        let processes_running = runner.lock().await.reusable_processes_are_running().await?;
+        if !processes_running {
+            self.remove_runner(&key, &runner).await;
+            if let Err(error) = runner.lock().await.shutdown().await {
+                tracing::debug!(%error, "retired TypeScript runner after its sandbox process stopped");
+            }
+            runner = self
+                .runner(&key, &module_path, Arc::clone(&turn.conversation))
+                .await?;
+        }
         let result = {
             let mut runner = runner.lock().await;
             runner.execute_turn(self, turn).await
@@ -256,6 +270,10 @@ struct TypeScriptTurn<'a> {
 }
 
 impl TypeScriptRunnerProcess {
+    async fn reusable_processes_are_running(&self) -> Result<bool> {
+        self.runtime.reusable_processes_are_running().await
+    }
+
     async fn shutdown(&mut self) -> Result<()> {
         let child_result = self.child.kill().await;
         let process_result = self.runtime.shutdown().await;
@@ -693,15 +711,200 @@ fn format_error_chain(error: &anyhow::Error, context: std::fmt::Arguments<'_>) -
 #[cfg(test)]
 mod tests {
     use crate::ExecutionStreamEvent;
+    use exoharness::{CancelSandboxProcessRequest, SandboxId, SandboxProcessId};
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
 
     use super::*;
 
+    struct CachedRunnerTest {
+        runtime: crate::Runtime,
+        agent: Arc<dyn AgentHandle>,
+        thread: Arc<dyn ConversationHandle>,
+        config: AgentConfig,
+        _temp: tempfile::TempDir,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct RunnerOutput {
+        turn: u32,
+        sandbox_id: SandboxId,
+        process_id: SandboxProcessId,
+    }
+
+    impl CachedRunnerTest {
+        async fn new() -> Result<Self> {
+            use crate::{
+                BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config,
+            };
+            use exoharness::{BasicExoHarness, NewAgentRequest};
+
+            let temp = tempfile::TempDir::new()?;
+            let module = temp.path().join("cached-process.mjs");
+            std::fs::write(
+                &module,
+                r#"
+let process;
+let reader;
+let turns = 0;
+export default {
+  async runTurn(context) {
+    if (!process) {
+      process = await context.startSandboxProcess({
+        command: ["/bin/sh", "-c", "while read line; do echo $line; done"],
+        reuseKey: "warm-test"
+      });
+      reader = process.stdout.getReader();
+    }
+    await process.writeStdin("ping\n");
+    const reply = await reader.read();
+    if (!reply.value?.includes("ping")) throw new Error("missing process reply");
+    await context.stream.text(JSON.stringify({
+      turn: ++turns,
+      sandbox_id: process.sandboxId,
+      process_id: process.sandboxProcessId
+    }));
+  }
+};
+"#,
+            )?;
+            let state =
+                Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+            let agent = state
+                .new_agent(NewAgentRequest {
+                    slug: "cached-runner".into(),
+                    name: "Cached runner".into(),
+                    vaults: vec![],
+                })
+                .await?;
+            let thread = agent.new_conversation(Default::default()).await?;
+            let config = serde_json::from_value(serde_json::json!({
+                "instructions": [], "harness": "typescript",
+                "typescript": { "module_path": module },
+                "sandbox": { "provider": "local_process" },
+                "model": "gpt-5-mini"
+            }))?;
+            let runtime = Runtime::new(
+                LocalProvider::typescript(
+                    state,
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                    HashMap::new(),
+                    Arc::new(BasicToolRuntime),
+                ),
+                None,
+            );
+            Ok(Self {
+                runtime,
+                agent,
+                thread,
+                config,
+                _temp: temp,
+            })
+        }
+
+        async fn turn(&self) -> Result<RunnerOutput> {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let (_, mut stream) = self
+                    .runtime
+                    .start_turn(
+                        self.agent.clone(),
+                        self.thread.clone(),
+                        SendRequest {
+                            input: vec![],
+                            session_id: None,
+                        },
+                        true,
+                        Some(self.config.clone()),
+                        Default::default(),
+                    )
+                    .await?;
+                let mut output = String::new();
+                let mut completed = false;
+                while let Some(event) = stream.next().await {
+                    match event? {
+                        ExecutionStreamEvent::Chunk(chunk) => {
+                            for choice in chunk.choices {
+                                if let Some(content) =
+                                    choice.delta_view().and_then(|delta| delta.content)
+                                {
+                                    output.push_str(&content);
+                                }
+                            }
+                        }
+                        ExecutionStreamEvent::Completed(_) => completed = true,
+                        _ => {}
+                    }
+                }
+                anyhow::ensure!(completed, "cached runner turn did not complete");
+                Ok(serde_json::from_str(&output)?)
+            })
+            .await?
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_runner_reuses_live_process() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        let second = test.turn().await?;
+
+        assert_eq!((first.turn, second.turn), (1, 2));
+        assert_eq!(second.sandbox_id, first.sandbox_id);
+        assert_eq!(second.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn cached_runner_restarts_after_process_exit() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        test.thread
+            .cancel_sandbox_process(CancelSandboxProcessRequest {
+                sandbox_id: first.sandbox_id.clone(),
+                process_id: first.process_id.clone(),
+                signal: None,
+            })
+            .await?;
+        let resumed = test.turn().await?;
+
+        assert_eq!(resumed.turn, 1);
+        assert_eq!(resumed.sandbox_id, first.sandbox_id);
+        assert_ne!(resumed.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn cached_runner_restarts_after_sandbox_stop() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        test.thread.stop_sandbox(first.sandbox_id.clone()).await?;
+        let resumed = test.turn().await?;
+
+        assert_eq!(resumed.turn, 1);
+        assert_eq!(resumed.sandbox_id, first.sandbox_id);
+        assert_ne!(resumed.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
+
+    #[tokio::test]
+    async fn cached_runner_restarts_after_sandbox_replacement() -> Result<()> {
+        let test = CachedRunnerTest::new().await?;
+        let first = test.turn().await?;
+        test.thread
+            .terminate_sandbox(first.sandbox_id.clone())
+            .await?;
+        let resumed = test.turn().await?;
+
+        assert_eq!(resumed.turn, 1);
+        assert_ne!(resumed.sandbox_id, first.sandbox_id);
+        assert_ne!(resumed.process_id, first.process_id);
+        test.runtime.shutdown().await
+    }
+
     #[tokio::test]
     async fn recovery_calls_typescript_resume_turn_instead_of_run_turn() -> Result<()> {
         use crate::{BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config};
-        use exoharness::{BasicExoHarness, BeginTurnRequest, NewAgentRequest};
+        use exoharness::{BasicExoHarness, NewAgentRequest};
 
         let temp = tempfile::TempDir::new()?;
         let module = temp.path().join("resume-turn.mjs");
@@ -722,8 +925,8 @@ export default {
 "#,
         )?;
         let state_path = temp.path().join("state");
-        let state: Arc<dyn ExoHarness> =
-            Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let state = Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let queue = state.turn_coordinator::<crate::TurnWork>();
         let agent = state
             .new_agent(NewAgentRequest {
                 slug: "typescript-recovery".into(),
@@ -739,7 +942,8 @@ export default {
             "typescript": { "module_path": module },
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
-        let work = crate::harness_executor::RecoverableTurn {
+        let work = crate::harness_executor::TurnWork {
+            streaming: false,
             agent_config: config,
             thread_config: ConversationConfig::default(),
             request: SendRequest {
@@ -747,39 +951,42 @@ export default {
                 session_id: None,
             },
         };
-        let turn = thread
-            .begin_turn(BeginTurnRequest {
-                session_id: None,
-                input: vec![],
-                initial_events: vec![
-                    work.event()?,
-                    EventData::ToolRequested {
-                        tool_call_id: "saved-call".into(),
-                        response_id: None,
-                        request: ToolRequest {
-                            namespace: None,
-                            function_name: "shell".into(),
-                            arguments: Default::default(),
-                        },
+        let turn = crate::test_support::begin_queued_turn(
+            queue.as_ref(),
+            agent.record().id,
+            thread.as_ref(),
+            &work,
+            vec![],
+            vec![
+                work.event()?,
+                EventData::ToolRequested {
+                    tool_call_id: "saved-call".into(),
+                    response_id: None,
+                    request: ToolRequest {
+                        namespace: None,
+                        function_name: "shell".into(),
+                        arguments: Default::default(),
                     },
-                ],
-            })
-            .await?;
+                },
+            ],
+        )
+        .await?;
         let turn_id = turn.record().id;
         drop(turn);
         drop(thread);
         drop(agent);
         drop(state);
 
-        let state: Arc<dyn ExoHarness> =
-            Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let state = Arc::new(BasicExoHarness::new(local_test_config(&state_path)).await?);
+        let queue = state.turn_coordinator::<crate::TurnWork>();
         let runtime = Runtime::new(
             LocalProvider::typescript(
-                Arc::clone(&state),
+                state.clone(),
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
                 HashMap::new(),
                 Arc::new(BasicToolRuntime),
-            ),
+            )
+            .with_turn_coordinator(queue.clone()),
             None,
         );
         runtime.recover_unfinished_turns().await?;
@@ -825,7 +1032,7 @@ export default {
     #[tokio::test]
     async fn unresolved_tool_requires_typescript_recovery_capability() -> Result<()> {
         use crate::{BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config};
-        use exoharness::{BasicExoHarness, BeginTurnRequest, NewAgentRequest};
+        use exoharness::{BasicExoHarness, NewAgentRequest};
 
         let temp = tempfile::TempDir::new()?;
         let module = temp.path().join("no-tool-recovery.mjs");
@@ -842,8 +1049,9 @@ export default {
 };
 "#,
         )?;
-        let state: Arc<dyn ExoHarness> =
+        let state =
             Arc::new(BasicExoHarness::new(local_test_config(temp.path().join("state"))).await?);
+        let queue = state.turn_coordinator::<crate::TurnWork>();
         let agent = state
             .new_agent(NewAgentRequest {
                 slug: "typescript-no-tool-recovery".into(),
@@ -857,7 +1065,8 @@ export default {
             "typescript": { "module_path": module },
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
-        let work = crate::harness_executor::RecoverableTurn {
+        let work = crate::harness_executor::TurnWork {
+            streaming: false,
             agent_config: config,
             thread_config: ConversationConfig::default(),
             request: SendRequest {
@@ -865,24 +1074,26 @@ export default {
                 session_id: None,
             },
         };
-        let turn = thread
-            .begin_turn(BeginTurnRequest {
-                session_id: None,
-                input: vec![],
-                initial_events: vec![
-                    work.event()?,
-                    EventData::ToolRequested {
-                        tool_call_id: "saved-call".into(),
-                        response_id: None,
-                        request: ToolRequest {
-                            namespace: None,
-                            function_name: "shell".into(),
-                            arguments: Default::default(),
-                        },
+        let turn = crate::test_support::begin_queued_turn(
+            queue.as_ref(),
+            agent.record().id,
+            thread.as_ref(),
+            &work,
+            vec![],
+            vec![
+                work.event()?,
+                EventData::ToolRequested {
+                    tool_call_id: "saved-call".into(),
+                    response_id: None,
+                    request: ToolRequest {
+                        namespace: None,
+                        function_name: "shell".into(),
+                        arguments: Default::default(),
                     },
-                ],
-            })
-            .await?;
+                },
+            ],
+        )
+        .await?;
         let turn_id = turn.record().id;
         let runtime = Runtime::new(
             LocalProvider::typescript(
@@ -890,7 +1101,8 @@ export default {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
                 HashMap::new(),
                 Arc::new(BasicToolRuntime),
-            ),
+            )
+            .with_turn_coordinator(queue.clone()),
             None,
         );
         runtime.recover_unfinished_turns().await?;
@@ -988,6 +1200,7 @@ export default {
                 },
                 true,
                 Some(config),
+                Default::default(),
             )
             .await?;
         let mut calls = 0;
@@ -1061,7 +1274,7 @@ export default {{
             })
             .await?;
         let thread = agent.new_conversation(Default::default()).await?;
-        let turn = thread.begin_turn(Default::default()).await?;
+        let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
         let config: AgentConfig = serde_json::from_value(serde_json::json!({
             "instructions": [],
             "harness": "typescript",

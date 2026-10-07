@@ -7,12 +7,13 @@ use crate::sandbox::{LocalProcessSandboxBackend, ManagedSandboxBackend};
 use crate::secrets::AppleKeychainSecretKeyProvider;
 use crate::secrets::{
     EncryptedSecret, FileBackedSecretKeyProvider, SecretCipher, SecretKeyProvider,
-    StaticSecretKeyProvider, default_master_key_path,
+    StaticSecretKeyProvider,
 };
 use crate::vault::SecretReference;
 
 pub(super) struct NativeState {
     pub(super) cache_root: PathBuf,
+    pub(super) durable_file_system_root: PathBuf,
     pub(super) resources: crate::resources::ResourceStore,
     pub(super) secret_cipher: SecretCipher,
 }
@@ -25,6 +26,15 @@ pub enum SecretBackendChoice {
         path: Option<PathBuf>,
     },
     Static([u8; 32]),
+}
+
+impl SecretBackendChoice {
+    fn master_key_path(&self, root: &Path) -> Option<PathBuf> {
+        match self {
+            Self::File { path } => Some(path.clone().unwrap_or_else(|| root.join("master.key"))),
+            _ => None,
+        }
+    }
 }
 
 impl SandboxBackendRegistration {
@@ -47,17 +57,28 @@ impl SandboxBackendRegistration {
     }
 
     pub fn apple_container() -> Self {
-        Self::from_backend(
-            SandboxProvider::AppleContainer,
-            Arc::new(crate::CliContainerSandboxBackend::apple_container()),
-        )
+        Self::from_factory(SandboxProvider::AppleContainer, true, false, |inner| {
+            Box::pin(async move {
+                Ok(Arc::new(
+                    crate::CliContainerSandboxBackend::apple_container()
+                        .with_durable_file_system_root(
+                            inner.native.durable_file_system_root.clone(),
+                        ),
+                ) as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
     }
 
     pub fn docker() -> Self {
-        Self::from_backend(
-            SandboxProvider::Docker,
-            Arc::new(crate::CliContainerSandboxBackend::docker()),
-        )
+        Self::from_factory(SandboxProvider::Docker, true, false, |inner| {
+            Box::pin(async move {
+                Ok(Arc::new(
+                    crate::CliContainerSandboxBackend::docker().with_durable_file_system_root(
+                        inner.native.durable_file_system_root.clone(),
+                    ),
+                ) as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
     }
 
     #[cfg(feature = "firecracker")]
@@ -65,6 +86,7 @@ impl SandboxBackendRegistration {
         Self::from_factory(
             SandboxProvider::Firecracker,
             cfg!(any(target_os = "linux", target_os = "macos")),
+            true,
             move |inner| {
                 let spec = spec.clone();
                 let resolver = Arc::new(LocalEgressResolver {
@@ -81,7 +103,7 @@ impl SandboxBackendRegistration {
 
     #[cfg(not(feature = "firecracker"))]
     pub fn firecracker(_spec: FirecrackerBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Firecracker, false, |_| {
+        Self::from_factory(SandboxProvider::Firecracker, false, true, |_| {
             Box::pin(async move {
                 bail!("Firecracker support requires building Exo with --features firecracker")
             })
@@ -105,7 +127,7 @@ impl SandboxBackendRegistration {
         // the same shape daytona/e2b use for their credentials. The result is
         // cached per provider by `sandbox_backend_for_provider`, so this runs
         // once per harness and not once per sandbox.
-        Self::from_factory(SandboxProvider::Smolvm, true, |inner| {
+        Self::from_factory(SandboxProvider::Smolvm, true, true, |inner| {
             Box::pin(async move {
                 let config = inner.smolvm_config_from_binding().await?;
                 let resolver = Arc::new(LocalEgressResolver {
@@ -119,7 +141,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn daytona(spec: DaytonaBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Daytona, false, move |inner| {
+        Self::from_factory(SandboxProvider::Daytona, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.daytona_config_from_binding().await? {
@@ -133,7 +155,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn e2b(spec: E2bBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::E2b, false, move |inner| {
+        Self::from_factory(SandboxProvider::E2b, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.e2b_config_from_binding().await? {
@@ -147,7 +169,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn sprites(spec: SpritesBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Sprites, false, move |inner| {
+        Self::from_factory(SandboxProvider::Sprites, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.sprites_config_from_binding().await? {
@@ -161,7 +183,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn vercel(spec: VercelBackendSpec) -> Self {
-        Self::from_factory(SandboxProvider::Vercel, false, move |inner| {
+        Self::from_factory(SandboxProvider::Vercel, false, false, move |inner| {
             let spec = spec.clone();
             Box::pin(async move {
                 let config = match inner.vercel_config_from_binding().await? {
@@ -175,7 +197,7 @@ impl SandboxBackendRegistration {
     }
 
     pub fn aws_agentcore() -> Self {
-        Self::from_factory(SandboxProvider::AwsAgentCore, false, |_inner| {
+        Self::from_factory(SandboxProvider::AwsAgentCore, false, false, |_inner| {
             Box::pin(async move {
                 #[cfg(feature = "aws-agentcore")]
                 {
@@ -554,14 +576,10 @@ impl BasicExoHarnessInner {
         }
     }
 
-    /// `DaytonaConfig` from a root-scoped `Binding::Sandbox` (newest wins), or
-    /// `None` if none is set so callers fall back to the secret-name spec.
-    /// The paths recorded on the most recent smolvm binding. Unset entries leave
-    /// the backend on its `SMOLVM_*`-or-PATH defaults, so an unconfigured install
-    /// keeps working exactly as before.
+    /// SmolVM settings from the newest root-scoped sandbox binding.
     pub(super) async fn smolvm_config_from_binding(&self) -> Result<crate::SmolvmBackendConfig> {
         let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
-        let paths = bindings
+        let mut config = bindings
             .into_iter()
             .rev()
             .find_map(|record| match record.binding {
@@ -570,21 +588,23 @@ impl BasicExoHarnessInner {
                         SandboxProviderConfig::Smolvm {
                             binary,
                             boot_binary,
+                            storage_gib,
+                            overlay_gib,
                             ..
                         },
                     ..
-                } => Some((binary, boot_binary)),
+                } => Some(crate::SmolvmBackendConfig {
+                    binary,
+                    boot_binary,
+                    storage_gib,
+                    overlay_gib,
+                    ..Default::default()
+                }),
                 _ => None,
-            });
-        // A binding that names neither path is still the newest binding, and its
-        // silence means "use the defaults" rather than "keep looking".
-        let (binary, boot_binary) = paths.unwrap_or((None, None));
-        Ok(crate::SmolvmBackendConfig {
-            mode: crate::SmolvmExecutionMode::default(),
-            binary,
-            boot_binary,
-            image_cache: Some(self.native.cache_root.join("smolvm/images")),
-        })
+            })
+            .unwrap_or_default();
+        config.image_cache = Some(self.native.cache_root.join("smolvm/images"));
+        Ok(config)
     }
 
     pub(super) async fn daytona_config_from_binding(&self) -> Result<Option<crate::DaytonaConfig>> {
@@ -808,28 +828,22 @@ impl BasicExoHarness {
             cache.insert(sandbox_default.clone(), backend);
         }
 
-        let resource_master_key = match &secret_backend {
-            SecretBackendChoice::File { path } => Some(
-                path.clone()
-                    .map(Ok)
-                    .unwrap_or_else(crate::secrets::default_master_key_path)?,
-            ),
-            _ => None,
-        };
+        let resource_master_key = secret_backend.master_key_path(&root);
         let secret_backend = if in_memory {
             SecretBackendChoice::Static(crate::secrets::random_master_key())
         } else {
             secret_backend
         };
-        let secret_cipher =
-            build_secret_cipher(secret_backend, root.to_string_lossy().to_string())?;
+        let secret_cipher = build_secret_cipher(secret_backend, &root);
         let vaults = BasicVaultStore::new(
             (!in_memory).then(|| root.join("vaults")),
             secret_cipher.clone(),
         )?;
         Ok(Self {
+            sessions: None,
             caller: None,
             inner: Arc::new(BasicExoHarnessInner {
+                turn_queue_locks: Arc::default(),
                 access_policy: std::sync::OnceLock::new(),
                 vaults,
                 storage,
@@ -845,6 +859,7 @@ impl BasicExoHarness {
                 native: NativeState {
                     secret_cipher,
                     cache_root: root.join("cache"),
+                    durable_file_system_root: root.join("durable-filesystems"),
                     resources: crate::resources::ResourceStore::new(&root)?
                         .excluding_master_key(resource_master_key)?,
                 },
@@ -859,28 +874,20 @@ pub(super) struct StoredSecret {
     pub(super) secret: EncryptedSecret,
 }
 
-pub(crate) fn build_secret_cipher(
-    choice: SecretBackendChoice,
-    keychain_account: String,
-) -> Result<SecretCipher> {
-    #[cfg(not(feature = "apple-keychain"))]
-    drop(keychain_account);
-
+pub(crate) fn build_secret_cipher(choice: SecretBackendChoice, root: &Path) -> SecretCipher {
+    let master_key_path = choice.master_key_path(root);
     let provider: Arc<dyn SecretKeyProvider> = match choice {
         #[cfg(feature = "apple-keychain")]
-        SecretBackendChoice::AppleKeychain => {
-            Arc::new(AppleKeychainSecretKeyProvider::new(keychain_account))
-        }
-        SecretBackendChoice::File { path } => {
-            let path = match path {
-                Some(path) => path,
-                None => default_master_key_path()?,
-            };
-            Arc::new(FileBackedSecretKeyProvider::new(path))
-        }
+        SecretBackendChoice::AppleKeychain => Arc::new(AppleKeychainSecretKeyProvider::new(
+            root.to_string_lossy().into_owned(),
+            root.join("master.keychain.lock"),
+        )),
+        SecretBackendChoice::File { .. } => Arc::new(FileBackedSecretKeyProvider::new(
+            master_key_path.expect("file master key path"),
+        )),
         SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
     };
-    Ok(SecretCipher::new(provider))
+    SecretCipher::new(provider)
 }
 
 #[cfg(test)]
@@ -1031,12 +1038,8 @@ impl BasicExoHarnessConfig {
     pub fn validate_secret_mount(&self, host_path: &Path) -> Result<()> {
         let host_path = host_path.canonicalize()?;
         let mut protected = vec![self.root.join("vaults")];
-        if let SecretBackendChoice::File { path } = &self.secret_backend {
-            protected.push(
-                path.clone()
-                    .map(Ok)
-                    .unwrap_or_else(crate::secrets::default_master_key_path)?,
-            );
+        if let Some(path) = self.secret_backend.master_key_path(&self.root) {
+            protected.push(path);
         }
         for path in protected {
             let path = std::path::absolute(path)?;
@@ -1234,6 +1237,7 @@ impl BasicConversationHandle {
         &self,
         resources: Vec<crate::resources::PreparedResource>,
         provider: SandboxProvider,
+        lease: Option<Arc<sessions::SessionLease>>,
     ) -> Result<Vec<FileSystemMount>> {
         self.harness
             .check(ResourceScope::Thread {
@@ -1317,8 +1321,11 @@ impl BasicConversationHandle {
         let harness = self.harness.clone();
         let record = self.conversation_dir().join("record.json");
         tokio::spawn(async move {
-            // Keep the resource guards in the detached task: a cancelled caller
-            // must not let deletion race a still-running blocking materializer.
+            // The task can outlive a cancelled request; retain ownership until
+            // materialization finishes even if runtime shutdown has started.
+            let _lease = lease;
+            // Retain resource ownership in the detached task too, so deletion
+            // cannot race a materializer whose caller has been cancelled.
             let _resources = resources_guard;
             {
                 let _guard = harness.inner.write_lock.lock().await;
@@ -1330,6 +1337,7 @@ impl BasicConversationHandle {
             }
             let runtime = tokio::runtime::Handle::current();
             tokio::task::spawn_blocking(move || {
+                let _lease = _lease;
                 let Some(backend) = backend else {
                     return store.materialize(agent, thread, resources, credentials);
                 };
