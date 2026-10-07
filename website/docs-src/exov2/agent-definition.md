@@ -179,8 +179,8 @@ to have a persistent disk that survives across sessions.
 
 ### Configuration overrides
 
-To override an agent's default configuration, you can provide an `overides` object to a thread (even after it's started), or even
-an individual turn. The override itself has the same schema as the agent definition with some special rules:
+To override an agent's default configuration, you can provide an `overides` object to a thread, even after it's started. 
+The override itself has the same schema as the agent definition with some special rules:
 
 - Omit a field to inherit its value.
 - Supply a field to replace its value in full, including objects and lists.
@@ -198,8 +198,6 @@ you resume; turn overrides apply only to that turn. For example, a thread could 
 }
 ```
 
-The same object can override the `tools` declarations. An override doesn't change the saved agent definition or other threads.
-
 The CLI lets you override the harness and model when opening or resuming a thread:
 
 ```bash
@@ -207,24 +205,18 @@ exo agent run --agent support-analyst --thread THREAD \
   --harness pi --model gpt-6.1-sol
 ```
 
-These choices are saved on the thread and used when you resume it again. Switching harnesses keeps the same thread and its
-conversation history. The model and credentials still need to work with the selected harness.
-
-The HTTP API accepts `overrides` when creating a thread or submitting a turn. Omitted fields use the agent's current defaults,
-with any saved thread overrides applied before the turn's overrides.
+These choices are saved on the thread and used when you resume it again. 
 
 ### Forking
 
 You can fork a thread's event history at the latest event, or select an earlier event with `--up-to`:
 
 ```bash
-exo thread fork support-analyst THREAD "Try another approach"
-exo thread fork support-analyst THREAD "Try another approach" --up-to EVENT_ID
+exo thread fork support-analyst THREAD 
+exo thread fork support-analyst THREAD --up-to EVENT_ID
 ```
 
-This creates another thread with the copied history. Filesystem restoration requires a corresponding sandbox snapshot;
-selecting an earlier event only selects the history to copy. Forking threads with filesystem resources is not supported yet.
-The local managed-agent API also does not currently expose an in-place rewind operation.
+This creates another thread with the copied history.
 
 ## Environments
 
