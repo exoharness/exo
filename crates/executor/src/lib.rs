@@ -70,3 +70,10 @@ pub use exoharness::{
 
 pub mod shell_tool;
 pub mod typescript_runtime;
+
+#[cfg(feature = "native")]
+pub mod local_net;
+#[cfg(feature = "native")]
+pub mod previews;
+#[cfg(feature = "native")]
+pub use previews::{BrowserPreview, PreviewEndpoint, PreviewUrls, previews_for};

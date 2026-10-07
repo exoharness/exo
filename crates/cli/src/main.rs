@@ -8,6 +8,8 @@ mod mount_tests;
 #[cfg(test)]
 mod naming_tests;
 mod oauth;
+mod port_forward;
+mod previews;
 mod providers;
 mod render;
 #[cfg(test)]
@@ -654,6 +656,12 @@ enum AgentMountCommands {
 
 #[derive(Debug, Subcommand)]
 enum ConversationCommands {
+    /// Show this thread's saved browser preview URLs.
+    Ports {
+        agent: String,
+        #[arg(value_name = "THREAD")]
+        conversation: String,
+    },
     List {
         agent: String,
     },
@@ -761,6 +769,16 @@ enum ConversationCommands {
 
 #[derive(Debug, Subcommand)]
 enum ConversationSandboxCommands {
+    /// Forward a local TCP listener to a published port in a running thread sandbox.
+    Forward {
+        agent: String,
+        #[arg(value_name = "THREAD")]
+        conversation: String,
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+        #[arg(long, default_value = "127.0.0.1:0")]
+        bind: std::net::SocketAddr,
+    },
     Attach {
         agent: String,
         #[arg(value_name = "THREAD")]
@@ -1101,6 +1119,12 @@ async fn run_selected(
                 execution.egress_policy.is_some(),
             )
             .await?;
+            if local {
+                harness.start_inline_previews(agent.as_ref(), conversation.clone()).await?;
+            }
+            if let Some(previews) = harness.preview_urls(agent.as_ref(), conversation.clone()).await? {
+                previews::print_startup(&previews);
+            }
             if let Some(provider) = &selected_provider {
                 provider_store.pin_thread(
                     conversation.record().slug.clone(),
@@ -1329,6 +1353,11 @@ async fn run_selected(
             }
         },
         Commands::Conversation { command, .. } => match command {
+            ConversationCommands::Ports { agent, conversation } => {
+                let conversation = must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                previews::print(harness.as_ref(), agent.as_ref(), conversation).await?;
+            },
             ConversationCommands::List { agent } => {
                 managed_agents::list_threads(harness.as_ref(), &agent).await?;
             }
@@ -1591,6 +1620,16 @@ async fn run_selected(
                 }
             },
             ConversationCommands::Sandbox { command, .. } => match command {
+                ConversationSandboxCommands::Forward {
+                    agent,
+                    conversation,
+                    port,
+                    bind,
+                } => {
+                    let conversation =
+                        must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                    port_forward::run(conversation, port, bind).await?;
+                }
                 ConversationSandboxCommands::Attach {
                     agent,
                     conversation,
@@ -1835,9 +1874,12 @@ async fn run_selected(
             } => {
                 let conversation =
                     must_get_conversation(harness.as_ref(), &agent, &conversation).await?;
+                let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                if local {
+                    harness.start_inline_previews(agent.as_ref(), conversation.clone()).await?;
+                }
                 let previous_messages =
                     executor::materialize_conversation_messages(conversation.as_ref()).await?;
-                let agent = must_get_agent(harness.as_ref(), &agent).await?;
                 send_conversation_wakeup(harness.as_ref(), &agent, &conversation, prompt).await?;
                 let messages =
                     executor::materialize_conversation_messages(conversation.as_ref()).await?;
@@ -1902,6 +1944,10 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
                 agent,
                 conversation,
             }
+            | ConversationCommands::Ports {
+                agent,
+                conversation,
+            }
             | ConversationCommands::Events {
                 agent,
                 conversation,
@@ -1933,7 +1979,12 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
                 } => (Some(agent), Some(conversation)),
             },
             ConversationCommands::Sandbox { command, .. } => match command {
-                ConversationSandboxCommands::Attach {
+                ConversationSandboxCommands::Forward {
+                    agent,
+                    conversation,
+                    ..
+                }
+                | ConversationSandboxCommands::Attach {
                     agent,
                     conversation,
                     ..
