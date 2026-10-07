@@ -165,6 +165,9 @@ pub trait TurnQueue<Work: Send + Sync>: TurnAdmission<Work> {
     async fn release_if_idle(&self, lease: &TurnLease) -> Result<bool>;
 }
 
+#[cfg(any(test, feature = "contract-tests"))]
+pub mod contract_tests;
+
 #[cfg(feature = "store")]
 pub mod stored;
 #[cfg(feature = "store")]

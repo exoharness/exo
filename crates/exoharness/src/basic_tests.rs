@@ -132,6 +132,47 @@ async fn unsupported_backend_fork_is_an_error() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn basic_backend_turn_queue_contracts() -> crate::Result<()> {
+    use crate::turn_coordinator::{TurnThread, contract_tests};
+
+    let tempdir = TempDir::new()?;
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path())).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            vaults: vec![],
+            slug: "queue-contracts".into(),
+            name: "Queue contracts".into(),
+        })
+        .await?;
+    let queue = harness.turn_coordinator::<u32>();
+    let new_thread = || async {
+        let thread = agent.new_thread(crate::NewThreadRequest::default()).await?;
+        Ok::<_, crate::Error>(TurnThread {
+            agent_id: agent.record().id,
+            thread_id: thread.record().id,
+        })
+    };
+    contract_tests::interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head(
+        queue.as_ref(),
+        new_thread().await?,
+        42,
+    )
+    .await?;
+    contract_tests::idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter(
+        queue.as_ref(),
+        new_thread().await?,
+        42,
+    )
+    .await?;
+    contract_tests::suspension_preserves_order_and_control_watch_has_no_registration_gap(
+        queue.as_ref(),
+        new_thread().await?,
+        42,
+    )
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn basic_backend_supports_agent_and_conversation_crud() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness: std::sync::Arc<dyn ExoHarness> = std::sync::Arc::new(

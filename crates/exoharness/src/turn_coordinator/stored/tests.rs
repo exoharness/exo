@@ -1,5 +1,6 @@
 use super::*;
 use crate::Uuid7;
+use crate::turn_coordinator::contract_tests;
 
 fn queued(principal: &str, attention: TurnAttention) -> TurnSubmission<u32> {
     TurnSubmission {
@@ -23,50 +24,64 @@ async fn interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head()
         agent_id: Uuid7::now(),
         thread_id: Uuid7::now(),
     };
-    let first = queued("alice", TurnAttention::Wake);
-    coordinator.enqueue(thread, first.clone()).await?;
-    let lease = coordinator.claim(thread).await?.unwrap();
-    assert!(coordinator.claim(thread).await?.is_none());
-    let other = queued("bob", TurnAttention::Interrupt);
-    coordinator.enqueue(thread, other.clone()).await?;
-    assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().control,
-        TurnControl::Run
-    );
-    assert_eq!(
-        coordinator
-            .cancel(
-                thread,
-                first.turn.id,
-                TurnAuthority::Submitter("bob".into())
-            )
-            .await?,
-        TurnControlOutcome::NotAccessible
-    );
-    let replacement = queued("alice", TurnAttention::Interrupt);
-    coordinator.enqueue(thread, replacement.clone()).await?;
-    assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().control,
-        TurnControl::Cancel
-    );
-    assert!(!coordinator.release_if_idle(&lease).await?);
-    coordinator.acknowledge(&lease, first.turn.id).await?;
-    coordinator.acknowledge(&lease, first.turn.id).await?;
-    assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().turn.id,
-        other.turn.id
-    );
-    coordinator.acknowledge(&lease, other.turn.id).await?;
-    coordinator.acknowledge(&lease, replacement.turn.id).await?;
-    assert!(coordinator.release_if_idle(&lease).await?);
-    assert!(coordinator.peek(&lease).await.is_err());
-    let next = coordinator.claim(thread).await?.unwrap();
-    assert!(!Arc::ptr_eq(&next.identity, &lease.identity));
-    Ok(())
+    contract_tests::interruption_is_scoped_and_acknowledgment_cannot_remove_the_next_head(
+        &coordinator,
+        thread,
+        42,
+    )
+    .await
 }
 
 #[tokio::test]
 async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter() -> Result<()> {
+    let coordinator = StoredTurnCoordinator::in_memory();
+    let thread = TurnThread {
+        agent_id: Uuid7::now(),
+        thread_id: Uuid7::now(),
+    };
+    contract_tests::idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter(
+        &coordinator,
+        thread,
+        42,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() -> Result<()> {
+    let coordinator = StoredTurnCoordinator::in_memory();
+    let thread = TurnThread {
+        agent_id: Uuid7::now(),
+        thread_id: Uuid7::now(),
+    };
+    contract_tests::suspension_preserves_order_and_control_watch_has_no_registration_gap(
+        &coordinator,
+        thread,
+        42,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn released_queue_drops_in_memory_locks() -> Result<()> {
+    let coordinator = StoredTurnCoordinator::<u32>::in_memory();
+    let thread = TurnThread {
+        agent_id: Uuid7::now(),
+        thread_id: Uuid7::now(),
+    };
+    let lease = coordinator.claim(thread).await?.unwrap();
+    assert!(coordinator.release_if_idle(&lease).await?);
+    let next = coordinator.claim(thread).await?.unwrap();
+    assert!(!Arc::ptr_eq(&next.identity, &lease.identity));
+    assert!(coordinator.release_if_idle(&next).await?);
+    drop(next);
+    drop(lease);
+    assert!(coordinator.locks.threads.lock().unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn receipt_resolves_new_identity_to_original_turn() -> Result<()> {
     let coordinator = StoredTurnCoordinator::in_memory();
     let thread = TurnThread {
         agent_id: Uuid7::now(),
@@ -77,86 +92,12 @@ async fn idempotency_survives_acknowledgment_and_is_scoped_to_the_submitter() ->
     coordinator.enqueue(thread, first.clone()).await?;
     let lease = coordinator.claim(thread).await?.unwrap();
     coordinator.acknowledge(&lease, first.turn.id).await?;
-    let mut retry = first.clone();
-    retry.turn = TurnRecord {
-        id: Uuid7::now(),
-        session_id: Uuid7::now(),
-    };
-    let receipt = coordinator.enqueue(thread, retry.clone()).await?;
+    let mut retry = queued("alice", TurnAttention::Wake);
+    retry.turn.session_id = first.turn.session_id;
+    retry.options = first.options;
+    let receipt = coordinator.enqueue(thread, retry).await?;
     assert!(receipt.duplicate);
     assert_eq!(receipt.turn, first.turn);
-    retry.principal = Some("bob".into());
-    assert!(!coordinator.enqueue(thread, retry).await?.duplicate);
-    assert!(!coordinator.release_if_idle(&lease).await?);
-    Ok(())
-}
-
-#[tokio::test]
-async fn suspension_preserves_order_and_control_watch_has_no_registration_gap() -> Result<()> {
-    use futures::StreamExt;
-    let coordinator = StoredTurnCoordinator::in_memory();
-    let thread = TurnThread {
-        agent_id: Uuid7::now(),
-        thread_id: Uuid7::now(),
-    };
-    let first = queued("alice", TurnAttention::Wake);
-    let second = queued("alice", TurnAttention::Wake);
-    coordinator.enqueue(thread, first.clone()).await?;
-    coordinator.enqueue(thread, second).await?;
-    let lease = coordinator.claim(thread).await?.unwrap();
-    coordinator
-        .set_suspended(
-            thread,
-            first.turn.id,
-            TurnAuthority::Submitter("alice".into()),
-            true,
-        )
-        .await?;
-    let started = coordinator.start(&lease, first.turn.id).await?;
-    let head = started.head;
-    let mut control = started.control;
-    assert_eq!(control.next().await.unwrap()?, TurnControl::Suspend);
-    assert!(!head.started);
-    assert_eq!(head.turn, first.turn);
-    assert!(coordinator.release_if_idle(&lease).await?);
-    drop(control);
-    drop(lease);
-    assert!(coordinator.enqueue(thread, first.clone()).await?.duplicate);
-    let lease = coordinator.claim(thread).await?.unwrap();
-    assert_eq!(
-        coordinator.peek(&lease).await?.unwrap().control,
-        TurnControl::Suspend
-    );
-    assert_eq!(
-        coordinator
-            .set_suspended(
-                thread,
-                first.turn.id,
-                TurnAuthority::Submitter("bob".into()),
-                false
-            )
-            .await?,
-        TurnControlOutcome::NotAccessible
-    );
-    coordinator
-        .set_suspended(thread, first.turn.id, TurnAuthority::ThreadOwner, false)
-        .await?;
-    let mut control = coordinator.start(&lease, first.turn.id).await?.control;
-    assert_eq!(control.next().await.unwrap()?, TurnControl::Run);
-    coordinator
-        .cancel(thread, first.turn.id, TurnAuthority::ThreadOwner)
-        .await?;
-    assert_eq!(control.next().await.unwrap()?, TurnControl::Cancel);
-    assert!(
-        coordinator
-            .set_suspended(thread, first.turn.id, TurnAuthority::ThreadOwner, false)
-            .await
-            .is_err()
-    );
-    coordinator.acknowledge(&lease, first.turn.id).await?;
-    drop(control);
-    drop(lease);
-    assert!(coordinator.locks.threads.lock().unwrap().is_empty());
     Ok(())
 }
 
