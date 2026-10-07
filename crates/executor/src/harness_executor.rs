@@ -265,17 +265,14 @@ impl Runtime {
         Ok(())
     }
 
-    pub async fn recover_unfinished_turns(&self) -> Result<()> {
-        self.recover_unfinished_turns_with_resolver(None).await
+    /// Install caller resolution before waking persisted work. Configure once.
+    pub fn set_recovery_resolver(&self, resolver: RecoveryRuntimeResolver) -> Result<()> {
+        self.recovery_resolver
+            .set(resolver)
+            .map_err(|_| anyhow!("recovery resolver is already configured"))
     }
 
-    pub async fn recover_unfinished_turns_with_resolver(
-        &self,
-        resolver: Option<RecoveryRuntimeResolver>,
-    ) -> Result<()> {
-        if let Some(resolver) = resolver {
-            self.recovery_resolver.get_or_init(|| resolver);
-        }
+    pub async fn recover_unfinished_turns(&self) -> Result<()> {
         self.recovery
             .get_or_try_init(|| self.provider.recover_unfinished_turns(self.clone()))
             .await
@@ -520,8 +517,8 @@ impl Runtime {
             };
             thread
                 .begin_turn(BeginTurnRequest {
-                    session_id: None,
-                    turn: Some(record),
+                    turn: record,
+                    new_session: request.session_id.is_none(),
                     input: request.input.clone(),
                     initial_events: vec![work.event()?],
                 })

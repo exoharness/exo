@@ -12,10 +12,10 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use exoharness::{
-    AddEventsRequest, AgentHandle, BasicExoHarness, BeginTurnRequest, ConversationHandle,
-    EventData, EventKind, EventQuery, EventQueryDirection, ExoHarness, FileSystemMount,
-    FileSystemMountMode, PutSecretRequest, ResourceScope, Result, SandboxAttachment,
-    SandboxProvider, Secret, ToolRequest, ToolResult, TurnHandle, Uuid7,
+    AddEventsRequest, AgentHandle, BasicExoHarness, ConversationHandle, EventData, EventKind,
+    EventQuery, EventQueryDirection, ExoHarness, FileSystemMount, FileSystemMountMode,
+    PutSecretRequest, ResourceScope, Result, SandboxAttachment, SandboxProvider, Secret,
+    ToolRequest, ToolResult, TurnHandle, Uuid7,
     access::{AccessPolicy, Caller},
     vault::VaultRecord,
 };
@@ -192,16 +192,14 @@ async fn recovery_leaves_threads_owned_by_another_process_untouched() -> Result<
         agent.record().id,
         thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            initial_events: vec![
-                work.event()?,
-                EventData::Custom {
-                    event_type: RUNTIME_TURN_COMPLETED.into(),
-                    payload: Value::Null,
-                },
-            ],
-            ..Default::default()
-        },
+        Vec::new(),
+        vec![
+            work.event()?,
+            EventData::Custom {
+                event_type: RUNTIME_TURN_COMPLETED.into(),
+                payload: Value::Null,
+            },
+        ],
     )
     .await?;
     // Recovery would normally finalize this completed-but-unfinished turn.
@@ -276,12 +274,8 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         agent.record().id,
         thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: request.input,
-            initial_events: vec![work.event()?],
-        },
+        request.input,
+        vec![work.event()?],
     )
     .await?;
     let turn_id = turn.record().id;
@@ -328,12 +322,8 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         agent.record().id,
         completed_thread.as_ref(),
         &completed_work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: completed_work.request.input.clone(),
-            initial_events: vec![completed_work.event()?],
-        },
+        completed_work.request.input.clone(),
+        vec![completed_work.event()?],
     )
     .await?;
     let completed_turn_id = completed_turn.record().id;
@@ -365,12 +355,8 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         agent.record().id,
         failed_thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: vec![user_message("already failed")],
-            initial_events: vec![work.event()?],
-        },
+        vec![user_message("already failed")],
+        vec![work.event()?],
     )
     .await?;
     let failed_turn_id = failed_turn.record().id;
@@ -395,15 +381,11 @@ async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()
         agent.record().id,
         invalid_thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: vec![user_message("invalid work")],
-            initial_events: vec![EventData::Custom {
-                event_type: crate::harness_executor::RUNTIME_TURN_WORK.into(),
-                payload: Value::Null,
-            }],
-        },
+        vec![user_message("invalid work")],
+        vec![EventData::Custom {
+            event_type: crate::harness_executor::RUNTIME_TURN_WORK.into(),
+            payload: Value::Null,
+        }],
     )
     .await?;
     let invalid_turn_id = invalid_turn.record().id;
@@ -600,12 +582,8 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
         agent.record().id,
         thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: request.input,
-            initial_events: vec![work.event()?],
-        },
+        request.input,
+        vec![work.event()?],
     )
     .await?;
     let turn_id = turn.record().id;
@@ -634,12 +612,8 @@ async fn service_restart_rejects_unresolved_tool_call() -> Result<()> {
         agent.record().id,
         answered_thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: vec![user_message("approval was answered before crash")],
-            initial_events: vec![work.event()?],
-        },
+        vec![user_message("approval was answered before crash")],
+        vec![work.event()?],
     )
     .await?;
     let answered_turn_id = answered_turn.record().id;
@@ -803,12 +777,8 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
         agent.record().id,
         thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: request.input,
-            initial_events: vec![work.event()?],
-        },
+        request.input,
+        vec![work.event()?],
     )
     .await?;
     let turn_id = turn.record().id;
@@ -1215,12 +1185,8 @@ async fn new_turn_queues_behind_older_work_before_startup_recovery() -> Result<(
         agent.record().id,
         thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: request.input,
-            initial_events: vec![work.event()?],
-        },
+        request.input,
+        vec![work.event()?],
     )
     .await?;
     let old_turn_id = old_turn.record().id;
@@ -1550,12 +1516,8 @@ async fn blocked_recovered_turn_does_not_block_http_startup() -> Result<()> {
         agent.record().id,
         thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: request.input,
-            initial_events: vec![work.event()?],
-        },
+        request.input,
+        vec![work.event()?],
     )
     .await?;
     drop(thread);
@@ -1644,12 +1606,8 @@ async fn recovered_turn_uses_its_original_caller() -> Result<()> {
         agent.record().id,
         caller_thread.as_ref(),
         &work,
-        BeginTurnRequest {
-            turn: None,
-            session_id: None,
-            input: request.input,
-            initial_events: vec![work.event()?],
-        },
+        request.input,
+        vec![work.event()?],
     )
     .await?;
     let turn_id = turn.record().id;
@@ -1694,9 +1652,9 @@ async fn recovered_turn_uses_its_original_caller() -> Result<()> {
             Ok(scoped)
         })
     };
-    runtime
-        .recover_unfinished_turns_with_resolver(Some(resolver))
-        .await?;
+    runtime.set_recovery_resolver(resolver.clone())?;
+    assert!(runtime.set_recovery_resolver(resolver).is_err());
+    runtime.recover_unfinished_turns().await?;
     let agent = state.get_agent(&agent_id).await?.unwrap();
     let thread = agent.get_thread(&thread_id).await?.unwrap();
     let events = tokio::time::timeout(Duration::from_secs(3), async {

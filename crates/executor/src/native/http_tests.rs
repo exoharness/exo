@@ -1033,9 +1033,7 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
             .context("agent")?;
         for pending in [false, true] {
             let local_thread = local_agent.new_thread(Default::default()).await?;
-            let orphan = local_thread
-                .begin_turn(exoharness::BeginTurnRequest::default())
-                .await?;
+            let orphan = exoharness::test_support::begin_test_turn(local_thread.as_ref()).await?;
             if pending {
                 orphan
                     .add_events(vec![EventData::Custom {

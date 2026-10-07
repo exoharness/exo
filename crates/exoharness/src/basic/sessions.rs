@@ -398,7 +398,7 @@ mod tests {
             .await
             .is_err()
         );
-        let turn = thread.begin_turn(Default::default()).await?;
+        let turn = crate::test_support::begin_test_turn(thread.as_ref()).await?;
         let busy_turn = busy.turn_handle(turn.record().clone()).await?;
         assert!(
             busy_turn

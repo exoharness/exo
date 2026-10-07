@@ -785,10 +785,10 @@ async fn persist_head_failure(
         JournalStatus::Unstarted => {
             thread
                 .begin_turn(exoharness::BeginTurnRequest {
-                    turn: Some(head.turn.clone()),
+                    turn: head.turn.clone(),
+                    new_session: head.work.request.session_id.is_none(),
                     input: head.work.request.input.clone(),
                     initial_events: vec![head.work.event()?],
-                    session_id: None,
                 })
                 .await?
         }

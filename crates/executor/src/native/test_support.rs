@@ -48,7 +48,8 @@ pub(crate) async fn begin_queued_turn(
     agent_id: exoharness::AgentId,
     thread: &dyn exoharness::ThreadHandle,
     work: &crate::TurnWork,
-    mut request: exoharness::BeginTurnRequest,
+    input: Vec<lingua::Message>,
+    initial_events: Vec<exoharness::EventData>,
 ) -> exoharness::Result<std::sync::Arc<dyn exoharness::TurnHandle>> {
     use exoharness::turn_coordinator::{TurnSubmission, TurnThread};
     let scope = TurnThread {
@@ -57,7 +58,10 @@ pub(crate) async fn begin_queued_turn(
     };
     let turn = exoharness::TurnRecord {
         id: exoharness::Uuid7::now(),
-        session_id: request.session_id.unwrap_or_else(exoharness::Uuid7::now),
+        session_id: work
+            .request
+            .session_id
+            .unwrap_or_else(exoharness::Uuid7::now),
     };
     coordinator
         .enqueue(
@@ -77,7 +81,12 @@ pub(crate) async fn begin_queued_turn(
         .expect("fixture owns the queue");
     coordinator.start(&lease, turn.id).await?;
     drop(lease);
-    request.session_id = None;
-    request.turn = Some(turn);
-    thread.begin_turn(request).await
+    thread
+        .begin_turn(exoharness::BeginTurnRequest {
+            turn,
+            new_session: work.request.session_id.is_none(),
+            input,
+            initial_events,
+        })
+        .await
 }

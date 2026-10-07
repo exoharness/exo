@@ -206,7 +206,7 @@ async fn cli_reports_http_usage_across_restarts_and_paginated_history() -> Resul
         output.contains("1,100 [1,100 total] tok, $0.01 [$0.01 total]"),
         "{output}"
     );
-    let codex_turn = thread.begin_turn(Default::default()).await?;
+    let codex_turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
     let mut codex_events = (0..101)
         .map(|_| EventData::Messages {
             messages: vec![Message::Assistant {

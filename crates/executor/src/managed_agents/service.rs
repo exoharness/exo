@@ -565,7 +565,6 @@ pub async fn list_threads(
         .list_threads(exoharness::ListThreadsRequest {
             cursor: query.cursor,
             limit: Some(query.limit.unwrap_or(100)),
-            ..Default::default()
         })
         .await
         .map_err(bad_request)?;

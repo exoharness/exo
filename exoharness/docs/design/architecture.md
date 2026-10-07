@@ -243,10 +243,11 @@ inside one process; it is not a cross-process pub/sub service.
 
 ## Sessions And Turns
 
-A session groups related turns. `begin_turn()` accepts an optional `session_id`.
-If none is provided, Exoharness creates a new session and appends
-`session_started` before `turn_started`. If input messages are included, they
-are appended as a `messages` event in the same turn.
+A session groups related turns. `begin_turn()` requires a caller-allocated
+`TurnRecord` containing the turn and session IDs. Set `new_session: true` to
+append `session_started` before `turn_started`; use `false` when continuing an
+existing session, including one opened with `start_session()`. If input messages
+are included, they are appended as a `messages` event in the same turn.
 
 The executor-level `send()` API starts a turn, executes the configured harness,
 and finishes the turn. External systems such as adapters and scheduler wakeups

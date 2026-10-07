@@ -119,7 +119,7 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         executor::run_adapters_watch(adapter_runtime.clone(), store, adapter_options).await
     };
     if args.adapters_only {
-        service.spawn_recovery();
+        service.spawn_recovery()?;
         if let Some(auth) = &auth {
             let caller = auth.caller(auth.owner().await, args.multiplayer);
             caller.policy.default_vault(&caller.principal).await?;

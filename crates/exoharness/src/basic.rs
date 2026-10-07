@@ -68,8 +68,6 @@ use sessions::LocalSessions;
 #[path = "basic/resource_tests.rs"]
 mod resource_tests;
 
-const UNFINISHED_TURNS_DIR: &str = "recovery/unfinished_turns";
-
 #[path = "basic/turn_queue.rs"]
 mod turn_queue;
 
@@ -179,23 +177,6 @@ fn remember_appended_batch(
                 .to_string_lossy()
                 .into_owned(),
         );
-}
-
-fn unfinished_turn_marker_path(
-    agent_id: AgentId,
-    thread_id: ConversationId,
-    turn_id: TurnId,
-) -> PathBuf {
-    Path::new(UNFINISHED_TURNS_DIR)
-        .join(agent_id.to_string())
-        .join(thread_id.to_string())
-        .join(format!("{turn_id}.json"))
-}
-
-fn unfinished_thread_markers_dir(agent_id: AgentId, thread_id: ConversationId) -> PathBuf {
-    Path::new(UNFINISHED_TURNS_DIR)
-        .join(agent_id.to_string())
-        .join(thread_id.to_string())
 }
 
 #[derive(Clone)]
@@ -634,10 +615,6 @@ impl ExoHarness for BasicExoHarness {
                 );
             }
             self.inner.storage.delete_prefix(agent_dir).await?;
-            self.inner
-                .storage
-                .delete_prefix(Path::new(UNFINISHED_TURNS_DIR).join(id.to_string()))
-                .await?;
             #[cfg(feature = "basic-backend")]
             if let Some(sessions) = &self.sessions {
                 sessions.release_agent(*id)?;
@@ -1227,11 +1204,6 @@ impl AgentHandle for BasicAgentHandle {
                 .storage
                 .delete_prefix(conversation_dir)
                 .await?;
-            self.harness
-                .inner
-                .storage
-                .delete_prefix(unfinished_thread_markers_dir(self.record.id, *id))
-                .await?;
             #[cfg(feature = "basic-backend")]
             if let Some(sessions) = &self.harness.sessions {
                 sessions.release(ResourceScope::Thread {
@@ -1320,33 +1292,11 @@ impl BasicAgentHandle {
         request: ListConversationsRequest,
     ) -> Result<ListConversationsResult<ConversationRecord>> {
         let storage = &self.harness.inner.storage;
-        let paths = if request.unfinished_only {
-            let prefix = Path::new(UNFINISHED_TURNS_DIR).join(self.record.id.to_string());
-            let mut thread_ids = HashSet::new();
-            for key in storage.list_keys(&prefix).await? {
-                let Ok(relative) = Path::new(&key).strip_prefix(&prefix) else {
-                    continue;
-                };
-                if relative.components().count() != 2 || !key.ends_with(".json") {
-                    continue;
-                }
-                let Some(thread_id) = relative.components().next() else {
-                    continue;
-                };
-                thread_ids.insert(thread_id.as_os_str().to_string_lossy().into_owned());
-            }
-            thread_ids
-                .into_iter()
-                .map(|id| self.conversations_dir().join(id).join("record.json"))
-                .collect::<Vec<_>>()
-        } else {
-            storage
-                .list_directories(self.conversations_dir())
-                .await?
-                .into_iter()
-                .map(|directory| directory.join("record.json"))
-                .collect::<Vec<_>>()
-        };
+        let paths = storage
+            .list_directories(self.conversations_dir())
+            .await?
+            .into_iter()
+            .map(|directory| directory.join("record.json"));
         let mut conversations = stream::iter(paths)
             .map(|path| async move {
                 let Some(mut record) = storage
@@ -1700,30 +1650,10 @@ impl ConversationHandle for BasicConversationHandle {
         let mut record = self.load_record().await?;
         let conversation_dir = self.conversation_dir();
 
-        let turn_record = request.turn.unwrap_or_else(|| TurnRecord {
-            id: Uuid7::now(),
-            session_id: request.session_id.unwrap_or_else(Uuid7::now),
-        });
-        anyhow::ensure!(
-            request
-                .session_id
-                .is_none_or(|id| id == turn_record.session_id),
-            "accepted turn belongs to a different session"
-        );
+        let turn_record = request.turn;
         let session_id = turn_record.session_id;
-        // Write the marker first: a crash may leave an extra candidate to scan,
-        // but cannot leave an admitted turn absent from the recovery index.
-        self.harness
-            .inner
-            .storage
-            .put_bytes(
-                unfinished_turn_marker_path(self.agent_id, self.record.id, turn_record.id),
-                Vec::new(),
-            )
-            .await?;
         let mut events_to_append = Vec::new();
-
-        if request.session_id.is_none() {
+        if request.new_session {
             events_to_append.push(EventData::SessionStarted);
         }
         events_to_append.push(EventData::TurnStarted {
@@ -2351,15 +2281,6 @@ impl TurnHandle for BasicTurnHandle {
             }
         };
         if let Some(event_id) = finished_event_id {
-            self.harness
-                .inner
-                .storage
-                .delete_key_if_exists(unfinished_turn_marker_path(
-                    self.agent_id,
-                    self.conversation_id,
-                    self.record.id,
-                ))
-                .await?;
             return Ok(event_id);
         }
         let mut record =
@@ -2382,15 +2303,6 @@ impl TurnHandle for BasicTurnHandle {
             state.latest_event_id = Some(latest);
             state.finished = true;
         }
-        self.harness
-            .inner
-            .storage
-            .delete_key_if_exists(unfinished_turn_marker_path(
-                self.agent_id,
-                self.conversation_id,
-                self.record.id,
-            ))
-            .await?;
         Ok(latest)
     }
 }

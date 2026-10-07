@@ -261,6 +261,96 @@ async fn finish(mut stream: ExecutionStreamHandle) -> Result<()> {
 }
 
 #[tokio::test]
+async fn continued_turns_do_not_restart_implicit_or_explicit_sessions() -> Result<()> {
+    for explicit_session in [false, true] {
+        let (_temp, mut f) = fixture().await?;
+        let session_id = if explicit_session {
+            Some(f.thread.start_session().await?)
+        } else {
+            None
+        };
+        let (first, stream) = f
+            .runtime
+            .start_turn(
+                f.agent.clone(),
+                f.thread.clone(),
+                SendRequest {
+                    session_id,
+                    ..request()
+                },
+                false,
+                None,
+            )
+            .await?;
+        if let Some(session_id) = session_id {
+            assert_eq!(first.session_id, session_id);
+        }
+        f.started(first.id).await?;
+        f.executor.release.add_permits(1);
+        finish(stream).await?;
+
+        let continuing = SendRequest {
+            session_id: Some(first.session_id),
+            ..request()
+        };
+        let (second, stream) = f
+            .runtime
+            .start_turn(
+                f.agent.clone(),
+                f.thread.clone(),
+                continuing.clone(),
+                false,
+                None,
+            )
+            .await?;
+        assert_eq!(second.session_id, first.session_id);
+        f.started(second.id).await?;
+        let (cancelled, cancelled_stream) = f
+            .runtime
+            .start_turn(f.agent.clone(), f.thread.clone(), continuing, false, None)
+            .await?;
+        assert_eq!(cancelled.session_id, first.session_id);
+        assert!(f.runtime.cancel_turn(f.key(&cancelled)).await?);
+        f.executor.release.add_permits(1);
+        finish(stream).await?;
+        assert!(
+            finish(cancelled_stream)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("cancel")
+        );
+        f.wait_idle().await?;
+        assert!(f.started.try_recv().is_err());
+
+        let events = f
+            .thread
+            .get_events(Some(EventQuery {
+                session_id: Some(first.session_id),
+                types: Some(vec![EventKind::SESSION_STARTED, EventKind::TURN_STARTED]),
+                direction: Some(EventQueryDirection::Asc),
+                ..Default::default()
+            }))
+            .await?
+            .events;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.data.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                EventKind::SESSION_STARTED,
+                EventKind::TURN_STARTED,
+                EventKind::TURN_STARTED,
+                EventKind::TURN_STARTED,
+            ],
+        );
+        f.runtime.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn accepts_while_running_and_dropped_observers_do_not_cancel_work() -> Result<()> {
     let (_temp, mut f) = fixture().await?;
     let (first, stream) = f.start().await?;
@@ -331,9 +421,10 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
     let turn = f
         .thread
         .begin_turn(exoharness::BeginTurnRequest {
-            turn: Some(completed.turn.clone()),
+            turn: completed.turn.clone(),
+            new_session: completed.work.request.session_id.is_none(),
+            input: Vec::new(),
             initial_events: vec![completed.work.event()?],
-            ..Default::default()
         })
         .await?;
     turn.finish().await?;
@@ -343,9 +434,10 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
     let turn = f
         .thread
         .begin_turn(exoharness::BeginTurnRequest {
-            turn: Some(cancelled.turn.clone()),
+            turn: cancelled.turn.clone(),
+            new_session: cancelled.work.request.session_id.is_none(),
+            input: Vec::new(),
             initial_events: vec![cancelled.work.event()?],
-            ..Default::default()
         })
         .await?;
     drop(turn);
@@ -401,9 +493,10 @@ async fn recovery_uses_prepared_work_instead_of_the_acceptance_snapshot() -> Res
     let turn = f
         .thread
         .begin_turn(exoharness::BeginTurnRequest {
-            turn: Some(submission.turn.clone()),
+            turn: submission.turn.clone(),
+            new_session: prepared.request.session_id.is_none(),
+            input: Vec::new(),
             initial_events: vec![prepared.event()?],
-            ..Default::default()
         })
         .await?;
     drop(turn);

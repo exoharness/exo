@@ -1459,7 +1459,7 @@ mod tests {
             })
             .await?;
         let thread = agent.new_conversation(Default::default()).await?;
-        let turn = thread.begin_turn(Default::default()).await?;
+        let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
         let server = wiremock::MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(

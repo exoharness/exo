@@ -61,9 +61,10 @@ async fn send_appends_user_and_assistant_messages() {
     );
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: exoharness::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("ping")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("begin turn should succeed");
@@ -184,9 +185,10 @@ async fn send_executes_tool_round_trip() {
     };
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: exoharness::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("run it")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("begin turn should succeed");
@@ -304,9 +306,10 @@ async fn send_records_tool_result_when_tool_execution_fails() {
     );
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: exoharness::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("run it")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("begin turn should succeed");
@@ -410,9 +413,10 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
     );
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: exoharness::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("stream it")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("begin turn should succeed");
@@ -921,11 +925,16 @@ impl ConversationHandle for FakeConversationHandle {
     }
 
     async fn begin_turn(&self, request: BeginTurnRequest) -> Result<Arc<dyn TurnHandle>> {
-        let session_id = match request.session_id {
-            Some(session_id) => session_id,
-            None => self.start_session().await?,
-        };
-        let turn_id = Uuid7::now();
+        let session_id = request.turn.session_id;
+        let turn_id = request.turn.id;
+        if request.new_session {
+            append_event(
+                &self.state,
+                session_id,
+                Some(turn_id),
+                EventData::SessionStarted,
+            );
+        }
         let mut latest_event_id = Some(append_event(
             &self.state,
             session_id,
@@ -946,10 +955,7 @@ impl ConversationHandle for FakeConversationHandle {
         }
         Ok(Arc::new(FakeTurnHandle {
             state: Arc::clone(&self.state),
-            record: TurnRecord {
-                id: turn_id,
-                session_id,
-            },
+            record: request.turn,
             latest_event_id: Mutex::new(latest_event_id),
         }))
     }

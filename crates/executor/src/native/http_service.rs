@@ -96,13 +96,14 @@ impl RuntimeHttpService {
         self
     }
 
-    pub fn spawn_recovery(&self) {
+    pub fn spawn_recovery(&self) -> Result<()> {
         // Incoming turns can wake older queue entries before discovery finishes.
         if self.auth.is_some() {
             let service = self.clone();
-            self.runtime.recovery_resolver.get_or_init(|| {
-                Arc::new(move |principal: String| service.caller_runtime(principal))
-            });
+            self.runtime
+                .set_recovery_resolver(Arc::new(move |principal: String| {
+                    service.caller_runtime(principal)
+                }))?;
         }
         let service = self.clone();
         tokio::spawn(async move {
@@ -110,6 +111,7 @@ impl RuntimeHttpService {
                 tracing::error!(%error, "failed to recover unfinished turns");
             }
         });
+        Ok(())
     }
 
     pub fn caller_runtime(&self, principal: String) -> Result<Arc<Runtime>> {
@@ -187,7 +189,9 @@ pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::i
         })
     })
     .listen(listener)?;
-    recovery_service.spawn_recovery();
+    recovery_service
+        .spawn_recovery()
+        .map_err(std::io::Error::other)?;
     Ok(server.run())
 }
 

@@ -88,3 +88,23 @@ pub fn corrupt_thread_history(
     std::fs::write(&path, b"invalid event JSON")?;
     Ok((path, original))
 }
+
+pub fn new_test_turn_record() -> crate::TurnRecord {
+    crate::TurnRecord {
+        id: crate::Uuid7::now(),
+        session_id: crate::Uuid7::now(),
+    }
+}
+
+pub async fn begin_test_turn(
+    thread: &dyn crate::ThreadHandle,
+) -> crate::Result<std::sync::Arc<dyn crate::TurnHandle>> {
+    thread
+        .begin_turn(crate::BeginTurnRequest {
+            turn: new_test_turn_record(),
+            new_session: true,
+            input: Vec::new(),
+            initial_events: Vec::new(),
+        })
+        .await
+}

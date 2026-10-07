@@ -903,7 +903,7 @@ export default {
     #[tokio::test]
     async fn recovery_calls_typescript_resume_turn_instead_of_run_turn() -> Result<()> {
         use crate::{BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config};
-        use exoharness::{BasicExoHarness, BeginTurnRequest, NewAgentRequest};
+        use exoharness::{BasicExoHarness, NewAgentRequest};
 
         let temp = tempfile::TempDir::new()?;
         let module = temp.path().join("resume-turn.mjs");
@@ -955,23 +955,19 @@ export default {
             agent.record().id,
             thread.as_ref(),
             &work,
-            BeginTurnRequest {
-                turn: None,
-                session_id: None,
-                input: vec![],
-                initial_events: vec![
-                    work.event()?,
-                    EventData::ToolRequested {
-                        tool_call_id: "saved-call".into(),
-                        response_id: None,
-                        request: ToolRequest {
-                            namespace: None,
-                            function_name: "shell".into(),
-                            arguments: Default::default(),
-                        },
+            vec![],
+            vec![
+                work.event()?,
+                EventData::ToolRequested {
+                    tool_call_id: "saved-call".into(),
+                    response_id: None,
+                    request: ToolRequest {
+                        namespace: None,
+                        function_name: "shell".into(),
+                        arguments: Default::default(),
                     },
-                ],
-            },
+                },
+            ],
         )
         .await?;
         let turn_id = turn.record().id;
@@ -1035,7 +1031,7 @@ export default {
     #[tokio::test]
     async fn unresolved_tool_requires_typescript_recovery_capability() -> Result<()> {
         use crate::{BasicToolRuntime, LocalProvider, Runtime, test_support::local_test_config};
-        use exoharness::{BasicExoHarness, BeginTurnRequest, NewAgentRequest};
+        use exoharness::{BasicExoHarness, NewAgentRequest};
 
         let temp = tempfile::TempDir::new()?;
         let module = temp.path().join("no-tool-recovery.mjs");
@@ -1082,23 +1078,19 @@ export default {
             agent.record().id,
             thread.as_ref(),
             &work,
-            BeginTurnRequest {
-                turn: None,
-                session_id: None,
-                input: vec![],
-                initial_events: vec![
-                    work.event()?,
-                    EventData::ToolRequested {
-                        tool_call_id: "saved-call".into(),
-                        response_id: None,
-                        request: ToolRequest {
-                            namespace: None,
-                            function_name: "shell".into(),
-                            arguments: Default::default(),
-                        },
+            vec![],
+            vec![
+                work.event()?,
+                EventData::ToolRequested {
+                    tool_call_id: "saved-call".into(),
+                    response_id: None,
+                    request: ToolRequest {
+                        namespace: None,
+                        function_name: "shell".into(),
+                        arguments: Default::default(),
                     },
-                ],
-            },
+                },
+            ],
         )
         .await?;
         let turn_id = turn.record().id;
@@ -1280,7 +1272,7 @@ export default {{
             })
             .await?;
         let thread = agent.new_conversation(Default::default()).await?;
-        let turn = thread.begin_turn(Default::default()).await?;
+        let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
         let config: AgentConfig = serde_json::from_value(serde_json::json!({
             "instructions": [],
             "harness": "typescript",

@@ -251,7 +251,6 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .list_conversations(ListConversationsRequest {
             cursor: None,
             limit: Some(2),
-            ..Default::default()
         })
         .await
         .expect("first page");
@@ -270,7 +269,6 @@ pub async fn list_conversations_returns_recent_first_and_paginates(harness: Arc<
         .list_conversations(ListConversationsRequest {
             cursor: page.next_cursor,
             limit: Some(2),
-            ..Default::default()
         })
         .await
         .expect("second page");
@@ -299,9 +297,10 @@ pub async fn begin_turn_tracks_events_through_finish(harness: Arc<dyn ExoHarness
 
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("ping")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("turn");
@@ -368,9 +367,10 @@ pub async fn turn_events_continue_after_artifact_writes(harness: Arc<dyn ExoHarn
 
     let turn = conversation
         .begin_turn(BeginTurnRequest {
-            session_id: None,
+            turn: crate::test_support::new_test_turn_record(),
+            new_session: true,
             input: vec![user_message("ping")],
-            ..Default::default()
+            initial_events: Vec::new(),
         })
         .await
         .expect("turn");

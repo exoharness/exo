@@ -7,8 +7,8 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, BasicExoHarness, BeginTurnRequest, ConversationHandle, EventData, ExoHarness,
-    NewAgentRequest, NewThreadRequest, TurnHandle,
+    AgentHandle, BasicExoHarness, ConversationHandle, EventData, ExoHarness, NewAgentRequest,
+    NewThreadRequest, TurnHandle,
 };
 use tempfile::TempDir;
 use tokio::sync::{Notify, Semaphore, mpsc};
@@ -203,10 +203,7 @@ async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Resul
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
         .await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     let key = HarnessTurnKey {
         agent_id: fixture.agent.record().id,
         thread_id: fixture.thread.record().id,
@@ -242,10 +239,7 @@ async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Resul
         Some(HarnessEvent::ExecutionStopped { .. })
     ));
     harness.shutdown().await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     assert!(
         harness
             .submit(HarnessCommand::StartTurn(fixture.work(turn, false)))
@@ -270,10 +264,7 @@ async fn failed_shutdown_cleanup_keeps_turn_interrupted() -> Result<()> {
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
         .await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     harness
         .submit(HarnessCommand::StartTurn(fixture.work(turn, false)))
         .await?;
@@ -308,10 +299,7 @@ async fn panic_reports_failure_and_releases_execution() -> Result<()> {
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
         .await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     harness
         .submit(HarnessCommand::StartTurn(fixture.work(turn, true)))
         .await?;
@@ -384,10 +372,7 @@ async fn queued_turn_waits_for_cancelled_execution_cleanup() -> Result<()> {
 #[tokio::test]
 async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() -> Result<()> {
     let fixture = Fixture::new().await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     let key = HarnessTurnKey {
         agent_id: fixture.agent.record().id,
         thread_id: fixture.thread.record().id,
@@ -466,7 +451,7 @@ async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() ->
 #[tokio::test]
 async fn harness_turn_publishes_canonical_tools_after_persistence() -> Result<()> {
     let fixture = Fixture::new().await?;
-    let turn = fixture.thread.begin_turn(Default::default()).await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     let key = HarnessTurnKey::new(
         fixture.agent.record().id,
         fixture.thread.record().id,
