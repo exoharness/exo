@@ -164,11 +164,7 @@ pub async fn open_thread(
             .context("resolving agent file")?;
         let name = path.file_stem().context("agent file has no filename")?;
         let hash = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
-        let slug = format!(
-            "{}-{}",
-            crate::slugify(&name.to_string_lossy()),
-            &hash[..16]
-        );
+        let slug = format!("{}-{}", crate::slugify(&name.to_string_lossy()), &hash[..8]);
         eprintln!("Syncing agent resources...");
         match runtime.get_agent(&slug).await? {
             Some(agent) => {
@@ -236,8 +232,8 @@ pub async fn open_thread(
             NewThreadRequest {
                 environment,
                 vaults: vaults.iter().map(|vault| vault.record().id).collect(),
-                slug: Some(slug.clone()),
-                name: Some(slug),
+                slug: Some(slug),
+                name: None,
             },
             &Default::default(),
         )
@@ -316,7 +312,11 @@ pub async fn list_threads(harness: &Runtime, agent: &str) -> Result<()> {
                 vec![
                     record.slug.clone(),
                     record.id.to_string(),
-                    record.name.clone(),
+                    if record.name.is_empty() {
+                        "Untitled".into()
+                    } else {
+                        record.name.clone()
+                    },
                 ]
             })
             .collect(),

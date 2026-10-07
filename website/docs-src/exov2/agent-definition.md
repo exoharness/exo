@@ -136,19 +136,24 @@ their copies. With a remote provider, local paths refer to files on the provider
 
 ### Adapters
 
-Adapters connect an agent to chat providers like Slack, WhatsApp, and Discord. The agent definition names the adapters it uses:
+Adapters connect an agent to chat providers like Slack, WhatsApp, and Discord. Configure them in the agent's frontmatter:
 
 ```yaml
-adapters: [support-slack]
+adapters:
+  - name: support-slack
+    type: slack
+    bot_token: slack-bot
+    signing_secret: slack-signing
+    allowed_channels: [C123456]
 ```
 
-The deployment supplies the settings for those names through `exo serve --adapters-file adapters.yaml`. This lets the same
-agent definition be used in different deployments, with different accounts and channels.
+`bot_token` and `signing_secret` are vault references. Adapers do not run with `exo agent run ...` but they do when
+you run `exo serve ...`.
 
 ## Threads, sessions, and turns
 
-Running an agent opens a new thread unless you select an existing one. The CLI prints its slug and ID, either of which can be
-used to resume it:
+A thread has an id, slug (which must be unique), and display name. When you run an agent, it creates a new thread and auto-generates
+these fielde. If you specify a slug, it will either create a new thread with that slug name or resume the existing one.
 
 ```bash
 exo agent run --agent support-analyst
@@ -162,27 +167,20 @@ even if another client later follows its progress.
 
 ### What persists
 
-A thread's history is an append-only event log. It includes messages, tool requests and results, and lifecycle events like the
-start and end of a turn. The harness uses that history to construct its context, so the complete event log can contain more
-than what is sent to the model on a particular call.
+Each thread's history is an append-only event log including messages, tool requests, results, and lifecycle events (eg start and
+end of a turn). Many of the operations that Exo provides, like durable execution and policy enforcement, work by querying this
+event log to reconstruct state.
 
-Threads can also store **artifacts**: named, versioned blobs, eg. a report or saved execution state. These are stored by Exo
+Threads can also store **artifacts**: named, versioned blobs, eg. a memories or reports. These are stored by Exo
 and can be retrieved independently of the sandbox's files.
 
-Resuming a thread reuses its sandbox and resource copies. Resource files survive sandbox replacement; files written elsewhere
-in the sandbox follow that sandbox backend's lifecycle. Updating an agent definition preserves the history and files in its
-existing threads.
-
-An accepted turn served over HTTP continues if the client disconnects. You can reconnect and read its events later, or explicitly
-cancel it. The HTTP examples below show how to do this.
+Each thread's sandbox shares its lifecycle (although harnesses can customize it), and generally speaking, each sandbox is assumed
+to have a persistent disk that survives across sessions.
 
 ### Configuration overrides
 
-The agent definition supplies the defaults. An `overrides` object lets a thread save configuration changes, and a
-turn supply temporary overrides on top of those. Overrides use the same field names and types as the agent definition, so
-this applies to the harness, model, tools, MCP servers, etc.
-
-The rules are the same for each field:
+To override an agent's default configuration, you can provide an `overides` object to a thread (even after it's started), or even
+an individual turn. The override itself has the same schema as the agent definition with some special rules:
 
 - Omit a field to inherit its value.
 - Supply a field to replace its value in full, including objects and lists.
@@ -484,6 +482,8 @@ to run your agents; moving existing agents and threads between providers require
 
 ## Planned additions
 
+- [ ] Configure adapters directly in agent frontmatter, resolve their vault credentials, and provision their workers; remove
+  the separate `--adapters-file` configuration.
 - [ ] Accept resource `checkout` as a Git ref string (branch, tag, or commit), replacing the tagged branch/commit object.
 - [ ] Support tool declarations in agent frontmatter and inherit them during execution.
 - [ ] Move TypeScript tool module registration and path resolution into environments, bind implementations by declared tool

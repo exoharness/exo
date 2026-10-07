@@ -1814,7 +1814,7 @@ impl AgentHandle for BasicAgentHandle {
             .storage
             .list_keys(conversation_dir.join("events"))
             .await?;
-        record.latest_event_id = latest_event_id_from_keys(&event_keys);
+        refresh_conversation_record(&self.harness.inner.storage, &event_keys, &mut record).await?;
         Ok(Some(Arc::new(BasicConversationHandle {
             harness: self.harness.clone(),
             agent_id: self.record.id,
@@ -1859,7 +1859,7 @@ impl AgentHandle for BasicAgentHandle {
             vaults: request.vaults,
             id: Uuid7::now(),
             slug: slug.clone(),
-            name: request.name.unwrap_or_else(|| slug_to_name(&slug)),
+            name: request.name.unwrap_or_default(),
             latest_event_id: None,
         };
         self.harness
@@ -2099,9 +2099,10 @@ impl BasicAgentHandle {
                 else {
                     return Ok::<_, anyhow::Error>(None);
                 };
-                record.latest_event_id =
-                    latest_committed_event_id(storage, path.parent().expect("record has a parent"))
-                        .await?;
+                let keys = storage
+                    .list_keys(path.parent().expect("record has a parent").join("events"))
+                    .await?;
+                refresh_conversation_record(storage, &keys, &mut record).await?;
                 Ok(Some(record))
             })
             .buffer_unordered(16)
@@ -3470,6 +3471,11 @@ impl ConversationHandle for BasicConversationHandle {
         let _guard = self.harness.inner.write_lock.lock().await;
         let mut record = self.load_record().await?;
         let conversation_dir = self.conversation_dir();
+        let name = if record.name.is_empty() {
+            thread_name_from_messages(&request.input)
+        } else {
+            None
+        };
 
         let session_id = request.session_id.unwrap_or_else(Uuid7::now);
         let turn_record = TurnRecord {
@@ -3515,6 +3521,14 @@ impl ConversationHandle for BasicConversationHandle {
         )
         .await?;
         remember_appended_batch(&self.event_batch_index, &conversation_dir, &add_result);
+        if let Some(name) = name {
+            record.name = name;
+            self.harness
+                .inner
+                .storage
+                .put_json(conversation_dir.join("record.json"), &record)
+                .await?;
+        }
 
         Ok(Arc::new(BasicTurnHandle {
             harness: self.harness.clone(),
@@ -3763,7 +3777,7 @@ impl ConversationHandle for BasicConversationHandle {
             vaults: self.record.vaults.clone(),
             id: Uuid7::now(),
             slug: slug.clone(),
-            name: request.name.unwrap_or_else(|| slug_to_name(&slug)),
+            name: request.name.unwrap_or_default(),
             latest_event_id: None,
         };
         self.harness
@@ -5458,23 +5472,7 @@ async fn load_events(storage: &BasicObjectStore, conversation_dir: &Path) -> Res
         .into_iter()
         .filter(|key| event_id_from_key(key).is_some());
     let mut events = stream::iter(keys)
-        .map(|key| async move {
-            if is_event_batch_key(&key) {
-                Ok::<_, anyhow::Error>(
-                    storage
-                        .get_json_if_exists::<StoredEventBatch>(Path::new(&key))
-                        .await?
-                        .map(|batch| batch.events)
-                        .unwrap_or_default(),
-                )
-            } else {
-                Ok(storage
-                    .get_json_if_exists::<Event>(Path::new(&key))
-                    .await?
-                    .into_iter()
-                    .collect())
-            }
-        })
+        .map(|key| async move { load_event_object(storage, &key).await })
         .buffered(16)
         .try_collect::<Vec<Vec<Event>>>()
         .await?
@@ -5485,6 +5483,22 @@ async fn load_events(storage: &BasicObjectStore, conversation_dir: &Path) -> Res
     Ok(events)
 }
 
+async fn load_event_object(storage: &BasicObjectStore, key: &str) -> Result<Vec<Event>> {
+    if is_event_batch_key(key) {
+        Ok(storage
+            .get_json_if_exists::<StoredEventBatch>(Path::new(key))
+            .await?
+            .map(|batch| batch.events)
+            .unwrap_or_default())
+    } else {
+        Ok(storage
+            .get_json_if_exists::<Event>(Path::new(key))
+            .await?
+            .into_iter()
+            .collect())
+    }
+}
+
 async fn load_conversation_record(
     storage: &BasicObjectStore,
     conversation_dir: &Path,
@@ -5492,18 +5506,40 @@ async fn load_conversation_record(
     let mut record = storage
         .get_json::<ConversationRecord>(conversation_dir.join("record.json"))
         .await?;
-    // Event objects are authoritative. record.json also stores mutable thread
-    // metadata, but its cached head need not be rewritten after every append.
-    record.latest_event_id = latest_committed_event_id(storage, conversation_dir).await?;
+    let keys = storage.list_keys(conversation_dir.join("events")).await?;
+    refresh_conversation_record(storage, &keys, &mut record).await?;
     Ok(record)
 }
 
-async fn latest_committed_event_id(
+async fn refresh_conversation_record(
     storage: &BasicObjectStore,
-    conversation_dir: &Path,
-) -> Result<Option<EventId>> {
-    let keys = storage.list_keys(conversation_dir.join("events")).await?;
-    Ok(latest_event_id_from_keys(&keys))
+    keys: &[String],
+    record: &mut ConversationRecord,
+) -> Result<()> {
+    // The event log is authoritative if a crash preceded the metadata write.
+    record.latest_event_id = latest_event_id_from_keys(keys);
+    if record.name.is_empty() {
+        let mut keys = keys
+            .iter()
+            .filter(|key| event_id_from_key(key).is_some())
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|key| {
+            event_batch_range_from_key(key)
+                .map(|(first, _)| first)
+                .or_else(|| event_id_from_key(key))
+        });
+        for key in keys {
+            for event in load_event_object(storage, key).await? {
+                if let EventData::Messages { messages, .. } = event.data
+                    && let Some(name) = thread_name_from_messages(&messages)
+                {
+                    record.name = name;
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn latest_event_id_from_keys(keys: &[String]) -> Option<EventId> {
@@ -5661,8 +5697,34 @@ fn derive_unique_slug(prefix: &str, existing: &[ConversationRecord]) -> String {
     }
 }
 
-fn slug_to_name(slug: &str) -> String {
-    slug.replace('-', " ")
+fn thread_name_from_messages(messages: &[lingua::Message]) -> Option<String> {
+    use lingua::universal::{Message, UserContent, UserContentPart};
+
+    messages.iter().find_map(|message| {
+        let Message::User { content } = message else {
+            return None;
+        };
+        let text = match content {
+            UserContent::String(text) => std::borrow::Cow::Borrowed(text.as_str()),
+            UserContent::Array(parts) => std::borrow::Cow::Owned(
+                parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        UserContentPart::Text(part) => Some(part.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+        };
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut chars = text.chars();
+        let mut name: String = chars.by_ref().take(80).collect();
+        if chars.next().is_some() {
+            name.push('…');
+        }
+        (!name.is_empty()).then_some(name)
+    })
 }
 
 pub(crate) fn build_secret_cipher(
@@ -5687,6 +5749,126 @@ pub(crate) fn build_secret_cipher(
         SecretBackendChoice::Static(key) => Arc::new(StaticSecretKeyProvider::new(key)),
     };
     Ok(SecretCipher::new(provider))
+}
+
+#[cfg(test)]
+mod thread_name_tests {
+    use super::*;
+    use crate::NewThreadRequest;
+    use lingua::universal::{Message, UserContent};
+
+    fn input(text: &str) -> Vec<Message> {
+        vec![Message::User {
+            content: UserContent::String(text.into()),
+        }]
+    }
+
+    #[tokio::test]
+    async fn first_message_names_untitled_threads_and_preserves_explicit_names() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let harness =
+            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                slug: "support".into(),
+                name: "Support".into(),
+                vaults: vec![],
+            })
+            .await?;
+
+        for name in [None, Some("Pinned title".to_string())] {
+            let thread = agent
+                .new_thread(NewThreadRequest {
+                    name: name.clone(),
+                    ..Default::default()
+                })
+                .await?;
+            let slug = thread.record().slug.clone();
+            for text in ["Investigate\t autoevals\n#223", "A different follow-up"] {
+                thread
+                    .begin_turn(BeginTurnRequest {
+                        input: input(text),
+                        ..Default::default()
+                    })
+                    .await?
+                    .finish()
+                    .await?;
+            }
+
+            let reopened =
+                BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+            let agent = reopened.get_agent(&agent.record().id).await?.unwrap();
+            let saved = agent.get_thread(&thread.record().id).await?.unwrap();
+            assert_eq!(saved.record().slug, slug);
+            assert_eq!(
+                saved.record().name,
+                name.as_deref().unwrap_or("Investigate autoevals #223")
+            );
+            let listed = agent.list_threads(Default::default()).await?;
+            assert_eq!(
+                listed
+                    .threads
+                    .iter()
+                    .find(|thread| thread.record().id == saved.record().id)
+                    .unwrap()
+                    .record()
+                    .name,
+                saved.record().name
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn committed_input_supplies_title_when_metadata_write_fails() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let harness =
+            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                slug: "support".into(),
+                name: "Support".into(),
+                vaults: vec![],
+            })
+            .await?;
+        let thread = agent.new_thread(Default::default()).await?;
+        harness.inner.storage.fail_json_put_after(1);
+        assert!(
+            thread
+                .begin_turn(BeginTurnRequest {
+                    input: input("Investigate autoevals #223"),
+                    ..Default::default()
+                })
+                .await
+                .is_err()
+        );
+        let events = thread.get_events(None).await?.events;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.data, EventData::Messages { .. })),
+            "input should be committed before the metadata failure: {events:?}"
+        );
+        let reopened =
+            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+        let agent = reopened.get_agent(&agent.record().id).await?.unwrap();
+        let saved = agent.get_thread(&thread.record().id).await?.unwrap();
+        assert_eq!(saved.record().name, "Investigate autoevals #223");
+        Ok(())
+    }
+
+    #[test]
+    fn titles_use_user_text_and_truncate_unicode_without_breaking_characters() {
+        let mut messages = vec![Message::System {
+            content: UserContent::String("System instructions aren't a thread title".into()),
+        }];
+        messages.extend(input(&"界".repeat(100)));
+        assert_eq!(
+            thread_name_from_messages(&messages),
+            Some(format!("{}…", "界".repeat(80)))
+        );
+        assert_eq!(thread_name_from_messages(&input(" \n\t ")), None);
+    }
 }
 
 #[cfg(test)]
