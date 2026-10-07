@@ -69,7 +69,7 @@ struct Cli {
     /// Directory containing saved provider profiles and authentication state.
     #[arg(long, global = true, env = "EXO_CONFIG_DIR")]
     config_dir: Option<PathBuf>,
-    /// Home directory used when --config-dir is not set.
+    /// Home directory used for default configuration and local state paths.
     #[arg(long, global = true, env = "HOME")]
     home: Option<PathBuf>,
     #[command(subcommand)]
@@ -78,9 +78,9 @@ struct Cli {
 
 #[derive(Debug, Args)]
 struct RuntimeArgs {
-    /// Directory containing local Exo state.
-    #[arg(long, global = true, default_value = ".exo")]
-    root: PathBuf,
+    /// Directory containing local Exo state (default: ~/.exo).
+    #[arg(long, global = true)]
+    root: Option<PathBuf>,
     /// Store used to protect vault credentials.
     #[arg(long, global = true, value_enum, env = "EXO_SECRET_BACKEND")]
     secret_backend: Option<SecretBackendArg>,
@@ -90,6 +90,17 @@ struct RuntimeArgs {
     /// Load environment variables from a file.
     #[arg(long, global = true)]
     env_file: Option<PathBuf>,
+}
+
+impl RuntimeArgs {
+    fn local_root(&self, home: Option<&Path>) -> Result<PathBuf> {
+        match &self.root {
+            Some(root) => Ok(root.clone()),
+            None => Ok(home
+                .context("--root or a home directory (--home or HOME) is required for local state")?
+                .join(".exo")),
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -416,7 +427,10 @@ fn build_exo_config(cli: &Cli) -> Result<BasicExoHarnessConfig> {
         .map(|path| read_config_file(path))
         .transpose()?;
     Ok(BasicExoHarnessConfig {
-        root: cli.runtime().root.join("exoharness"),
+        root: cli
+            .runtime()
+            .local_root(cli.home.as_deref())?
+            .join("exoharness"),
         secret_backend,
         sandbox_default: default_local_sandbox_provider(),
         sandbox_policy,
@@ -986,7 +1000,7 @@ async fn run_selected(
                 (Some(client), account)
             }
             providers::Connection::Local { root } => {
-                cli.runtime_mut().root = root.clone();
+                cli.runtime_mut().root = Some(root.clone());
                 (None, root.display().to_string())
             }
         };
@@ -1057,7 +1071,7 @@ async fn run_selected(
     }
     let harness = providers::runtime(&cli, http_client, definition.as_ref(), &env).await?;
     let env_vars = env.into_vars();
-    let root = cli.runtime().root.clone();
+    let home = cli.home;
     let result: Result<()> = async {
     match cli.command {
         Commands::Environment { command, .. } => environment::run(harness.exoharness_handle().as_ref(), command).await?,
@@ -1102,7 +1116,8 @@ async fn run_selected(
                 run_chat_repl(Arc::clone(&harness), agent, conversation, thread.verbosity).await?;
             }
         }
-        Commands::Serve { args, .. } => {
+        Commands::Serve { runtime, args } => {
+            let root = runtime.local_root(home.as_deref())?;
             serve::run(harness.clone(), &root, *args).await?;
         }
         Commands::Agent { command, .. } => match command {
@@ -2290,6 +2305,34 @@ pub(crate) fn generate_fun_slug_from_uuid(uuid: Uuid7) -> String {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+
+    #[test]
+    fn local_state_is_home_scoped_unless_root_is_explicit() -> Result<()> {
+        for command in [vec!["agent", "list"], vec!["serve"]] {
+            let cli = Cli::try_parse_from(
+                ["exo", "--home", "/home/alice"]
+                    .into_iter()
+                    .chain(command.iter().copied()),
+            )?;
+            assert_eq!(
+                build_exo_config(&cli)?.root,
+                Path::new("/home/alice/.exo/exoharness")
+            );
+
+            let mut cli = Cli::try_parse_from(
+                ["exo"]
+                    .into_iter()
+                    .chain(command.iter().copied())
+                    .chain(["--root", "./state"]),
+            )?;
+            cli.home = None;
+            assert_eq!(
+                build_exo_config(&cli)?.root,
+                Path::new("./state/exoharness")
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn command_tree_is_consistent() {

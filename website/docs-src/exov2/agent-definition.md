@@ -235,23 +235,21 @@ in `environment.yaml`, eg.:
 
 ```yaml
 name: support-analyst-env
-config:
-  image: ghcr.io/exoharness/codex-devbox:latest
-  policy:
-    networking:
-      type: limited
-      allowed_hosts:
-        - api.openai.com
-        - github.com
-        - api.github.com
-    allowed_tcp_ports: [443]
+image: ghcr.io/exoharness/codex-devbox:latest
+networking:
+  type: limited
+  allowed_hosts:
+    - api.openai.com
+    - github.com
+    - api.github.com
+allowed_tcp_ports: [443]
 ```
 
 This allows HTTPS connections to the listed hosts. Include hosts needed by the model, MCP servers, and any dependencies the
 agent downloads. `networking.type` can also be `unrestricted` or `disabled`. Omitting `allowed_tcp_ports` allows all outbound
 TCP ports allowed by the host policy.
 
-Use the file directly, or save it as a named environment:
+Like agents, environments can be used directly or set up and configured.
 
 ```bash
 exo agent run --agent support-analyst --environment-file environment.yaml
@@ -260,15 +258,14 @@ exo environment create support-analyst-env --file environment.yaml
 exo agent run --agent support-analyst --environment support-analyst-env
 ```
 
-An environment can also set `config.provider`, `config.default_workdir`, and `config.file_system_mounts`. Mounts refer to paths
-on the runtime host and can be read-only or writable. Unlike resources, host mounts expose the host's files directly.
+An environment can also set `provider`, `default_workdir`, `file_system_mounts`, and `tool_modules` for
+[tool implementations](#tool-implementations). Host mounts refer to paths on the runtime host and can be read-only or writable.
+Unlike resources, host mounts expose the host's files directly.
 
-Exo also supports Apple Containers on macOS, Docker, Firecracker (via Lima on macOS), and sandbox backends including AWS
-AgentCore, Daytona, E2B, Sprites, and Vercel. Backend capabilities differ: SmolVM and Firecracker support the credential
-substitution and network controls used by managed coding agents. Filesystem resources currently work with local backends.
-
-An environment's definition is saved with the thread. Updating a named environment affects subsequent selections of that
-environment; an existing thread keeps its saved definition until you select an updated one for it.
+In addition to SmolVM, Exo supports a variety of local options including Apple Containers, Docker, Firecracker (with Lima
+on macOS), and hosted sandboxes including AWS AgentCore, Daytona, E2B, Sprites, and Vercel. Support varies by provider.
+Exo's credential substitution and proxy-based network controls currently require SmolVM or Firecracker. Firecracker also
+supports full VM snapshots, including memory.
 
 ### Tool implementations
 
@@ -276,9 +273,8 @@ An environment can supply implementations for tools declared by the agent, using
 
 ```yaml
 name: support-analyst-env
-config:
-  tool_modules:
-    - ./tools.ts
+tool_modules:
+  - ./tools.ts
 ```
 
 Each module exports a tool, or a collection of tools, using the [TypeScript tool format](../tutorials/write-your-own-agent#step-2-add-a-custom-tool).
@@ -294,12 +290,12 @@ implementation are handled by the client.
 
 ## Vaults and credentials
 
-A **vault** is a named collection of secrets, such as API keys and OAuth credentials, stored encrypted at rest. Each secret
+A **vault** is a named collection of secrets, such as API keys and OAuth credentials, stored safely at rest. Each secret
 has a name and a policy describing where it can be used.
 
 With the local provider, threads inherit the `global` vault, vaults attached to their agent, and any explicitly attached vaults.
 When multiple vaults contain a matching credential, the more specifically attached vault takes precedence. With remote
-providers, access to vaults also depends on the authenticated user.
+providers, the thread automatically uses the authenticated user's vaults.
 
 ### Creating and selecting credentials
 
@@ -317,27 +313,54 @@ exo vault secret create global openai \
   --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
 ```
 
-`--token-env` takes the environment variable's name. The CLI reads its value and stores it in the vault.
-
-You can keep credentials in separate vaults, eg. for different users or customers:
+To add a GitHub credential:
 
 ```bash
-exo vault create personal
-exo vault secret create personal --preset github
-exo agent run --agent support-analyst --vault personal
+exo vault secret create global --preset github
 ```
 
 The GitHub preset uses `gh` to access your login and permits credential use at `https://github.com` and `https://api.github.com`.
-You can also import a token with `--token-env GITHUB_PAT`. `--vault` can be repeated, and works when resuming a thread as well.
+It creates a secret named `github`. With `GITHUB_PAT` set, you can import a token instead:
+
+```bash
+exo vault secret create global --preset github --token-env GITHUB_PAT
+```
 
 For an MCP server that supports OAuth, you can log in using its resource URL:
 
 ```bash
-exo vault secret create personal helpdesk --url https://helpdesk.example.com/mcp
+exo vault secret create global helpdesk --url https://helpdesk.example.com/mcp
 ```
 
 Exo discovers the server's OAuth settings and stores the resulting credential with permission to access that URL. MCP
 credentials are selected by their destination policies, so the secret does not have to share the server's name.
+
+### Per-user vaults
+
+You can use the same agent for different users or customers, with a separate vault for each. For example, with
+`ALICE_GITHUB_PAT` and `BOB_GITHUB_PAT` set:
+
+```bash
+exo vault create alice
+exo vault secret create alice --preset github --token-env ALICE_GITHUB_PAT
+
+exo vault create bob
+exo vault secret create bob --preset github --token-env BOB_GITHUB_PAT
+```
+
+Select the user's vault when creating their thread:
+
+```bash
+exo agent run --agent support-analyst --vault alice
+exo agent run --agent support-analyst --vault bob
+```
+
+Both vaults contain a secret named `github`, so the agent definition stays the same. Each thread uses its selected vault's
+credential, which takes precedence over a shared credential with the same name. Shared credentials, eg. a model API key,
+can still come from `global`.
+
+Vaults stay attached when you resume a thread. You can repeat `--vault` to attach multiple vaults, or add another vault when
+resuming with `--thread THREAD`.
 
 ### Destination policies
 
@@ -345,7 +368,7 @@ credentials are selected by their destination policies, so the secret does not h
 Both can be repeated. You can update the policy without replacing the secret:
 
 ```bash
-exo vault secret update personal helpdesk --allow-url https://helpdesk.example.com/mcp
+exo vault secret update global helpdesk --allow-url https://helpdesk.example.com/mcp
 ```
 
 For sandbox credentials, both the environment's network policy and the secret's destination policy need to allow the request.
@@ -381,7 +404,7 @@ exo agent get support-analyst
 `exo agent run --agent-file support-analyst.md` syncs the definition from the file before opening a thread. This is convenient
 while editing the definition, and is what we use in the tutorial.
 
-The local provider stores its state under `.exo` by default. Use `--root` to select another directory, and point the CLI and
+The local provider stores its state under `~/.exo` by default. Use `--root` to select another directory, and point the CLI and
 server at the same root to share their local state.
 
 ### Serving over HTTP
@@ -392,25 +415,33 @@ To serve the local provider, run:
 exo serve --bind 127.0.0.1:8080
 ```
 
-The HTTP API is available under `/exo`. In another terminal, find the saved agent and create a thread (these examples use `jq`
-to read IDs from the responses):
+The HTTP API is available under `/exo`. In another terminal, get the saved agent's ID using `jq`:
 
 ```bash
-BASE=http://127.0.0.1:8080/exo
-AGENT_ID=$(curl -fsS "$BASE/agent" \
+AGENT_ID=$(curl -fsS http://127.0.0.1:8080/exo/agent \
   | jq -r '.agents[] | select(.slug == "support-analyst") | .id')
-THREAD_ID=$(curl -fsS -X POST "$BASE/agent/$AGENT_ID/thread" \
-  -H 'Content-Type: application/json' -d '{}' | jq -r '.thread.id')
 ```
 
-Submit a turn, then watch the thread's events:
+Create a thread:
 
 ```bash
-TURN_ID=$(curl -fsS -X POST "$BASE/agent/$AGENT_ID/thread/$THREAD_ID/turn" \
+THREAD_ID=$(curl -fsS -X POST "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread" \
   -H 'Content-Type: application/json' \
-  -d '{"input":{"role":"user","content":"Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."}}' \
-  | jq -r '.turn.id')
-curl -N "$BASE/agent/$AGENT_ID/thread/$THREAD_ID/event/watch"
+  -d '{}' | jq -r '.thread.id')
+```
+
+Submit a turn:
+
+```bash
+curl -fsS -X POST "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread/$THREAD_ID/turn" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":{"role":"user","content":"Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."}}'
+```
+
+Watch the thread's events:
+
+```bash
+curl -N "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread/$THREAD_ID/event/watch"
 ```
 
 The turn request returns a receipt after the input is accepted. Watching events replays the saved history and follows new
@@ -418,10 +449,11 @@ events. To reconnect after a particular event, add `?after=EVENT_ID` to the watc
 the turn keeps running on the server.
 
 Post to the same `/turn` URL to continue the thread. Supply `session_id` if you want multiple turns to belong to the same session;
-otherwise, the server creates a session for the submitted turn. To cancel the turn:
+otherwise, the server creates a session for the submitted turn. To cancel the turn, use the receipt's `turn.id` in place of
+`TURN_ID`:
 
 ```bash
-curl -fsS -X POST "$BASE/agent/$AGENT_ID/thread/$THREAD_ID/turn/$TURN_ID/cancel"
+curl -fsS -X POST "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread/$THREAD_ID/turn/TURN_ID/cancel"
 ```
 
 When binding to a non-loopback address, configure authentication with `--auth-file`. You can also serve a single agent with
@@ -474,6 +506,8 @@ to run your agents; moving existing agents and threads between providers require
 
 ## Planned additions
 
+- [ ] Flatten environment definitions: expose sandbox settings and network policy fields at the top level, removing the
+  `config` and `policy` wrappers from files and the API.
 - [ ] Configure adapters directly in agent frontmatter, resolve their vault credentials, and provision their workers; remove
   the separate `--adapters-file` configuration.
 - [ ] Accept resource `checkout` as a Git ref string (branch, tag, or commit), replacing the tagged branch/commit object.
@@ -481,6 +515,7 @@ to run your agents; moving existing agents and threads between providers require
 - [ ] Move TypeScript tool module registration and path resolution into environments, bind implementations by declared tool
   name, and route calls without an environment implementation to the client.
 - [ ] Load environment tool implementations in the Codex, Claude Code, and Pi harnesses.
+- [ ] Support environment tool implementations in Python and other languages, alongside TypeScript.
 - [ ] Implement one partial agent definition `overrides` schema for threads and turns: persist thread overrides, apply turn
   overrides temporarily, inherit omitted fields, replace supplied fields in full, and use `[]` to clear lists.
 - [ ] Skills in agent definitions
