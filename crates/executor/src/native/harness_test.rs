@@ -196,7 +196,10 @@ impl HarnessEventHandler for Recorder {
 async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Result<()> {
     let fixture = Fixture::new().await?;
     let executor = ControlledExecutor::default();
-    let harness = ExecutorHarness::new(Arc::new(executor.clone()));
+    let harness = ExecutorHarness::new(
+        Arc::new(executor.clone()),
+        Arc::new(crate::TokioRuntimeHost),
+    );
     let (tx, mut events) = mpsc::unbounded_channel();
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
@@ -259,7 +262,10 @@ async fn failed_shutdown_cleanup_keeps_turn_interrupted() -> Result<()> {
         fail_cleanup: true,
         ..Default::default()
     };
-    let harness = Arc::new(ExecutorHarness::new(Arc::new(executor.clone())));
+    let harness = Arc::new(ExecutorHarness::new(
+        Arc::new(executor.clone()),
+        Arc::new(crate::TokioRuntimeHost),
+    ));
     let (tx, mut events) = mpsc::unbounded_channel();
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
@@ -294,7 +300,10 @@ async fn failed_shutdown_cleanup_keeps_turn_interrupted() -> Result<()> {
 #[tokio::test]
 async fn panic_reports_failure_and_releases_execution() -> Result<()> {
     let fixture = Fixture::new().await?;
-    let harness = ExecutorHarness::new(Arc::new(ControlledExecutor::default()));
+    let harness = ExecutorHarness::new(
+        Arc::new(ControlledExecutor::default()),
+        Arc::new(crate::TokioRuntimeHost),
+    );
     let (tx, mut events) = mpsc::unbounded_channel();
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))

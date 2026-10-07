@@ -26,6 +26,10 @@ impl EnvironmentDefinition {
     pub fn validate(&self) -> Result<()> {
         Self::validate_name(&self.name)?;
         ensure!(
+            self.config.tcp_ports.iter().all(|port| *port > 0),
+            "published TCP ports must be nonzero"
+        );
+        ensure!(
             !self.config.image.trim().is_empty(),
             "environment image must not be empty"
         );
@@ -70,6 +74,18 @@ mod tests {
         )?;
         assert_eq!(environment.config.provider, SandboxProvider::Smolvm);
         environment.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn published_tcp_ports_must_be_nonzero() -> Result<()> {
+        let mut environment: EnvironmentDefinition =
+            serde_json::from_str(r#"{"name":"dev","config":{"image":"dev","tcp_ports":[13000]}}"#)?;
+        environment.validate()?;
+        environment.config.tcp_ports.clear();
+        environment.validate()?;
+        environment.config.tcp_ports.push(0);
+        assert!(environment.validate().is_err());
         Ok(())
     }
 }

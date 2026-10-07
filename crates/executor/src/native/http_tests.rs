@@ -36,6 +36,15 @@ impl HarnessExecutor for ControlledExecutor {
         crate::managed_agents::agent_config(definition, SandboxProvider::LocalProcess, None, None)
     }
 
+    async fn resolve_thread_harness(
+        &self,
+        thread: &dyn ThreadHandle,
+        config: &AgentConfig,
+        harness: &str,
+    ) -> Result<crate::ConversationHarnessConfig> {
+        crate::native::config::resolve_thread_harness(thread, config, harness).await
+    }
+
     async fn execute_turn(
         &self,
         _: &dyn AgentHandle,

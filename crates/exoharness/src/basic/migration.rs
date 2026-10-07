@@ -1,5 +1,9 @@
 use super::*;
+use crate::SandboxProviderConfig;
 use crate::types::default_e2b_template;
+use crate::vault::SecretReference;
+#[cfg(test)]
+use chrono::Utc;
 
 #[derive(Deserialize)]
 struct MigrationBinding {
@@ -74,7 +78,11 @@ impl BasicExoHarness {
                 vault_id: vault.record().id,
                 secret_id: record.metadata.id,
             };
-            let secret = self.inner.secret_cipher.decrypt_secret(&record.secret)?;
+            let secret = self
+                .inner
+                .native
+                .secret_cipher
+                .decrypt_secret(&record.secret)?;
             self.inner
                 .vaults
                 .import_secret(reference.vault_id, record.metadata, secret)
@@ -338,10 +346,7 @@ mod tests {
         let temp = tempfile::TempDir::new()?;
         let config = crate::test_support::local_test_config(temp.path());
         let storage = BasicObjectStore::local_filesystem(temp.path()).await?;
-        let cipher = build_secret_cipher(
-            config.secret_backend.clone(),
-            temp.path().to_string_lossy().into_owned(),
-        )?;
+        let cipher = build_secret_cipher(config.secret_backend.clone(), temp.path());
         let agent_id = Uuid7::now();
         let thread_id = Uuid7::now();
         let agent_path = format!("agents/{agent_id}");

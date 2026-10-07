@@ -16,19 +16,19 @@ be handled by the agent.
 
 The implementation is split across a few small executor and CLI modules:
 
-- `crates/executor/src/adapter/types.rs` defines durable adapter records,
+- `crates/executor/src/native/adapter/types.rs` defines durable adapter records,
   source enums, generic worker config, event records, and outbound message records.
-- `crates/executor/src/adapter/store.rs` is the file-backed store under
+- `crates/executor/src/native/adapter/store.rs` is the file-backed store under
   `.exo/adapters`. It stores adapter records, per-adapter event history, and
   the adapter outbox.
-- `crates/executor/src/adapter/runtime.rs` supervises enabled worker adapters,
+- `crates/executor/src/native/adapter/runtime.rs` supervises enabled worker adapters,
   writes event artifacts, sends conversation wakeups, and queues outbound
   messages.
-- `crates/executor/src/adapter/worker.rs` implements the generic JSONL worker
+- `crates/executor/src/native/adapter/worker.rs` implements the generic JSONL worker
   bridge used by host-supervised sidecar adapters.
 - `exo/adapters/<type>/worker.ts` contains protocol-specific behavior for
   agent-cli, Discord, ExoChat, IRC, Signal, Slack, and WhatsApp.
-- `crates/executor/src/adapter/tools.rs` implements the host-backed tool calls
+- `crates/executor/src/native/adapter/tools.rs` implements the host-backed tool calls
   used by Exo.
 - `exoharness/typescript/harness/adapter-tools.ts` exposes the model-facing Exo tools.
 - `crates/cli/src/serve.rs` supervises adapters alongside the managed-agent HTTP service.

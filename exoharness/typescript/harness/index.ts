@@ -10,12 +10,6 @@ export interface JsonObject {
   [key: string]: JsonValue;
 }
 
-export * from "./tools";
-export * from "./built-in-tools";
-export * from "./tool-modules";
-export * from "./adapter-tools";
-export * from "./skill-tools";
-
 export type MessageRole = Message["role"];
 
 export interface AgentConfig {
@@ -955,3 +949,8 @@ export function toJsonObject(value: unknown): JsonObject {
   }
   return json;
 }
+export * from "./tools";
+export * from "./built-in-tools";
+export * from "./tool-modules";
+export * from "./adapter-tools";
+export * from "./skill-tools";

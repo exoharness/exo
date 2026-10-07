@@ -1,14 +1,19 @@
-use super::*;
+use crate::managed_agents::*;
 use crate::{
-    AgentHarnessKind, ConversationHarnessConfig, Runtime, SandboxProvider, SendRequest,
-    TypeScriptHarnessConfig,
+    AgentHarnessKind, ConversationConfig, ConversationHarnessConfig, LocalProvider, Runtime,
+    SandboxProvider, SendRequest, TypeScriptHarnessConfig,
 };
 use anyhow::Context;
+use anyhow::Result;
+use exo_managed_agents::{self as managed, AgentDefinition};
+use exoharness::ExoHarness;
 use exoharness::{
     AddEventsRequest, BasicExoHarness, BasicExoHarnessConfig, EventData, FileSystemMount,
     FileSystemMountMode, NewThreadRequest, PutSecretRequest, Secret, WriteArtifactRequest,
     vault::{CredentialDestination, global_vault},
 };
+use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 const SOURCE: &str =
@@ -17,7 +22,7 @@ const SOURCE: &str =
 #[test]
 fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
     let definition = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: codex"))?;
-    let config = super::config::agent_config(&definition, SandboxProvider::Docker, None, None)?;
+    let config = agent_config(&definition, SandboxProvider::Docker, None, None)?;
     assert_eq!(
         config.sandbox.image.as_deref(),
         Some(
@@ -61,7 +66,7 @@ fn thread_harness_image_defaults_respect_explicit_images() -> Result<()> {
     ] {
         let mut config = base.clone();
         config.sandbox.image = agent_image.map(str::to_owned);
-        super::config::apply_thread_harness(&mut config, Some(&pi))?;
+        config::apply_thread_harness(&mut config, Some(&pi))?;
         let thread = ConversationConfig {
             sandbox_image: thread_image.map(str::to_owned),
             ..Default::default()
@@ -85,7 +90,7 @@ fn switching_thread_harnesses_retains_tools_and_rejects_incompatible_harnesses()
         module_path: Some("/provider/pi-harness.ts".into()),
         preset: Some(TypeScriptHarnessPreset::Pi),
     };
-    super::config::apply_thread_harness(&mut config, Some(&pi))?;
+    config::apply_thread_harness(&mut config, Some(&pi))?;
     let selected = config.typescript.clone().context("selected harness")?;
     assert_eq!(selected.module_path, "/provider/pi-harness.ts");
     assert_eq!(selected.tool_module_paths, ["tools.ts"]);
@@ -95,7 +100,7 @@ fn switching_thread_harnesses_retains_tools_and_rejects_incompatible_harnesses()
         module_path: None,
         preset: None,
     };
-    let error = super::config::apply_thread_harness(&mut config, Some(&basic)).unwrap_err();
+    let error = config::apply_thread_harness(&mut config, Some(&basic)).unwrap_err();
     assert!(
         error
             .to_string()

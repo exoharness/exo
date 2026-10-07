@@ -80,16 +80,26 @@ impl Fixture {
                 }),
             ],
         };
-        let state = Arc::new(BasicExoHarness::new(config.clone()).await?);
-        let runtime = Arc::new(Runtime::new(
-            LocalProvider::managed(
-                state,
-                config.clone(),
-                HashMap::new(),
-                Arc::new(cost::PricingTable::empty()),
-            )?,
-            None,
-        ));
+        let state = Arc::new(
+            BasicExoHarness::new(config.clone())
+                .await?
+                .with_local_sessions(root.clone()),
+        );
+        let runtime = Arc::new(
+            Runtime::new(
+                LocalProvider::managed(
+                    state.clone(),
+                    config.clone(),
+                    HashMap::new(),
+                    Arc::new(cost::PricingTable::empty()),
+                )?,
+                None,
+            )
+            .with_shutdown_hook(move || {
+                let state = state.clone();
+                async move { state.release_local_sessions().await }
+            }),
+        );
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let endpoint = format!("http://{}/exo", listener.local_addr()?);
         let service = Arc::new(RuntimeHttpService::new(
@@ -173,6 +183,7 @@ impl Fixture {
         let mut command = Command::new(binary);
         command
             .env_clear()
+            .env("EXO_HOME", &self.root)
             .env("EXO_CONFIG_DIR", self.temp.path().join("config"))
             .env("SMOKE_API_KEY", "fixture-model-key")
             .env("RUNTIME_TOKEN", "workflow-token")

@@ -18,7 +18,7 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use http_body_util::{BodyExt, Full, Limited, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
-use hyper::header::{CONNECTION, HOST, HeaderMap, HeaderName, HeaderValue};
+use hyper::header::{CONNECTION, HOST, HeaderMap, HeaderValue};
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -32,21 +32,22 @@ use tokio_util::sync::CancellationToken;
 
 use crate::types::{canonical_egress_host, canonical_egress_hosts};
 
-use crate::{EgressCredentialBinding, EgressPolicy, SandboxEgressProxy, SandboxNetworkPolicy};
+use crate::{EgressPolicy, SandboxEgressProxy, SandboxNetworkPolicy};
 
 mod external;
 pub use external::ExternalProxyConfig;
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
 mod transport;
-pub mod vault;
+pub use crate::egress_credentials::vault;
 #[cfg(feature = "firecracker")]
 pub(crate) use transport::NetworkDns;
 pub use transport::{EgressTransport, LocalEgressTransport};
 mod sandbox;
 pub(crate) use sandbox::{EgressRuntime, SandboxEgress, SandboxProxy};
 
-const PLACEHOLDER_PREFIX: &str = "exo_egress_";
+use crate::egress_credentials::{Binding, strip_hop_headers};
+pub use crate::egress_credentials::{EgressCredentialResolver, EgressDestination, EgressIdentity};
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
@@ -90,43 +91,6 @@ impl UpstreamResolver for PublicUpstreamResolver {
 type ProxyError = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = BoxBody<Bytes, ProxyError>;
 
-#[derive(Debug, Clone)]
-pub struct EgressIdentity {
-    pub sandbox_id: String,
-    pub scope: crate::ResourceScope,
-}
-
-#[derive(Debug)]
-pub struct EgressDestination {
-    pub host: String,
-    pub port: u16,
-    pub method: Method,
-    pub path: String,
-}
-
-/// Looks up a binding for this sandbox's agent/thread on every use. The local
-/// implementation reads Exo's encrypted store; a hosted implementation can use
-/// its own vault and authorization. Only the proxy receives the returned value.
-#[async_trait]
-pub trait EgressCredentialResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        identity: &EgressIdentity,
-        binding_name: &str,
-        destination: &EgressDestination,
-    ) -> Result<String>;
-
-    async fn refresh(
-        &self,
-        _identity: &EgressIdentity,
-        _binding_name: &str,
-        _destination: &EgressDestination,
-        _rejected: &str,
-    ) -> Result<Option<String>> {
-        Ok(None)
-    }
-}
-
 // Owns one sandbox's TLS server, placeholders, and active proxy connections.
 // It does not create VMs or decide where credentials are stored.
 pub struct EgressProxy {
@@ -140,24 +104,6 @@ pub(crate) struct ProxyConnection {
     environment: HashMap<String, String>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
-}
-
-struct Binding {
-    config: EgressCredentialBinding,
-    hosts: HashSet<String>,
-    placeholder: String,
-}
-
-impl Binding {
-    fn permits_header(&self, destination: &EgressDestination) -> bool {
-        self.config.injection_location.header
-            && self.hosts.contains(&destination.host)
-            && crate::CredentialDestination::url(&format!(
-                "https://{}:{}{}",
-                destination.host, destination.port, destination.path
-            ))
-            .is_ok_and(|destination| self.config.networking.permits(&destination))
-    }
 }
 
 struct PooledClient {
@@ -327,8 +273,6 @@ impl State {
             policy.credentials.is_empty() || resolver.is_some() || external.is_some(),
             "credential substitution requires an egress credential resolver"
         );
-        let mut variables = HashSet::new();
-        let mut values = HashSet::new();
         if external.is_none()
             && let Some(placeholders) = placeholders
         {
@@ -337,52 +281,8 @@ impl State {
                 "placeholder map must match credential bindings"
             );
         }
-        let mut bindings = Vec::new();
-        for mut config in policy.credentials {
-            config.networking = config.networking.normalized()?;
-            let hosts = config.networking.hosts()?;
-            ensure!(
-                !config.name.is_empty(),
-                "credential binding name is required"
-            );
-            ensure!(
-                !config.environment_variable.is_empty()
-                    && config
-                        .environment_variable
-                        .bytes()
-                        .enumerate()
-                        .all(|(i, c)| c == b'_'
-                            || c.is_ascii_alphabetic()
-                            || (i > 0 && c.is_ascii_digit())),
-                "invalid credential environment variable"
-            );
-            ensure!(
-                variables.insert(config.environment_variable.clone()),
-                "duplicate credential environment variable"
-            );
-            let placeholder = if let Some(placeholders) = placeholders {
-                let value = placeholders
-                    .get(&config.environment_variable)
-                    .context("missing credential placeholder")?;
-                ensure!(
-                    value.len() == PLACEHOLDER_PREFIX.len() + 32
-                        && value.starts_with(PLACEHOLDER_PREFIX)
-                        && value[PLACEHOLDER_PREFIX.len()..]
-                            .bytes()
-                            .all(|byte| byte.is_ascii_hexdigit())
-                        && values.insert(value.clone()),
-                    "invalid or duplicate credential placeholder"
-                );
-                value.clone()
-            } else {
-                format!("{PLACEHOLDER_PREFIX}{}", uuid::Uuid::new_v4().simple())
-            };
-            bindings.push(Binding {
-                config,
-                hosts,
-                placeholder,
-            });
-        }
+        let bindings =
+            crate::egress_credentials::prepare_bindings(policy.credentials, placeholders)?;
         Ok(Self {
             external,
             clients: Mutex::new(HashMap::new()),
@@ -576,86 +476,29 @@ impl State {
         destination: &EgressDestination,
         tls: bool,
     ) -> Result<()> {
-        for (header, value) in headers {
-            let basic = basic_credential_placeholder(header, value)?;
-            let value = basic
-                .as_deref()
-                .map(str::as_bytes)
-                .unwrap_or(value.as_bytes());
-            if !contains_placeholder(value) {
-                continue;
-            }
-            ensure!(tls, "credential substitution requires HTTPS");
-            ensure!(
-                !hop_header(header) && header != HOST && header != "content-length",
-                "credential cannot rewrite HTTP routing or framing"
-            );
-            ensure!(
-                headers.get_all(header).iter().count() == 1,
-                "duplicate credential header"
-            );
-            let mut unresolved = std::str::from_utf8(value)?.to_owned();
-            for binding in &self.bindings {
-                if binding.permits_header(destination) {
-                    unresolved = unresolved.replace(&binding.placeholder, "");
-                }
-            }
-            ensure!(
-                !unresolved.contains(PLACEHOLDER_PREFIX),
-                "credential placeholder does not match this request"
-            );
-        }
-        Ok(())
+        crate::egress_credentials::validate_credentials(&self.bindings, headers, destination, tls)
     }
-
     async fn substitute_credentials(
         &self,
         headers: &mut HeaderMap,
         destination: &EgressDestination,
     ) -> Result<Vec<(String, String)>> {
-        let mut credentials = Vec::new();
-        for (header, header_value) in headers.iter_mut() {
-            let basic = basic_credential_placeholder(header, header_value)?;
-            if basic.is_none() && !contains_placeholder(header_value.as_bytes()) {
-                continue;
-            }
-            let encode_basic = basic.is_some();
-            let mut replacement = match basic {
-                Some(value) => value,
-                None => header_value.to_str()?.to_owned(),
-            };
-            for binding in &self.bindings {
-                if !binding.permits_header(destination)
-                    || !replacement.contains(&binding.placeholder)
-                {
-                    continue;
-                }
-                let value = tokio::time::timeout(
-                    IO_TIMEOUT,
-                    self.resolver
-                        .as_ref()
-                        .context("credential resolver is unavailable")?
-                        .resolve(&self.identity, &binding.config.name, destination),
-                )
-                .await?
-                .map_err(|_| anyhow!("credential is unavailable or not authorized"))?;
-                replacement = replacement.replace(&binding.placeholder, &value);
-                credentials.push((binding.config.name.clone(), value));
-            }
-            if encode_basic {
-                replacement = format!(
-                    "Basic {}",
-                    base64::engine::general_purpose::STANDARD.encode(replacement)
-                );
-            }
-            let mut value = HeaderValue::from_str(&replacement)
-                .map_err(|_| anyhow!("credential cannot be used in an HTTP header"))?;
-            value.set_sensitive(true);
-            *header_value = value;
+        if self.bindings.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(credentials)
+        crate::egress_credentials::substitute_credentials(
+            &self.bindings,
+            headers,
+            destination,
+            &self.identity,
+            &TimedResolver(
+                self.resolver
+                    .as_deref()
+                    .context("credential resolver is unavailable")?,
+            ),
+        )
+        .await
     }
-
     async fn client(&self, host: &str, port: u16) -> Result<reqwest::Client> {
         let mut upstream = self
             .upstream
@@ -689,30 +532,6 @@ impl State {
         );
         Ok(client)
     }
-}
-
-fn basic_credential_placeholder(
-    header: &HeaderName,
-    value: &HeaderValue,
-) -> Result<Option<String>> {
-    if header == hyper::header::AUTHORIZATION
-        && let Ok(value) = value.to_str()
-        && let Some((scheme, encoded)) = value.split_once(' ')
-        && scheme.eq_ignore_ascii_case("basic")
-        && let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded)
-        && contains_placeholder(&decoded)
-    {
-        return Ok(Some(
-            String::from_utf8(decoded).context("invalid Basic credential")?,
-        ));
-    }
-    Ok(None)
-}
-
-fn contains_placeholder(value: &[u8]) -> bool {
-    value
-        .windows(PLACEHOLDER_PREFIX.len())
-        .any(|s| s == PLACEHOLDER_PREFIX.as_bytes())
 }
 
 async fn relay(
@@ -775,41 +594,6 @@ pub(crate) fn public_ipv4(ip: IpAddr) -> bool {
 // https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.1
 // Proxy authentication is scoped to its proxy (sections 11.7.1/11.7.2); framing
 // and trailers are handled by the HTTP stacks on either side of this proxy.
-fn hop_header(name: &HeaderName) -> bool {
-    // HeaderName::as_str() always returns lowercase; no normalization is needed.
-    // https://docs.rs/http/latest/http/header/struct.HeaderName.html#method.as_str
-    matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "proxy-connection"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    )
-}
-
-fn strip_hop_headers(headers: &mut HeaderMap) -> Result<()> {
-    let mut remove = Vec::new();
-    // The same rule also removes custom fields named by Connection.
-    for value in headers.get_all(CONNECTION) {
-        remove.extend(
-            value
-                .to_str()?
-                .split(',')
-                .filter_map(|name| HeaderName::from_bytes(name.trim().as_bytes()).ok()),
-        );
-    }
-    remove.extend(headers.keys().filter(|name| hop_header(name)).cloned());
-    for name in remove {
-        headers.remove(name);
-    }
-    Ok(())
-}
-
 fn tls_configuration(hosts: Vec<String>) -> Result<(String, TlsAcceptor)> {
     let mut ca = CertificateParams::new(Vec::<String>::new())?;
     ca.distinguished_name
@@ -1078,3 +862,16 @@ cat /etc/ssl/certs/ca-certificates.crt > "$bundle"
 printf '\n%s\n' "$EXO_EGRESS_CA_PEM" >> "$bundle"
 mv -f "$bundle" "$EXO_EGRESS_CA_PATH"
 "#;
+
+struct TimedResolver<'a>(&'a dyn EgressCredentialResolver);
+#[async_trait]
+impl EgressCredentialResolver for TimedResolver<'_> {
+    async fn resolve(
+        &self,
+        identity: &EgressIdentity,
+        name: &str,
+        destination: &EgressDestination,
+    ) -> Result<String> {
+        tokio::time::timeout(IO_TIMEOUT, self.0.resolve(identity, name, destination)).await?
+    }
+}

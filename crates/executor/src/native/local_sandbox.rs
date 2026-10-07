@@ -969,7 +969,7 @@ impl SnapshotHandle for LocalSandboxConversation {
             .await?;
         self.append_remote_sandbox_events(vec![EventData::SandboxStarted {
             sandbox_id: request.id,
-            snapshot_id: Some(request.snapshot_id),
+            snapshot_id: request.snapshot_id,
         }])
         .await
     }
@@ -1214,6 +1214,8 @@ fn sandbox_created_events(sandbox_id: &SandboxId, request: CreateSandboxRequest)
             default_workdir: request.default_workdir.unwrap_or_default(),
             file_system_mounts: request.file_system_mounts.unwrap_or_default(),
             durable_file_systems: request.durable_file_systems.unwrap_or_default(),
+            tcp_ports: request.tcp_ports,
+            resources: request.resources,
             enable_networking: request
                 .policy
                 .as_ref()
@@ -1281,7 +1283,7 @@ impl SnapshotHandle for LocalSandboxTurnHandle {
         self.remote
             .add_events(vec![EventData::SandboxStarted {
                 sandbox_id: request.id,
-                snapshot_id: Some(request.snapshot_id),
+                snapshot_id: request.snapshot_id,
             }])
             .await?;
         Ok(())

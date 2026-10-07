@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::sandbox_policy::sandbox_policy;
 use crate::{AgentConfig, ConversationConfig};
 use exoharness::{
-    ConversationHandle, CreateSandboxRequest, DEFAULT_SANDBOX_IMAGE, EventData, EventKind,
-    EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
+    ConversationHandle, CreateSandboxRequest, EventData, EventKind, EventQuery,
+    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
 };
-use futures::{StreamExt, TryStreamExt};
 use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,8 +18,11 @@ pub(crate) struct ConversationSandboxInfo {
     pub(crate) default_workdir: String,
     pub(crate) file_system_mounts: Vec<FileSystemMount>,
     pub(crate) durable_file_systems: Vec<exoharness::DurableFileSystem>,
+    pub(crate) tcp_ports: Vec<u16>,
+    pub(crate) resources: Option<exoharness::SandboxResourceShape>,
     pub(crate) enable_networking: bool,
     pub(crate) idle_seconds: u64,
+    pub(crate) running: bool,
 }
 
 impl ConversationSandboxInfo {
@@ -29,6 +32,8 @@ impl ConversationSandboxInfo {
             && self.default_workdir == spec.default_workdir
             && self.file_system_mounts == spec.file_system_mounts
             && self.durable_file_systems == spec.durable_file_systems
+            && self.tcp_ports == spec.tcp_ports
+            && self.resources == spec.resources
             && self.enable_networking == spec.enable_networking
             && self.idle_seconds == spec.idle_seconds
     }
@@ -41,11 +46,13 @@ pub(crate) struct ConversationSandboxSpec {
     pub(crate) default_workdir: String,
     pub(crate) file_system_mounts: Vec<FileSystemMount>,
     pub(crate) durable_file_systems: Vec<exoharness::DurableFileSystem>,
+    pub(crate) tcp_ports: Vec<u16>,
+    pub(crate) resources: Option<exoharness::SandboxResourceShape>,
     pub(crate) enable_networking: bool,
     pub(crate) idle_seconds: u64,
 }
 
-pub(crate) async fn ensure_conversation_sandbox(
+pub async fn ensure_conversation_sandbox(
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
     config: &ConversationConfig,
@@ -56,7 +63,7 @@ pub(crate) async fn ensure_conversation_sandbox(
     let spec = conversation_sandbox_spec(agent_config, config);
     let policy = sandbox_policy(conversation, agent_config, config).await?;
 
-    // Of the still-active candidates in conversation history, prefer the most recent one
+    // Of the resumable candidates in conversation history, prefer the most recent one
     // that was either explicitly attached or matches the spec derived from configuration.
     for candidate in conversation_sandbox_candidates(conversation)
         .await?
@@ -81,6 +88,20 @@ pub(crate) async fn ensure_conversation_sandbox(
                 if sandbox.matches_spec(&spec)
                     && matches_sandbox_policy(sandbox.policy.as_ref(), policy.as_ref()) =>
             {
+                if !sandbox.running {
+                    let restart = conversation
+                        .start_sandbox(exoharness::StartSandboxRequest {
+                            id: sandbox.id.clone(),
+                            snapshot_id: None,
+                            idle_seconds: None,
+                            provider: None,
+                        })
+                        .await;
+                    if let Err(error) = restart {
+                        tracing::warn!(sandbox_id = %sandbox.id, %error, "failed to resume sandbox");
+                        continue;
+                    }
+                }
                 if let Some(program) = healthcheck_program {
                     let healthcheck = conversation
                         .run_in_sandbox(exoharness::RunInSandboxRequest {
@@ -109,8 +130,10 @@ pub async fn attached_conversation_sandbox(
         match conversation_sandbox_candidates(conversation)
             .await?
             .into_iter()
-            .next_back()
-        {
+            .rfind(|candidate| match candidate {
+                ConversationSandboxCandidate::Created(sandbox) => sandbox.running,
+                ConversationSandboxCandidate::Attached { .. } => true,
+            }) {
             Some(ConversationSandboxCandidate::Attached { id }) => Some(id),
             Some(ConversationSandboxCandidate::Created(_)) | None => None,
         },
@@ -132,8 +155,8 @@ impl ConversationSandboxCandidate {
     }
 }
 
-// Replay sandbox lifecycle events and return active candidates in chronological order.
-// Stopped or detached sandboxes are excluded; a later start reactivates a stopped sandbox.
+// Replay sandbox lifecycle events and return candidates in chronological order.
+// Stopped managed sandboxes remain resumable; detached sandboxes are excluded.
 async fn conversation_sandbox_candidates(
     conversation: &dyn ConversationHandle,
 ) -> Result<Vec<ConversationSandboxCandidate>> {
@@ -146,8 +169,6 @@ async fn conversation_sandbox_candidates(
             turn_id: None,
             types: Some(vec![
                 EventKind::SANDBOX_CREATED,
-                EventKind::SANDBOX_STARTED,
-                EventKind::SANDBOX_STOPPED,
                 EventKind::SANDBOX_ATTACHED,
                 EventKind::SANDBOX_DETACHED,
             ]),
@@ -165,6 +186,8 @@ async fn conversation_sandbox_candidates(
                 default_workdir,
                 file_system_mounts,
                 durable_file_systems,
+                tcp_ports,
+                resources,
                 enable_networking,
                 idle_seconds,
                 policy,
@@ -179,32 +202,38 @@ async fn conversation_sandbox_candidates(
                         default_workdir,
                         file_system_mounts,
                         durable_file_systems,
+                        tcp_ports,
+                        resources,
                         enable_networking,
                         idle_seconds,
+                        running: true,
                     },
                 )));
             }
             EventData::SandboxAttached { sandbox_id, .. } => {
                 candidates.push(ConversationSandboxCandidate::Attached { id: sandbox_id });
             }
-            EventData::SandboxStarted { sandbox_id, .. } => {
-                inactive.remove(&sandbox_id);
-            }
-            EventData::SandboxStopped { sandbox_id }
-            | EventData::SandboxDetached { sandbox_id, .. } => {
+            EventData::SandboxDetached { sandbox_id, .. } => {
                 inactive.insert(sandbox_id);
             }
             _ => {}
         }
     }
     candidates.retain(|candidate| !inactive.contains(candidate.id()));
-    if conversation.caller().is_some() {
-        let owned = conversation.list_sandboxes().await?;
-        candidates.retain(|candidate| owned.iter().any(|sandbox| sandbox.id == candidate.id()));
-    }
+    let owned = conversation.list_sandboxes().await?;
+    candidates.retain_mut(|candidate| {
+        let Some(record) = owned.iter().find(|record| record.id == candidate.id()) else {
+            return false;
+        };
+        if let ConversationSandboxCandidate::Created(sandbox) = candidate {
+            sandbox.running = record.running;
+        }
+        true
+    });
     Ok(candidates)
 }
 
+#[cfg(feature = "native")]
 pub(crate) async fn create_conversation_sandbox(
     conversation: &dyn ConversationHandle,
     agent_config: &AgentConfig,
@@ -223,17 +252,14 @@ async fn create_sandbox(
 ) -> Result<String> {
     conversation
         .create_sandbox(CreateSandboxRequest {
-            tcp_ports: vec![],
+            tcp_ports: spec.tcp_ports,
             name: config
                 .environment
                 .as_ref()
                 .and_then(|env| env.config.name.clone()),
             provider: spec.provider,
             image: spec.image,
-            resources: config
-                .environment
-                .as_ref()
-                .and_then(|env| env.config.resources),
+            resources: spec.resources,
             default_workdir: Some(spec.default_workdir),
             file_system_mounts: Some(spec.file_system_mounts),
             durable_file_systems: Some(spec.durable_file_systems),
@@ -244,6 +270,7 @@ async fn create_sandbox(
         .await
 }
 
+#[cfg(feature = "native")]
 pub(crate) async fn conversation_sandboxes(
     conversation: &dyn ConversationHandle,
 ) -> Result<Vec<ConversationSandboxInfo>> {
@@ -251,8 +278,8 @@ pub(crate) async fn conversation_sandboxes(
         .await?
         .into_iter()
         .filter_map(|candidate| match candidate {
-            ConversationSandboxCandidate::Created(sandbox) => Some(*sandbox),
-            ConversationSandboxCandidate::Attached { .. } => None,
+            ConversationSandboxCandidate::Created(sandbox) if sandbox.running => Some(*sandbox),
+            _ => None,
         })
         .collect())
 }
@@ -260,6 +287,7 @@ pub(crate) async fn conversation_sandboxes(
 // The agent-scoped sandbox is shared by every conversation, so its spec must
 // not depend on which conversation asks for it: it is derived from the agent
 // config alone.
+#[cfg(feature = "native")]
 pub(crate) fn agent_sandbox_spec(agent_config: &AgentConfig) -> ConversationSandboxSpec {
     ConversationSandboxSpec {
         provider: agent_config.sandbox.provider.clone(),
@@ -267,7 +295,7 @@ pub(crate) fn agent_sandbox_spec(agent_config: &AgentConfig) -> ConversationSand
             .sandbox
             .image
             .clone()
-            .unwrap_or_else(|| DEFAULT_SANDBOX_IMAGE.to_string()),
+            .unwrap_or_else(exoharness::default_docker_image),
         default_workdir: agent_config
             .sandbox
             .mounts
@@ -276,6 +304,8 @@ pub(crate) fn agent_sandbox_spec(agent_config: &AgentConfig) -> ConversationSand
             .unwrap_or_else(|| "/".to_string()),
         file_system_mounts: normalize_mounts(&agent_config.sandbox.mounts),
         durable_file_systems: Vec::new(),
+        tcp_ports: Vec::new(),
+        resources: None,
         enable_networking: agent_config.sandbox.enable_networking,
         idle_seconds: 300,
     }
@@ -313,6 +343,10 @@ pub(crate) fn conversation_sandbox_spec(
             .chain(config.resource_mounts.clone())
             .collect(),
         durable_file_systems: config.durable_file_systems.clone(),
+        tcp_ports: environment
+            .map(|env| env.tcp_ports.clone())
+            .unwrap_or_default(),
+        resources: environment.and_then(|env| env.resources),
         enable_networking: environment
             .and_then(|env| {
                 env.policy
@@ -323,247 +357,6 @@ pub(crate) fn conversation_sandbox_spec(
             .unwrap_or(agent_config.sandbox.enable_networking),
         idle_seconds: environment.and_then(|env| env.idle_seconds).unwrap_or(300),
     }
-}
-
-async fn sandbox_policy(
-    conversation: &dyn ConversationHandle,
-    agent_config: &AgentConfig,
-    config: &ConversationConfig,
-) -> Result<Option<exoharness::EgressPolicy>> {
-    let mut configured = config
-        .environment
-        .as_ref()
-        .and_then(|env| env.config.policy.clone())
-        .or_else(|| config.egress_policy.clone());
-    let default_policy = if conversation_sandbox_spec(agent_config, config).enable_networking {
-        exoharness::SandboxNetworkPolicy::Unrestricted.into()
-    } else {
-        exoharness::SandboxNetworkPolicy::Disabled.into()
-    };
-    add_git_resource_bindings(conversation, config, &mut configured, &default_policy).await?;
-    let module = agent_config
-        .typescript
-        .as_ref()
-        .and_then(|config| std::path::Path::new(&config.module_path).file_name())
-        .and_then(|name| name.to_str());
-    let variable = crate::managed_agents::sandbox_model_credential_variable(agent_config)?;
-    if let Some(variable) = variable {
-        add_model_binding(
-            conversation,
-            agent_config,
-            variable,
-            &mut configured,
-            &default_policy,
-        )
-        .await?;
-    }
-    if matches!(module, Some("codex-harness.ts" | "claude-code-harness.ts")) {
-        add_native_mcp_bindings(conversation, &mut configured, &default_policy).await?;
-    }
-    Ok(configured)
-}
-
-async fn add_git_resource_bindings(
-    conversation: &dyn ConversationHandle,
-    config: &ConversationConfig,
-    configured: &mut Option<exoharness::EgressPolicy>,
-    default_policy: &exoharness::EgressPolicy,
-) -> Result<()> {
-    if config.resources.iter().any(|resource| {
-        matches!(
-            resource.definition.source,
-            exoharness::resources::ResourceSource::GitRepository { .. }
-        )
-    }) {
-        configured.get_or_insert_with(|| default_policy.clone());
-    }
-    let credentials =
-        futures::stream::iter(config.resources.iter().cloned().map(|resource| async move {
-            let reference = match &resource.definition.source {
-                exoharness::resources::ResourceSource::GitRepository {
-                    credential: Some(name),
-                    ..
-                } => Some(
-                    exoharness::vault::find_secret(conversation, name)
-                        .await?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Git resource credential {name} is not in the selected vaults"
-                            )
-                        })?,
-                ),
-                _ => None,
-            };
-            Ok::<_, anyhow::Error>(reference)
-        }))
-        .buffered(8)
-        .try_collect::<Vec<_>>()
-        .await?;
-    for (resource, reference) in config.resources.iter().zip(credentials) {
-        let exoharness::resources::ResourceSource::GitRepository {
-            url: Some(url),
-            credential: Some(_),
-            ..
-        } = &resource.definition.source
-        else {
-            continue;
-        };
-        let endpoint = url::Url::parse(url)?;
-        anyhow::ensure!(
-            endpoint.scheme() == "https" && endpoint.port_or_known_default() == Some(443),
-            "sandbox Git credentials require HTTPS on port 443"
-        );
-        let host = endpoint
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("Git resource URL has no host"))?;
-        let reference = reference.expect("Git resource credential was resolved");
-        let credential_policy =
-            exoharness::vault::credential_policy(conversation, &reference).await?;
-        let git_policy = credential_policy.for_destination(
-            exoharness::CredentialDestination::origin(&endpoint.origin().ascii_serialization())?,
-        )?;
-        let github_api = exoharness::CredentialDestination::origin("https://api.github.com")?;
-        let policy = configured.as_mut().expect("Git resource policy");
-        anyhow::ensure!(
-            policy.networking_enabled(),
-            "Git credentials require sandbox networking"
-        );
-        ensure_host_allowed(policy, host, "Git resource host")?;
-        if host == "github.com" && credential_policy.permits(&github_api) {
-            ensure_host_allowed(policy, "api.github.com", "GitHub API host")?;
-            if let Some(existing) = policy
-                .credentials
-                .iter()
-                .find(|binding| binding.environment_variable == "GH_TOKEN")
-            {
-                anyhow::ensure!(
-                    existing.name == reference.secret_id.to_string(),
-                    "GitHub resources must share a credential for automatic GH_TOKEN selection"
-                );
-            } else {
-                policy.credentials.push(
-                    credential_policy
-                        .for_destination(github_api)?
-                        .binding(reference.secret_id.to_string(), "GH_TOKEN".into()),
-                );
-            }
-        }
-        policy.credentials.push(git_policy.binding(
-            reference.secret_id.to_string(),
-            resource.definition.git_credential_variable(),
-        ));
-    }
-    Ok(())
-}
-
-async fn add_model_binding(
-    conversation: &dyn ConversationHandle,
-    agent_config: &AgentConfig,
-    variable: &str,
-    configured: &mut Option<exoharness::EgressPolicy>,
-    default_policy: &exoharness::EgressPolicy,
-) -> Result<()> {
-    let reference = crate::harness_helpers::model_credential(conversation, agent_config).await?;
-    let endpoint = exoharness::vault::model_endpoint(agent_config.base_url.as_deref(), variable)?;
-    let host = endpoint.host_str().expect("validated model endpoint");
-    let target =
-        exoharness::CredentialDestination::origin(&endpoint.origin().ascii_serialization())?;
-    let credential_policy = exoharness::vault::credential_policy(conversation, &reference)
-        .await?
-        .for_destination(target.clone())?;
-    let policy = configured.get_or_insert_with(|| default_policy.clone());
-    anyhow::ensure!(
-        policy.networking_enabled(),
-        "sandbox models require networking"
-    );
-    ensure_host_allowed(policy, host, "model endpoint")?;
-    if let Some(existing) = policy
-        .credentials
-        .iter_mut()
-        .find(|binding| binding.environment_variable == variable)
-    {
-        let selected = exoharness::vault::find_secret(conversation, &existing.name).await?;
-        anyhow::ensure!(
-            selected.as_ref() == Some(&reference)
-                && existing.injection_location.header
-                && existing.networking.permits(&target),
-            "environment credential {variable} conflicts with the model credential"
-        );
-        existing.name = reference.secret_id.to_string();
-    } else {
-        policy
-            .credentials
-            .push(credential_policy.binding(reference.secret_id.to_string(), variable.into()));
-    }
-    Ok(())
-}
-
-async fn add_native_mcp_bindings(
-    conversation: &dyn ConversationHandle,
-    configured: &mut Option<exoharness::EgressPolicy>,
-    default_policy: &exoharness::EgressPolicy,
-) -> Result<()> {
-    let Some(selection) = exo_managed_agents::vaults::load_selection(conversation).await? else {
-        return Ok(());
-    };
-    if selection.bindings.is_empty() {
-        return Ok(());
-    }
-    let policy = configured.get_or_insert_with(|| default_policy.clone());
-    anyhow::ensure!(
-        policy.networking_enabled(),
-        "native MCP requires sandbox networking"
-    );
-    for selected in selection.bindings {
-        let exoharness::CredentialDestination::Url { url: server_url } = selected.target else {
-            anyhow::bail!("expected MCP destination");
-        };
-        let endpoint = url::Url::parse(&server_url)?;
-        let host = endpoint
-            .host_str()
-            .ok_or_else(|| anyhow::anyhow!("MCP endpoint has no host"))?;
-        ensure_host_allowed(policy, host, "MCP endpoint")?;
-        let Some(secret) = selected.secret else {
-            continue;
-        };
-        anyhow::ensure!(
-            endpoint.scheme() == "https" && endpoint.port_or_known_default() == Some(443),
-            "sandbox MCP credentials require HTTPS on port 443"
-        );
-        let variable = crate::mcp::credential_variable(&secret.secret_id);
-        if let Some(existing) = policy
-            .credentials
-            .iter()
-            .find(|binding| binding.environment_variable == variable)
-        {
-            anyhow::ensure!(
-                existing.name == secret.secret_id.to_string(),
-                "environment credential conflicts with MCP server {}",
-                selected.server_name
-            );
-            continue;
-        }
-        // Native MCP uses one streamable-HTTP endpoint; preserve its path and query scope.
-        let credential_policy = exoharness::vault::credential_policy(conversation, &secret)
-            .await?
-            .for_destination(exoharness::CredentialDestination::url(&server_url)?)?;
-        policy
-            .credentials
-            .push(credential_policy.binding(secret.secret_id.to_string(), variable));
-    }
-    Ok(())
-}
-
-fn ensure_host_allowed(policy: &exoharness::EgressPolicy, host: &str, what: &str) -> Result<()> {
-    if let exoharness::SandboxNetworkPolicy::Limited { allowed_hosts } = &policy.networking {
-        anyhow::ensure!(
-            allowed_hosts
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(host)),
-            "{what} {host} is not allowed by the environment network policy"
-        );
-    }
-    Ok(())
 }
 
 fn normalize_mounts(mounts: &[FileSystemMount]) -> Vec<FileSystemMount> {
@@ -601,10 +394,136 @@ fn matches_sandbox_policy(
     configured.is_none_or(|configured| actual == Some(configured))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use exoharness::{CredentialNetworkPolicy, SandboxNetworkPolicy};
+
+    #[tokio::test]
+    async fn changed_environments_and_deleted_sandboxes_are_replaced() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let harness =
+            exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
+                .await?;
+        let agent = exoharness::test_support::new_test_agent(&harness, "previews").await?;
+        let mut environment: exoharness::EnvironmentDefinition = serde_json::from_str(
+            r#"{"name":"web","config":{"provider":"local_process","image":"unused","tcp_ports":[3000],"enable_networking":true}}"#,
+        )?;
+        let thread = agent
+            .new_thread(exoharness::NewThreadRequest {
+                environment: Some(environment.clone()),
+                ..Default::default()
+            })
+            .await?;
+        let definition = exo_managed_agents::AgentDefinition::parse(
+            "---\nname: previews\nharness: basic\nconfig:\n  model: test\n---\nUse tools.".into(),
+        )?;
+        let agent_config = crate::managed_agents::agent_config(
+            &definition,
+            SandboxProvider::LocalProcess,
+            None,
+            None,
+        )?;
+        let mut config = ConversationConfig {
+            environment: Some(environment.clone()),
+            ..Default::default()
+        };
+        let first =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        thread.stop_sandbox(first.clone()).await?;
+        assert_eq!(thread.list_sandboxes().await?[0].id, first);
+        assert!(!thread.list_sandboxes().await?[0].running);
+        environment.config.image = "replacement".into();
+        let thread = thread.update_environment(environment.clone()).await?;
+        assert!(thread.list_sandboxes().await?.is_empty());
+        config.environment = Some(environment);
+        let replacement =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        assert_ne!(replacement, first);
+        thread.terminate_sandbox(replacement.clone()).await?;
+        let recreated =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        assert_ne!(recreated, replacement);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn environment_ports_are_published_and_part_of_sandbox_identity() -> Result<()> {
+        use exoharness::ExoHarness;
+
+        let temp = tempfile::tempdir()?;
+        let harness =
+            exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
+                .await?;
+        let agent = exoharness::test_support::new_test_agent(&harness, "ports").await?;
+        let thread = agent.new_thread(Default::default()).await?;
+        let definition = exo_managed_agents::AgentDefinition::parse(
+            "---\nname: ports\nharness: basic\nconfig:\n  model: test\n---\nUse tools.".into(),
+        )?;
+        let agent_config = crate::managed_agents::agent_config(
+            &definition,
+            SandboxProvider::LocalProcess,
+            None,
+            None,
+        )?;
+        let mut config = ConversationConfig {
+            environment: Some(serde_json::from_str(
+                r#"{"name":"web","config":{"provider":"local_process","image":"unused","tcp_ports":[3000,8000],"enable_networking":true}}"#,
+            )?),
+            ..Default::default()
+        };
+        let first =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        assert_eq!(
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?,
+            first
+        );
+        let sandboxes = conversation_sandboxes(thread.as_ref()).await?;
+        assert_eq!(sandboxes[0].tcp_ports, vec![3000, 8000]);
+
+        thread.stop_sandbox(first.clone()).await?;
+        assert!(!thread.list_sandboxes().await?[0].running);
+        let reloaded =
+            exoharness::BasicExoHarness::new(crate::test_support::local_test_config(temp.path()))
+                .await?;
+        let resumed = reloaded
+            .get_agent(&agent.record().id)
+            .await?
+            .unwrap()
+            .get_thread(&thread.record().id)
+            .await?
+            .unwrap();
+        assert_eq!(
+            ensure_conversation_sandbox(resumed.as_ref(), &agent_config, &config, Some("/bin/sh"),)
+                .await?,
+            first
+        );
+        let records = resumed.list_sandboxes().await?;
+        assert_eq!(records.len(), 1);
+        assert!(records[0].running);
+
+        config
+            .environment
+            .as_mut()
+            .unwrap()
+            .config
+            .tcp_ports
+            .push(8788);
+        let second =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        assert_ne!(first, second);
+        let sandboxes = conversation_sandboxes(thread.as_ref()).await?;
+        assert_eq!(sandboxes[1].tcp_ports, vec![3000, 8000, 8788]);
+        config.environment.as_mut().unwrap().config.resources =
+            exoharness::SandboxResourceShape::new(4, 4096);
+        let resized =
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        assert_ne!(second, resized);
+        thread.stop_sandbox(first).await?;
+        thread.stop_sandbox(second).await?;
+        thread.stop_sandbox(resized).await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn native_model_credentials_use_selected_vaults_and_ordinary_egress_policy() -> Result<()>

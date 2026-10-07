@@ -42,6 +42,8 @@ impl AgentSandboxRecord {
             default_workdir: self.default_workdir.clone(),
             file_system_mounts: self.file_system_mounts.clone(),
             durable_file_systems: self.durable_file_systems.clone(),
+            tcp_ports: Vec::new(),
+            resources: None,
             enable_networking: self.enable_networking,
             idle_seconds: self.idle_seconds,
         }

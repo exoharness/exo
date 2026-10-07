@@ -143,6 +143,66 @@ impl HarnessExecutor for CallerRecordingExecutor {
 }
 
 #[tokio::test]
+async fn recovery_leaves_threads_owned_by_another_process_untouched() -> Result<()> {
+    let temp = TempDir::new()?;
+    let config = local_test_config(temp.path());
+    let inline = BasicExoHarness::new(config.clone())
+        .await?
+        .with_local_sessions(temp.path().to_owned());
+    let agent = exoharness::test_support::new_test_agent(&inline, "owned-recovery").await?;
+    let thread = agent.new_thread(Default::default()).await?;
+    thread
+        .create_sandbox(exoharness::test_support::sandbox_request())
+        .await?;
+    let work = RecoverableTurn {
+        agent_config: serde_json::from_str(
+            r#"{"model":"unused","instructions":[],"sandbox":{"provider":"local_process"}}"#,
+        )?,
+        thread_config: Default::default(),
+        request: SendRequest {
+            session_id: None,
+            input: Vec::new(),
+        },
+    };
+    thread
+        .begin_turn(BeginTurnRequest {
+            initial_events: vec![
+                work.event()?,
+                EventData::Custom {
+                    event_type: RUNTIME_TURN_COMPLETED.into(),
+                    payload: Value::Null,
+                },
+            ],
+            ..Default::default()
+        })
+        .await?;
+    // Recovery would normally finalize this completed-but-unfinished turn.
+    // Its owner must be allowed to finish it without another process writing.
+    let before = serde_json::to_vec(&thread.get_events(None).await?.events)?;
+    let server = Runtime::new(
+        LocalProvider::basic(
+            Arc::new(
+                BasicExoHarness::new(config)
+                    .await?
+                    .with_local_sessions(temp.path().to_owned()),
+            ),
+            Arc::new(FakeModelClient::default()),
+            Arc::new(BasicToolRuntime),
+            Arc::new(cost::PricingTable::empty()),
+        ),
+        None,
+    );
+    server.recover_unfinished_turns().await?;
+    server.shutdown().await?;
+    assert_eq!(
+        serde_json::to_vec(&thread.get_events(None).await?.events)?,
+        before
+    );
+    assert!(thread.list_sandboxes().await?[0].running);
+    inline.release_local_sessions().await
+}
+
+#[tokio::test]
 async fn service_restart_resumes_turn_after_completed_tool_result() -> Result<()> {
     let tempdir = TempDir::new()?;
     let root = tempdir.path().join("exoharness");
@@ -2907,8 +2967,8 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
     assert_eq!(
         ensure_shell_sandbox(conversation.as_ref(), &agent_config, &conversation_config,)
             .await
-            .expect("attached sandbox should be selected"),
-        attached_sandbox_id
+            .expect("an attachment event without a current sandbox record must be ignored"),
+        second_sandbox_id
     );
 
     conversation

@@ -2,7 +2,7 @@
 //! -> fetch (cached on success) -> stale cache -> empty. Never fails: any error
 //! degrades to an empty table (cost stays unset, tokens still persist).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::PricingTable;
@@ -12,9 +12,8 @@ const DEFAULT_URL: &str =
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Load the table once at startup. `path`/`url` are caller-supplied (CLI flags or
-/// env), so this stays free of global config reads.
-pub async fn load(path: Option<PathBuf>, url: Option<String>) -> PricingTable {
+/// Load the table once at startup using caller-supplied paths and URL.
+pub async fn load(path: Option<PathBuf>, url: Option<String>, cache: &Path) -> PricingTable {
     if let Some(path) = path {
         return match std::fs::read_to_string(&path) {
             Ok(body) => parse_or_empty(&body),
@@ -29,8 +28,7 @@ pub async fn load(path: Option<PathBuf>, url: Option<String>) -> PricingTable {
         };
     }
 
-    let cache = cache_path();
-    let cached = cache.as_ref().and_then(read_cache);
+    let cached = read_cache(cache);
     if let Some((body, true)) = &cached {
         return parse_or_empty(body);
     }
@@ -38,9 +36,7 @@ pub async fn load(path: Option<PathBuf>, url: Option<String>) -> PricingTable {
     let url = url.unwrap_or_else(|| DEFAULT_URL.to_string());
     match fetch(&url).await {
         Ok(body) if PricingTable::from_json_str(&body).is_ok() => {
-            if let Some(path) = &cache {
-                write_cache(path, &body);
-            }
+            write_cache(cache, &body);
             parse_or_empty(&body)
         }
         Ok(_) => {
@@ -80,7 +76,7 @@ async fn fetch(url: &str) -> anyhow::Result<String> {
 }
 
 /// Returns `(body, is_fresh)`; `is_fresh` is true only within `CACHE_TTL`.
-fn read_cache(path: &PathBuf) -> Option<(String, bool)> {
+fn read_cache(path: &Path) -> Option<(String, bool)> {
     let fresh = std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -89,18 +85,16 @@ fn read_cache(path: &PathBuf) -> Option<(String, bool)> {
     Some((std::fs::read_to_string(path).ok()?, fresh))
 }
 
-fn write_cache(path: &PathBuf, body: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+fn write_cache(path: &Path, body: &str) {
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        tracing::debug!(%error, path = %parent.display(), "creating pricing cache directory failed");
+        return;
     }
-    let _ = std::fs::write(path, body);
-}
-
-fn cache_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(base.join("exo").join("litellm_prices.json"))
+    if let Err(error) = std::fs::write(path, body) {
+        tracing::debug!(%error, path = %path.display(), "writing pricing cache failed");
+    }
 }
 
 #[cfg(test)]
@@ -115,7 +109,17 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("prices.json");
         std::fs::write(&path, FIXTURE).unwrap();
-        let table = load(Some(path), None).await;
+        let table = load(Some(path), None, &dir.path().join("cache/prices.json")).await;
+        assert!(table.lookup("claude-sonnet-4-6").is_some());
+        assert!(!dir.path().join("cache").exists());
+    }
+
+    #[tokio::test]
+    async fn fresh_cache_uses_the_callers_path() {
+        let dir = TempDir::new().unwrap();
+        let cache = dir.path().join("prices.json");
+        std::fs::write(&cache, FIXTURE).unwrap();
+        let table = load(None, Some("invalid://unused".into()), &cache).await;
         assert!(table.lookup("claude-sonnet-4-6").is_some());
     }
 

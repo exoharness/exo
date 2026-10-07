@@ -82,10 +82,7 @@ mod tests {
     -> Result<()> {
         let temp = tempfile::tempdir()?;
         let config = crate::test_support::local_test_config(temp.path());
-        let cipher = crate::basic::build_secret_cipher(
-            config.secret_backend.clone(),
-            temp.path().to_string_lossy().into_owned(),
-        )?;
+        let cipher = crate::basic::build_secret_cipher(config.secret_backend.clone(), temp.path());
         let record = VaultRecord {
             id: Uuid7::now(),
             name: "personal".into(),

@@ -106,7 +106,7 @@ pub fn model_credential_destination(config: &AgentConfig) -> Result<Option<Crede
             Some(url) => url::Url::parse(url)?,
             None => exoharness::vault::model_endpoint(
                 None,
-                if crate::harness_runtime::is_anthropic_model(&config.model) {
+                if crate::model_config::is_anthropic_model(&config.model) {
                     "ANTHROPIC_API_KEY"
                 } else {
                     "OPENAI_API_KEY"
@@ -121,14 +121,17 @@ pub fn model_credential_destination(config: &AgentConfig) -> Result<Option<Crede
     )?))
 }
 
-pub(crate) fn installation() -> Result<PathBuf> {
-    crate::typescript::typescript_workspace_root()
+pub trait HarnessModules: Send + Sync {
+    fn installation(&self) -> Result<PathBuf>;
+    fn resolve(&self, path: &Path) -> Result<PathBuf>;
+    fn preset_image(&self, preset: TypeScriptHarnessPreset) -> Option<String>;
 }
 
 fn resolve_harness(
     harness: &str,
     base: &Path,
     configured_module: Option<&Path>,
+    modules: &dyn HarnessModules,
 ) -> Result<(
     AgentHarnessKind,
     Option<TypeScriptHarnessConfig>,
@@ -147,8 +150,8 @@ fn resolve_harness(
         "typescript" | "exo" => {
             let path = configured_module
                 .with_context(|| format!("{harness} agents require config.module"))?;
-            let path = path
-                .canonicalize()
+            let path = modules
+                .resolve(path)
                 .with_context(|| format!("resolving harness module {}", path.display()))?;
             (
                 if harness == "exo" {
@@ -164,7 +167,7 @@ fn resolve_harness(
         }
         _ => {
             let module = if let Some(preset) = preset {
-                installation()?.join(preset.module_path())
+                modules.installation()?.join(preset.module_path())
             } else {
                 let path = Path::new(harness);
                 if !harness.contains(std::path::MAIN_SEPARATOR)
@@ -177,7 +180,7 @@ fn resolve_harness(
                 }
                 base.join(path)
             };
-            let module = module.canonicalize().with_context(|| {
+            let module = modules.resolve(&module).with_context(|| {
                 format!(
                     "resolving harness module {} on this provider",
                     module.display()
@@ -199,6 +202,7 @@ pub(crate) async fn resolve_thread_harness(
     thread: &dyn exoharness::ThreadHandle,
     config: &AgentConfig,
     harness: &str,
+    modules: &dyn HarnessModules,
 ) -> Result<ConversationHarnessConfig> {
     if !matches!(
         harness,
@@ -218,6 +222,7 @@ pub(crate) async fn resolve_thread_harness(
             .typescript
             .as_ref()
             .map(|config| Path::new(&config.module_path)),
+        modules,
     )?;
     Ok(ConversationHarnessConfig {
         kind,
@@ -267,11 +272,12 @@ pub(crate) fn apply_thread_harness(
     Ok(())
 }
 
-pub fn agent_config(
+pub fn agent_config_with_modules(
     definition: &AgentDefinition,
     sandbox: SandboxProvider,
     harness: Option<&str>,
     model: Option<&str>,
+    modules: &dyn HarnessModules,
 ) -> Result<AgentConfig> {
     let base = definition
         .path()
@@ -291,6 +297,7 @@ pub fn agent_config(
             .as_deref()
             .map(|path| base.join(path))
             .as_deref(),
+        modules,
     )?;
     if !definition.frontmatter.tools.is_empty() {
         let module = module
@@ -306,8 +313,8 @@ pub fn agent_config(
             .iter()
             .map(|path| {
                 let path = base.join(path);
-                Ok(path
-                    .canonicalize()
+                Ok(modules
+                    .resolve(&path)
                     .with_context(|| {
                         format!("resolving tool module {} on this provider", path.display())
                     })?
@@ -338,9 +345,7 @@ pub fn agent_config(
             &definition.instructions,
         )],
         sandbox: AgentSandboxConfig {
-            image: preset
-                .and_then(TypeScriptHarnessPreset::sandbox_image)
-                .map(str::to_string),
+            image: preset.and_then(|preset| modules.preset_image(preset)),
             provider: sandbox,
             scope: Default::default(),
             mounts: vec![],

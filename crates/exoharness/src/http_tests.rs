@@ -139,6 +139,12 @@ async fn hosted_http_exoharness_core_contract() {
     crate::contract_tests::supports_agent_and_conversation_crud(Arc::clone(&harness)).await;
     crate::contract_tests::begin_turn_tracks_events_through_finish(Arc::clone(&harness)).await;
     crate::contract_tests::turn_events_continue_after_artifact_writes(Arc::clone(&harness)).await;
+    crate::contract_tests::supports_thread_api_and_conversation_compatibility(Arc::clone(&harness))
+        .await;
+    crate::contract_tests::list_conversations_returns_recent_first_and_paginates(Arc::clone(
+        &harness,
+    ))
+    .await;
 }
 
 #[actix_web::test]
@@ -159,7 +165,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         .expect("conversation");
     let sandbox_id = conversation
         .create_sandbox(CreateSandboxRequest {
-            tcp_ports: vec![],
+            tcp_ports: vec![3000, 8000],
             name: None,
             provider: SandboxProvider::LocalProcess,
             image: "local".to_string(),
@@ -173,10 +179,9 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
         })
         .await
         .expect("sandbox");
-    assert_eq!(
-        conversation.list_sandboxes().await.expect("list sandboxes")[0].id,
-        sandbox_id
-    );
+    let sandboxes = conversation.list_sandboxes().await.expect("list sandboxes");
+    assert_eq!(sandboxes[0].id, sandbox_id);
+    assert_eq!(sandboxes[0].tcp_ports, vec![3000, 8000]);
     let process = conversation
         .run_in_sandbox(RunInSandboxRequest {
             id: sandbox_id.clone(),
@@ -410,7 +415,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
         .expect("turn snapshot");
     turn.start_sandbox(StartSandboxRequest {
         id: sandbox_id.clone(),
-        snapshot_id,
+        snapshot_id: Some(snapshot_id),
         idle_seconds: Some(60),
         provider: None,
     })

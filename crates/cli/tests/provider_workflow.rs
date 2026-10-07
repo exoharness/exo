@@ -141,8 +141,14 @@ async fn local_and_http_threads_accept_additional_vaults() -> Result<()> {
             f.agent_file.to_str().unwrap(),
         ])
         .await?;
-        let state = f.runtime.exoharness_handle();
-        let agent = exo_managed_agents::find_agent(state.as_ref(), "saved").await?;
+        // Arrange records without claiming them for the server. The selected
+        // provider below must be the first runtime to take thread ownership.
+        let mut config = exoharness::test_support::local_test_config(f.root.join("exoharness"));
+        config.secret_backend = exoharness::SecretBackendChoice::File {
+            path: Some(f.temp.path().join("master-key")),
+        };
+        let state = exoharness::BasicExoHarness::new(config).await?;
+        let agent = exo_managed_agents::find_agent(&state, "saved").await?;
         let original = agent
             .new_thread(exoharness::NewThreadRequest {
                 slug: Some("original".into()),
@@ -1577,6 +1583,64 @@ async fn provider_errors_explain_how_to_set_context_and_creation_is_offline() ->
 }
 
 #[actix_web::test]
+async fn smolvm_disk_sizes_are_saved_only_on_smolvm_bindings() -> Result<()> {
+    let f = Fixture::new().await?;
+    f.cli(&[
+        "environment",
+        "provider",
+        "create",
+        "--backend",
+        "smolvm",
+        "--smolvm-storage-gib",
+        "64",
+        "--smolvm-overlay-gib",
+        "128",
+    ])
+    .await?;
+    let bindings = f.runtime.exoharness_handle().list_bindings().await?;
+    let config = bindings
+        .into_iter()
+        .find_map(|record| match record.binding {
+            exoharness::Binding::Sandbox {
+                config:
+                    exoharness::SandboxProviderConfig::Smolvm {
+                        storage_gib,
+                        overlay_gib,
+                        ..
+                    },
+                ..
+            } => Some((storage_gib, overlay_gib)),
+            _ => None,
+        })
+        .context("smolvm binding")?;
+    assert_eq!(config.0.map(std::num::NonZeroU32::get), Some(64));
+    assert_eq!(config.1.map(std::num::NonZeroU32::get), Some(128));
+    for (backend, size, expected) in [
+        ("docker", "64", "only valid for smolvm"),
+        ("smolvm", "0", "invalid value"),
+    ] {
+        let output = f
+            .output(
+                &[
+                    "environment",
+                    "provider",
+                    "create",
+                    "--backend",
+                    backend,
+                    "--smolvm-overlay-gib",
+                    size,
+                ],
+                None,
+                None,
+            )
+            .await?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+    f.stop().await
+}
+
+#[actix_web::test]
 async fn sandbox_bindings_keep_the_explicit_vault() -> Result<()> {
     let f = Fixture::new().await?;
     f.cli(&["vault", "create", "team"]).await?;
@@ -1649,13 +1713,30 @@ async fn provider_selection_is_visible_and_clearable() -> Result<()> {
     let current = success(f.output(&["provider"], Some(&nested), None).await?)?;
     assert!(current.contains("provider: local\nselection: directory "));
     assert!(current.contains(&directory.display().to_string()));
-    f.cli(&["provider", "clear"]).await?;
+    let cleared = success(
+        f.output(&["provider", "clear"], Some(&nested), None)
+            .await?,
+    )?;
+    assert!(cleared.contains("provider: remote\nselection: global"));
+    assert!(cleared.contains("\"workspace\":\"test\""));
+    success(
+        f.output(
+            &["provider", "switch", "local", "--local"],
+            Some(&directory),
+            None,
+        )
+        .await?,
+    )?;
+    success(
+        f.output(&["provider", "clear", "--global"], Some(&nested), None)
+            .await?,
+    )?;
     assert_eq!(
         success(f.output(&["provider"], Some(&nested), None).await?)?,
         current
     );
     success(
-        f.output(&["provider", "clear", "--local"], Some(&directory), None)
+        f.output(&["provider", "clear", "--local"], Some(&nested), None)
             .await?,
     )?;
     assert!(

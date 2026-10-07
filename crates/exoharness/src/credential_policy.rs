@@ -95,7 +95,6 @@ impl CredentialPolicy {
         }
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
     pub(crate) fn is_resource(&self) -> bool {
         matches!(&self.networking, CredentialNetworkPolicy::Destinations { allowed_destinations }
             if allowed_destinations.iter().any(|d| matches!(d, CredentialDestination::Url { .. })))
@@ -173,7 +172,6 @@ impl CredentialNetworkPolicy {
         }
     }
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
     pub(crate) fn hosts(&self) -> Result<std::collections::HashSet<String>> {
         match self {
             Self::Limited { allowed_hosts } => crate::types::canonical_egress_hosts(allowed_hosts),

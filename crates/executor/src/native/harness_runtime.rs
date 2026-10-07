@@ -1,3 +1,5 @@
+use crate::model_config::is_anthropic_model;
+
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -186,14 +188,6 @@ fn resolve_openrouter_config(request: &ModelRequest) -> Result<ResolvedRuntimeCo
             prefix: Some("Bearer".to_string()),
         },
     })
-}
-
-/// Anthropic models route to the native Messages API. We detect them by
-/// model name (`claude*`). Bedrock/Vertex Anthropic ids carry provider prefixes
-/// (e.g. `us.anthropic.claude-...`) so they do not match here and keep falling
-/// through to the OpenAI-compatible path.
-pub(crate) fn is_anthropic_model(model: &str) -> bool {
-    model.to_ascii_lowercase().starts_with("claude")
 }
 
 fn resolve_anthropic_config(request: &ModelRequest) -> Result<ResolvedRuntimeConfig> {

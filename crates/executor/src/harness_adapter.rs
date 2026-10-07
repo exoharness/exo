@@ -13,6 +13,7 @@ use crate::harness::{
 };
 use crate::harness_events::HarnessTurn;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
+use crate::runtime_host::RuntimeHost;
 use crate::{AgentConfig, ConversationConfig, ExecutionStreamEvent};
 
 pub(crate) struct ExecutorTurn {
@@ -48,6 +49,7 @@ enum StopReason {
 }
 
 pub(crate) struct ExecutorHarness {
+    host: Arc<dyn RuntimeHost>,
     executor: Arc<dyn HarnessExecutor>,
     events: OnceLock<HarnessEventSink>,
     active: Arc<Mutex<ActiveTurns>>,
@@ -64,8 +66,9 @@ impl ExecutorHarness {
             .is_some_and(Option::is_some)
     }
 
-    pub(crate) fn new(executor: Arc<dyn HarnessExecutor>) -> Self {
+    pub(crate) fn new(executor: Arc<dyn HarnessExecutor>, host: Arc<dyn RuntimeHost>) -> Self {
         Self {
+            host,
             executor,
             events: OnceLock::new(),
             active: Arc::default(),
@@ -149,7 +152,7 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
         let active = Arc::clone(&self.active);
         let idle = Arc::clone(&self.idle);
         let executor = self.executor.clone();
-        tokio::spawn(async move {
+        self.host.spawn(Box::pin(async move {
             let turn = Arc::new(HarnessTurn::new(
                 Arc::clone(&work.turn),
                 events.clone(),
@@ -247,7 +250,7 @@ impl Harness<ExecutorTurn> for ExecutorHarness {
                 .turns
                 .remove(&key);
             idle.notify_waiters();
-        });
+        }));
         Ok(())
     }
 }

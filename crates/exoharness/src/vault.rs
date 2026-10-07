@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 mod local;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+#[cfg(feature = "store")]
 pub(crate) use local::BasicVaultStore;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

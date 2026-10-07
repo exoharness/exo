@@ -1,9 +1,9 @@
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{Arc, Mutex, Weak},
 };
 
+use crate::{BasicExecutor, ModelClient, ToolRuntime};
 use async_trait::async_trait;
 use exo_managed_agents::AgentBackend;
 use exoharness::{AgentHandle, ExoHarness, Result, ThreadHandle, TurnRecord};
@@ -12,18 +12,27 @@ use tokio::sync::oneshot;
 use crate::harness::{Harness, HarnessCommand};
 use crate::harness_adapter::{ExecutorHarness, ExecutorTurn};
 use crate::harness_executor::{HarnessExecutor, RecoveryRuntimeResolver};
-use crate::{
-    AgentConfig, BasicExecutor, ExecutionStreamHandle, ModelClient, Runtime, SendRequest,
-    ToolRuntime,
-};
+use crate::runtime_host::{RuntimeHost, TaskGroup};
+use crate::{AgentConfig, ExecutionStreamHandle, Runtime, SendRequest};
 
 #[async_trait]
 pub trait Provider: AgentBackend {
+    fn runtime_host(&self) -> Arc<dyn RuntimeHost>;
+
     fn with_caller(&self, _caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {
         anyhow::bail!("this provider does not support caller-scoped execution")
     }
 
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
+
+    async fn resolve_thread_harness(
+        &self,
+        _thread: &dyn ThreadHandle,
+        _config: &AgentConfig,
+        _harness: &str,
+    ) -> Result<crate::ConversationHarnessConfig> {
+        anyhow::bail!("this provider does not configure managed harnesses")
+    }
 
     async fn recover_unfinished_turns(
         &self,
@@ -84,11 +93,12 @@ pub struct ProviderTurn {
 }
 
 pub struct LocalProvider {
+    host: Arc<dyn RuntimeHost>,
     pub(crate) state: Arc<dyn ExoHarness>,
     pub(crate) executor: Arc<dyn HarnessExecutor>,
     pub(crate) harness: Arc<ExecutorHarness>,
     pub(crate) managed: crate::managed_agents::LocalAgentSetup,
-    pub(crate) resource_preparations: Arc<Mutex<tokio::task::JoinSet<()>>>,
+    pub(crate) resource_preparations: Arc<Mutex<TaskGroup>>,
     // One provider-wide lock serializes the pending check and decision write so
     // concurrent responses cannot accept the same approval twice.
     approval_responses: tokio::sync::Mutex<()>,
@@ -98,53 +108,56 @@ pub struct LocalProvider {
 }
 
 impl LocalProvider {
-    pub(crate) fn new(state: Arc<dyn ExoHarness>, executor: Arc<dyn HarnessExecutor>) -> Self {
+    pub fn with_host(
+        state: Arc<dyn ExoHarness>,
+        executor: Arc<dyn HarnessExecutor>,
+        host: Arc<dyn RuntimeHost>,
+    ) -> Self {
         Self {
             state,
-            harness: Arc::new(ExecutorHarness::new(Arc::clone(&executor))),
+            harness: Arc::new(ExecutorHarness::new(Arc::clone(&executor), host.clone())),
             executor,
             managed: Default::default(),
-            resource_preparations: Arc::default(),
+            resource_preparations: Arc::new(Mutex::new(TaskGroup::new(host.clone()))),
+            host,
             approval_responses: Default::default(),
             frontend_responses: Default::default(),
             live_turns: Arc::default(),
         }
     }
 
-    pub fn basic<M: ModelClient + 'static, T: ToolRuntime + 'static>(
+    pub fn basic_with_host<M: ModelClient + 'static, T: ToolRuntime + 'static>(
         state: Arc<dyn ExoHarness>,
         model: Arc<M>,
         tools: Arc<T>,
         pricing: Arc<cost::PricingTable>,
+        host: Arc<dyn RuntimeHost>,
     ) -> Self {
-        Self::new(
+        Self::with_host(
             state,
             Arc::new(BasicExecutor::with_pricing(model, tools, pricing)),
+            host,
         )
-    }
-
-    pub fn rlm<M: ModelClient + 'static>(
-        state: Arc<dyn ExoHarness>,
-        model: Arc<M>,
-        tools: Arc<dyn ToolRuntime>,
-    ) -> Self {
-        Self::new(state, Arc::new(crate::rlm::RlmExecutor { model, tools }))
-    }
-
-    pub fn typescript<T: ToolRuntime + 'static>(
-        state: Arc<dyn ExoHarness>,
-        workspace: PathBuf,
-        env: HashMap<String, String>,
-        tools: Arc<T>,
-    ) -> Self {
-        let executor =
-            crate::typescript::TypeScriptExecutor::new(Arc::clone(&state), workspace, env, tools);
-        Self::new(state, Arc::new(executor))
     }
 }
 
 #[async_trait]
 impl Provider for LocalProvider {
+    fn runtime_host(&self) -> Arc<dyn RuntimeHost> {
+        self.host.clone()
+    }
+
+    async fn resolve_thread_harness(
+        &self,
+        thread: &dyn ThreadHandle,
+        config: &AgentConfig,
+        harness: &str,
+    ) -> Result<crate::ConversationHarnessConfig> {
+        self.executor
+            .resolve_thread_harness(thread, config, harness)
+            .await
+    }
+
     async fn recover_unfinished_turns(
         &self,
         runtime: Runtime,
@@ -180,7 +193,8 @@ impl Provider for LocalProvider {
     fn with_caller(&self, caller: exoharness::access::Caller) -> Result<Arc<dyn Provider>> {
         let state = self.state.with_caller(caller)?;
         let executor = self.executor.with_state(state.clone())?;
-        let mut provider = Self::new(state, executor).with_managed_agents(self.managed.clone());
+        let mut provider = Self::with_host(state, executor, self.host.clone())
+            .with_managed_agents(self.managed.clone());
         provider.live_turns = self.live_turns.clone();
         provider.resource_preparations = self.resource_preparations.clone();
         provider.frontend_responses = self.frontend_responses.clone();
@@ -305,11 +319,12 @@ impl Harness<ProviderTurn> for LocalProvider {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        let mut preparations = std::mem::take(
+        let mut preparations = std::mem::replace(
             &mut *self
                 .resource_preparations
                 .lock()
                 .expect("resource preparations poisoned"),
+            TaskGroup::new(self.host.clone()),
         );
         while let Some(result) = preparations.join_next().await {
             result?;

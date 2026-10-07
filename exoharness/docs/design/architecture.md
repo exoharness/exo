@@ -53,7 +53,17 @@ and artifacts so the event log preserves turn ownership.
 - `crates/executor/src/harness_types.rs`: higher-level executor-facing harness
   facade.
 - `crates/executor/src/harness_executor.rs`: generic turn execution lifecycle.
-- `crates/executor/src/typescript.rs`: Rust host for TypeScript harness
+- `crates/executor/src/runtime_host.rs`: task scheduling supplied by the deployment
+  host, used by the shared provider and execution lifecycle.
+- `crates/executor/src/native/`: native constructors, services and process adapters,
+  compiled through the executor's default `native` feature.
+- `crates/exoharness/src/http/`: state protocol client, HTTP transport and process
+  streaming adapters; platform dependencies are gated within each module.
+- `crates/exoharness/src/storage.rs`: byte storage interface for the shared store.
+  Native object storage and Worker Durable Object/R2 adapters implement it.
+- `crates/executor/src/managed_agents/service.rs`: shared managed-agent handlers
+  used by native HTTP and Worker transports.
+- `crates/executor/src/native/typescript.rs`: Rust host for TypeScript harness
   processes.
 - `exoharness/typescript/harness/index.ts`: public TypeScript API exposed to harness
   authors.
@@ -135,6 +145,7 @@ environment:
 - `fork(ForkConversationRequest) -> ConversationHandle`
 - `list_artifacts()`, `write_artifact()`, `read_artifact()`
 - `create_sandbox(CreateSandboxRequest) -> SandboxId`
+- `list_sandboxes() -> Vec<SandboxRecord>`
 - `snapshot_sandbox(sandbox_id) -> SnapshotId`
 - `start_sandbox(StartSandboxRequest)`
 - `stop_sandbox(sandbox_id)`
@@ -699,7 +710,7 @@ When adding a new core operation, update all three surfaces:
 When adding a TypeScript-only runtime capability, update both sides of the
 TypeScript harness protocol:
 
-1. `crates/executor/src/typescript.rs` host message/request/response handling.
+1. `crates/executor/src/native/typescript.rs` host message/request/response handling.
 2. `exoharness/typescript/harness/runner.ts` raw types and `TurnContext` implementation.
 3. `exoharness/typescript/harness/index.ts` public type definitions.
 

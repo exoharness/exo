@@ -588,18 +588,21 @@ mod tests {
             f.agent.record().id,
             thread.record().id
         );
+        let mut stream = thread.watch_events(Bound::Unbounded).await?;
         let submitted: SubmitTurnResult = test::call_and_read_body_json(
             &app,
             test::TestRequest::post()
                 .uri(&path)
                 .set_json(SubmitTurnBody::<()> {
+                    input: Some(OneOrMany::One(crate::harness_helpers::user_message(
+                        "Look up the answer.",
+                    ))),
                     frontend_tools: Some(OneOrMany::Many(f.config.frontend_tools)),
                     ..Default::default()
                 })
                 .to_request(),
         )
         .await;
-        let mut stream = thread.watch_events(Bound::Unbounded).await?;
         let call = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while let Some(event) = stream.next().await {
                 match event?.data {
@@ -612,7 +615,8 @@ mod tests {
             }
             anyhow::bail!("no client call")
         })
-        .await??;
+        .await
+        .context("waiting for client tool request")??;
         let body = FrontendToolResultBody {
             session_id: submitted.turn.session_id,
             tool_call_id: call,
@@ -642,7 +646,8 @@ mod tests {
             }
             anyhow::bail!("turn did not finish")
         })
-        .await??;
+        .await
+        .context("waiting for turn completion after client tool result")??;
         assert_eq!(model.0.lock().unwrap().len(), 2);
         runtime.shutdown().await?;
         Ok(())

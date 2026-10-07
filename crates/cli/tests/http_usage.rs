@@ -80,6 +80,7 @@ async fn cli(temp: &TempDir, args: &[&str]) -> Result<String> {
         Duration::from_secs(15),
         Command::new(env!("CARGO_BIN_EXE_exo"))
             .env_clear()
+            .env("EXO_HOME", temp.path().join("client-state"))
             .env("EXO_CONFIG_DIR", temp.path().join("config"))
             .env("TEST_RUNTIME_TOKEN", "usage-test-token")
             .current_dir(temp.path())

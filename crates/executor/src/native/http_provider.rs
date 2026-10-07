@@ -129,6 +129,10 @@ impl AgentBackend for HttpProvider {
 
 #[async_trait]
 impl Provider for HttpProvider {
+    fn runtime_host(&self) -> Arc<dyn crate::runtime_host::RuntimeHost> {
+        Arc::new(crate::TokioRuntimeHost)
+    }
+
     async fn is_turn_active(
         &self,
         thread: &dyn exoharness::ThreadHandle,

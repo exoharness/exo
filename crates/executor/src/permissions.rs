@@ -121,7 +121,7 @@ pub(crate) async fn respond(
         .latest_event_id)
 }
 
-pub(crate) async fn authorize(
+pub async fn authorize(
     thread: &dyn ThreadHandle,
     turn: &dyn TurnHandle,
     policy: PermissionPolicy,
