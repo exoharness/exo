@@ -6,8 +6,8 @@ use std::sync::{
 
 use anyhow::{Context, Result, anyhow, ensure};
 use exoharness::turn_coordinator::{
-    QueuedTurn, TurnAttention, TurnAuthority, TurnControl, TurnControlOutcome, TurnLease,
-    TurnQueue, TurnSubmission, TurnThread,
+    QueuedTurn, TurnAuthority, TurnControl, TurnControlOutcome, TurnLease, TurnQueue,
+    TurnSubmission, TurnThread,
 };
 use exoharness::{
     AgentHandle, EventData, EventQuery, EventQueryDirection, ThreadHandle, TurnRecord, Uuid7,
@@ -25,11 +25,7 @@ use crate::{
 #[cfg(all(test, feature = "native"))]
 mod tests;
 
-#[derive(Debug, Clone, Default)]
-pub struct TurnOptions {
-    pub idempotency_key: Option<String>,
-    pub attention: TurnAttention,
-}
+pub use exoharness::turn_coordinator::TurnOptions;
 
 #[derive(Debug)]
 pub(crate) struct TurnSuspended;
@@ -377,7 +373,7 @@ impl Runtime {
         let accepted = match provider
             .turns
             .coordinator
-            .enqueue_turn(
+            .enqueue(
                 scope,
                 TurnSubmission {
                     turn,
@@ -386,7 +382,6 @@ impl Runtime {
                     idempotency_key: options.idempotency_key,
                     attention: options.attention,
                 },
-                (),
             )
             .await
         {
@@ -491,7 +486,7 @@ impl Runtime {
         let Some(lease) = provider.turns.coordinator.claim(scope).await? else {
             return Ok(());
         };
-        let initial_head = provider.turns.coordinator.peek_turn(&lease).await?;
+        let initial_head = provider.turns.coordinator.peek(&lease).await?;
         let runtime = self.clone();
         let provider = provider.clone();
         let turns = provider.turns.clone();
@@ -552,7 +547,7 @@ impl Runtime {
         while !turns.draining.load(Ordering::SeqCst) {
             let head = match initial_head.take() {
                 Some(head) => head,
-                None => turns.coordinator.peek_turn(lease).await?,
+                None => turns.coordinator.peek(lease).await?,
             };
             *current_head = head
                 .as_ref()
@@ -644,7 +639,7 @@ impl Runtime {
                 status => {
                     let current = turns
                         .coordinator
-                        .peek_turn(lease)
+                        .peek(lease)
                         .await?
                         .context("queue head disappeared")?;
                     if current.control == TurnControl::Suspend {
@@ -659,7 +654,7 @@ impl Runtime {
                     turns.broadcast(key, Err(error));
                 }
             }
-            initial_head = Some(turns.coordinator.complete_turn(lease, head.turn.id).await?);
+            initial_head = Some(turns.coordinator.acknowledge(lease, head.turn.id).await?);
         }
         Ok(())
     }

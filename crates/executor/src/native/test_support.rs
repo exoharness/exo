@@ -64,7 +64,7 @@ pub(crate) async fn begin_queued_turn(
             .unwrap_or_else(exoharness::Uuid7::now),
     };
     coordinator
-        .enqueue_turn(
+        .enqueue(
             scope,
             TurnSubmission {
                 turn: turn.clone(),
@@ -73,7 +73,6 @@ pub(crate) async fn begin_queued_turn(
                 idempotency_key: None,
                 attention: Default::default(),
             },
-            (),
         )
         .await?;
     let lease = coordinator

@@ -419,7 +419,10 @@ async fn saved_http_turn_survives_disconnect_and_replays_completion() -> Result<
         .watch(f.agent_id, thread.id, &Default::default())
         .await?;
     let body: SubmitTurnBody = SubmitTurnBody {
-        idempotency_key: Some("saved-turn".into()),
+        options: crate::TurnOptions {
+            idempotency_key: Some("saved-turn".into()),
+            ..Default::default()
+        },
         input: Some(OneOrMany::One(crate::harness_helpers::user_message(
             "hello",
         ))),

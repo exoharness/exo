@@ -1,7 +1,7 @@
 use super::*;
 use crate::{AgentConfig, ConversationConfig, ExecutorStreamMode, HarnessExecutor};
 use async_trait::async_trait;
-use exoharness::turn_coordinator::TurnCoordinator;
+use exoharness::turn_coordinator::TurnAttention;
 use exoharness::{BasicExoHarness, EventKind, ExoHarness, TurnHandle};
 use std::{path::Path, time::Duration};
 use tempfile::TempDir;
@@ -415,7 +415,7 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
     let scope = f.scope();
     let queue = f.state.turn_coordinator();
     let completed = f.submission().await?;
-    queue.enqueue_turn(scope, completed.clone(), ()).await?;
+    queue.enqueue(scope, completed.clone()).await?;
     let lease = queue.claim(scope).await?.unwrap();
     queue.start(&lease, completed.turn.id).await?;
     drop(lease);
@@ -431,7 +431,7 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
     turn.finish().await?;
     drop(turn);
     let cancelled = f.submission().await?;
-    queue.enqueue_turn(scope, cancelled.clone(), ()).await?;
+    queue.enqueue(scope, cancelled.clone()).await?;
     let turn = f
         .thread
         .begin_turn(exoharness::BeginTurnRequest {
@@ -451,9 +451,9 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
         )
         .await?;
     let admitted = f.submission().await?; // Admission persisted before its journal.
-    queue.enqueue_turn(scope, admitted.clone(), ()).await?;
+    queue.enqueue(scope, admitted.clone()).await?;
     let pending = f.submission().await?;
-    queue.enqueue_turn(scope, pending.clone(), ()).await?;
+    queue.enqueue(scope, pending.clone()).await?;
     f.runtime.shutdown().await?;
     drop(queue);
     drop(f);
@@ -472,7 +472,7 @@ async fn restart_reconciles_completion_and_admission_before_journal_creation() -
     let duplicate = f
         .state
         .turn_coordinator()
-        .enqueue_turn(scope, completed.clone(), ())
+        .enqueue(scope, completed.clone())
         .await?;
     assert!(duplicate.duplicate);
     assert_eq!(duplicate.turn, completed.turn);
@@ -484,9 +484,7 @@ async fn recovery_uses_prepared_work_instead_of_the_acceptance_snapshot() -> Res
     let (_temp, mut f) = fixture().await?;
     let submission = f.submission().await?;
     let queue = f.state.turn_coordinator();
-    queue
-        .enqueue_turn(f.scope(), submission.clone(), ())
-        .await?;
+    queue.enqueue(f.scope(), submission.clone()).await?;
     let lease = queue.claim(f.scope()).await?.unwrap();
     queue.start(&lease, submission.turn.id).await?;
     drop(lease);
@@ -524,7 +522,7 @@ async fn restart_after_queue_start_before_journal_preserves_the_accepted_identit
     let scope = f.scope();
     let submission = f.submission().await?;
     let queue = f.state.turn_coordinator();
-    queue.enqueue_turn(scope, submission.clone(), ()).await?;
+    queue.enqueue(scope, submission.clone()).await?;
     let lease = queue.claim(scope).await?.unwrap();
     queue.start(&lease, submission.turn.id).await?;
     drop(lease);
@@ -670,7 +668,7 @@ async fn unrecoverable_head_is_ended_without_failing_the_next_caller() -> Result
     head.principal = Some("missing-caller".into());
     f.state
         .turn_coordinator()
-        .enqueue_turn(f.scope(), head.clone(), ())
+        .enqueue(f.scope(), head.clone())
         .await?;
     let (next, stream) = f.start().await?;
     f.started(next.id).await?;
@@ -726,21 +724,16 @@ struct TestCoordinator {
 }
 
 #[async_trait]
-impl TurnCoordinator<QueuedTurn<TurnWork>, TurnSubmission<TurnWork>> for TestCoordinator {
-    type Scope = TurnThread;
-    type Lease = TurnLease;
-    type EnqueueOptions = ();
-    type EnqueueOutcome = exoharness::turn_coordinator::AcceptedTurn;
-    type CancelOutcome = TurnControlOutcome;
-    type Completion = Option<QueuedTurn<TurnWork>>;
-
-    async fn enqueue_turn(
+impl TurnQueue<TurnWork> for TestCoordinator {
+    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
+        self.inner.pending_threads().await
+    }
+    async fn enqueue(
         &self,
         thread: TurnThread,
         turn: TurnSubmission<TurnWork>,
-        (): (),
     ) -> Result<exoharness::turn_coordinator::AcceptedTurn> {
-        let accepted = self.inner.enqueue_turn(thread, turn, ()).await?;
+        let accepted = self.inner.enqueue(thread, turn).await?;
         if let QueueTestFault::HoldAcceptance {
             count,
             published,
@@ -753,37 +746,6 @@ impl TurnCoordinator<QueuedTurn<TurnWork>, TurnSubmission<TurnWork>> for TestCoo
         }
         Ok(accepted)
     }
-    async fn peek_turn(&self, lease: &TurnLease) -> Result<Option<QueuedTurn<TurnWork>>> {
-        self.inner.peek_turn(lease).await
-    }
-    async fn complete_turn(
-        &self,
-        lease: &TurnLease,
-        turn: exoharness::TurnId,
-    ) -> Result<Option<QueuedTurn<TurnWork>>> {
-        self.inner.complete_turn(lease, turn).await
-    }
-    async fn cancel_turn(
-        &self,
-        thread: TurnThread,
-        turn: exoharness::TurnId,
-        user_id: &str,
-        is_thread_owner: bool,
-    ) -> Result<TurnControlOutcome> {
-        self.inner
-            .cancel_turn(thread, turn, user_id, is_thread_owner)
-            .await
-    }
-    async fn turn_cancelled(&self, lease: &TurnLease, turn: exoharness::TurnId) -> Result<bool> {
-        self.inner.turn_cancelled(lease, turn).await
-    }
-}
-
-#[async_trait]
-impl TurnQueue<TurnWork> for TestCoordinator {
-    async fn pending_threads(&self) -> Result<Vec<TurnThread>> {
-        self.inner.pending_threads().await
-    }
     async fn claim(&self, thread: TurnThread) -> Result<Option<TurnLease>> {
         self.inner.claim(thread).await
     }
@@ -793,6 +755,9 @@ impl TurnQueue<TurnWork> for TestCoordinator {
         turn: exoharness::TurnId,
     ) -> Result<Option<QueuedTurn<TurnWork>>> {
         self.inner.get(thread, turn).await
+    }
+    async fn peek(&self, lease: &TurnLease) -> Result<Option<QueuedTurn<TurnWork>>> {
+        self.inner.peek(lease).await
     }
     async fn start(
         &self,
@@ -835,6 +800,13 @@ impl TurnQueue<TurnWork> for TestCoordinator {
         control: TurnControl,
     ) -> Result<TurnControlOutcome> {
         self.inner.control(thread, turn, authority, control).await
+    }
+    async fn acknowledge(
+        &self,
+        lease: &TurnLease,
+        turn: exoharness::TurnId,
+    ) -> Result<Option<QueuedTurn<TurnWork>>> {
+        self.inner.acknowledge(lease, turn).await
     }
     async fn release_if_idle(&self, lease: &TurnLease) -> Result<bool> {
         self.inner.release_if_idle(lease).await

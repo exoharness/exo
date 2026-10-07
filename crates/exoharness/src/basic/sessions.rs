@@ -9,7 +9,7 @@ use crate::{AgentId, ResourceScope, SandboxId};
 
 /// Process ownership is scoped to the sandbox's thread (or agent scope).
 /// The OS releases each lease on a crash; a new owner then recovers its VMs.
-// TurnCoordinator owns execution ordering. These leases also protect thread
+// TurnQueue owns execution ordering. These leases also protect thread
 // mutations and retained VMs between turns, so their lifetime stays separate.
 pub(super) struct LocalSessions {
     root: PathBuf,

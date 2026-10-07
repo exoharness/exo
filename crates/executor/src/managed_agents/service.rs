@@ -136,10 +136,7 @@ pub async fn prepare_turn(
     }
     let harness = harness_name(&config).to_owned();
     Ok(PreparedTurn {
-        options: crate::TurnOptions {
-            idempotency_key: body.idempotency_key,
-            attention: body.attention,
-        },
+        options: body.options,
         config,
         harness,
         request: SendRequest {

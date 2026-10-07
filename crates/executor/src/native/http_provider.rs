@@ -68,7 +68,7 @@ impl HttpProvider {
         }
         watchers.spawn(async move {
             let observed = async {
-                if body.idempotency_key.is_some() {
+                if body.options.idempotency_key.is_some() {
                     let terminal = client
                         .events(
                             agent_id,
@@ -227,8 +227,7 @@ impl Harness<ProviderTurn> for HttpProvider {
                         work.agent.record().id,
                         work.thread.record().id,
                         SubmitTurnBody {
-                            idempotency_key: work.options.idempotency_key,
-                            attention: work.options.attention,
+                            options: work.options,
                             input: Some(OneOrMany::Many(work.request.input)),
                             session_id: work.request.session_id,
                             model: self.transport.model.clone(),
