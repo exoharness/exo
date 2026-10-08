@@ -78,6 +78,7 @@ pub async fn create_thread(
 }
 
 pub struct PreparedTurn {
+    pub options: crate::TurnOptions,
     pub request: SendRequest,
     pub config: AgentConfig,
     pub harness: String,
@@ -89,9 +90,7 @@ pub async fn prepare_turn(
     thread: &dyn ThreadHandle,
     body: SubmitTurnBody,
 ) -> Result<PreparedTurn> {
-    if body.idempotency_key.is_some()
-        || body.attention != TurnAttention::Wake
-        || body.parent.is_some()
+    if body.parent.is_some()
         || body.endpoint_name.is_some()
         || body.reasoning_effort.is_some()
         || body.auto_approve_tools.is_some()
@@ -123,6 +122,7 @@ pub async fn prepare_turn(
     }
     let harness = harness_name(&config).to_owned();
     Ok(PreparedTurn {
+        options: body.options,
         config,
         harness,
         request: SendRequest {
@@ -547,7 +547,6 @@ pub async fn list_threads(
         .list_threads(exoharness::ListThreadsRequest {
             cursor: query.cursor,
             limit: Some(query.limit.unwrap_or(100)),
-            ..Default::default()
         })
         .await
         .map_err(bad_request)?;
@@ -644,7 +643,11 @@ pub async fn turn_status(service: &Service<'_>, path: &TurnPath) -> Result<TurnS
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
     let active = service
         .runtime
-        .is_turn_active(thread.as_ref(), path.turn_id)
+        .is_turn_active(crate::harness::HarnessTurnKey::new(
+            path.agent_id,
+            thread.record().id,
+            path.turn_id,
+        ))
         .await
         .map_err(internal_error)?;
     Ok(TurnStatusResult { active })
@@ -707,6 +710,7 @@ pub async fn submit_turn(
             prepared.request,
             streaming,
             Some(prepared.config),
+            prepared.options,
         )
         .await?;
     Ok((
@@ -722,12 +726,15 @@ pub async fn submit_turn(
 
 pub async fn cancel_turn(
     runtime: &Runtime,
+    agent_id: AgentId,
     thread_id: ThreadId,
     turn_id: TurnId,
 ) -> Result<CancelTurnResult> {
     Ok(CancelTurnResult {
         canceled_active_turn: runtime
-            .cancel_turn(crate::harness::HarnessTurnKey::new(thread_id, turn_id))
+            .cancel_turn(crate::harness::HarnessTurnKey::new(
+                agent_id, thread_id, turn_id,
+            ))
             .await?,
         finished_event_id: None,
     })

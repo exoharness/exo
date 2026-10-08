@@ -79,10 +79,6 @@ impl AgentBackend for LocalProvider {
         created: bool,
         options: &managed::ThreadOptions,
     ) -> Result<managed::ThreadInfo> {
-        let _guard =
-            crate::conversation_lock::conversation_send_lock(&thread.record().id.to_string())
-                .lock_owned()
-                .await;
         let mut agent_config = crate::load_agent_config(agent).await?;
         let current_model = crate::get_conversation_model_override(thread).await?;
         let preferred = current_model

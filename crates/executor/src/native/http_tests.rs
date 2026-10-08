@@ -427,7 +427,11 @@ async fn saved_http_turn_survives_disconnect_and_replays_completion() -> Result<
         .client
         .watch(f.agent_id, thread.id, &Default::default())
         .await?;
-    let body = SubmitTurnBody::<()> {
+    let body: SubmitTurnBody = SubmitTurnBody {
+        options: crate::TurnOptions {
+            idempotency_key: Some("saved-turn".into()),
+            ..Default::default()
+        },
         input: Some(OneOrMany::One(crate::harness_helpers::user_message(
             "hello",
         ))),
@@ -484,6 +488,15 @@ async fn saved_http_turn_survives_disconnect_and_replays_completion() -> Result<
             .iter()
             .all(|e| !matches!(e.data, EventData::LinguaStreamChunk { .. }))
     );
+    let provider = HttpProvider::new(f.client.clone());
+    let (retried, mut retry_stream) = provider.send_stream(f.agent_id, thread.id, body).await?;
+    assert_eq!(retried.id, receipt.turn.id);
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), retry_stream.next()).await?,
+        Some(Ok(crate::ExecutionStreamEvent::Completed(_)))
+    ));
+    assert!(retry_stream.next().await.is_none());
+    crate::harness::Harness::shutdown(&provider).await?;
     let second = f
         .client
         .submit_turn(f.agent_id, thread.id, &SubmitTurnBody::<()>::default())
@@ -542,7 +555,14 @@ async fn local_and_http_providers_use_the_same_runtime_contract() -> Result<()> 
             session_id: None,
         };
         let (turn, mut stream) = runtime
-            .start_turn(agent.clone(), thread.clone(), request.clone(), true, None)
+            .start_turn(
+                agent.clone(),
+                thread.clone(),
+                request.clone(),
+                true,
+                None,
+                Default::default(),
+            )
             .await?;
         f.release.add_permits(1);
         let completed = tokio::time::timeout(Duration::from_secs(5), async {
@@ -577,10 +597,17 @@ async fn local_and_http_providers_use_the_same_runtime_contract() -> Result<()> 
         );
 
         let (turn, mut stream) = runtime
-            .start_turn(agent, thread.clone(), request, true, None)
+            .start_turn(
+                agent,
+                thread.clone(),
+                request,
+                true,
+                None,
+                Default::default(),
+            )
             .await?;
         runtime
-            .cancel(HarnessTurnKey::new(thread.record().id, turn.id))
+            .cancel_turn(HarnessTurnKey::new(f.agent_id, thread.record().id, turn.id))
             .await?;
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(event) = stream.next().await {
@@ -665,6 +692,7 @@ async fn managed_agents_created_locally_resume_over_http() -> Result<()> {
                 },
                 true,
                 None,
+                Default::default(),
             )
             .await?;
         f.release.add_permits(1);
@@ -723,6 +751,7 @@ async fn http_runtime_preserves_server_failure_and_turn_id() -> Result<()> {
             },
             true,
             None,
+            Default::default(),
         )
         .await?;
     f.release.add_permits(1);
@@ -821,6 +850,7 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                     },
                     true,
                     None,
+                    Default::default(),
                 )
                 .await?;
             session = Some(turn.session_id);
@@ -839,7 +869,7 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                 if remote {
                     drop(stream);
                     let (_, resumed) = runtime
-                        .reconnect_turn(thread.as_ref())
+                        .reconnect_turn(agent.record().id, thread.as_ref())
                         .await?
                         .context("saved active turn")?;
                     stream = resumed;
@@ -877,7 +907,7 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                 );
                 if action == "cancel" {
                     runtime
-                        .cancel(HarnessTurnKey::new(thread.record().id, turn.id))
+                        .cancel_turn(HarnessTurnKey::new(f.agent_id, thread.record().id, turn.id))
                         .await?;
                     assert!(
                         runtime
@@ -916,7 +946,12 @@ async fn approval_decisions_cancellation_sessions_and_reconnect() -> Result<()> 
                 f.release.available_permits(),
                 permits - usize::from(matches!(action, "allow_session" | "already_allowed"))
             );
-            assert!(runtime.reconnect_turn(thread.as_ref()).await?.is_none());
+            assert!(
+                runtime
+                    .reconnect_turn(agent.record().id, thread.as_ref())
+                    .await?
+                    .is_none()
+            );
         }
         if remote {
             runtime.shutdown().await?;
@@ -965,6 +1000,7 @@ async fn saved_policy_changes_apply_to_existing_local_and_http_threads() -> Resu
                     },
                     true,
                     None,
+                    Default::default(),
                 )
                 .await?;
             let mut saw_approval = false;
@@ -1029,9 +1065,7 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
             .context("agent")?;
         for pending in [false, true] {
             let local_thread = local_agent.new_thread(Default::default()).await?;
-            let orphan = local_thread
-                .begin_turn(exoharness::BeginTurnRequest::default())
-                .await?;
+            let orphan = exoharness::test_support::begin_test_turn(local_thread.as_ref()).await?;
             if pending {
                 orphan
                     .add_events(vec![EventData::Custom {
@@ -1056,7 +1090,7 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
             assert!(
                 tokio::time::timeout(
                     Duration::from_secs(5),
-                    runtime.reconnect_turn(thread.as_ref())
+                    runtime.reconnect_turn(agent.record().id, thread.as_ref())
                 )
                 .await??
                 .is_none()
@@ -1073,14 +1107,22 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
                     },
                     true,
                     None,
+                    Default::default(),
                 )
                 .await?;
-            let (reconnected, mut events) = tokio::time::timeout(
-                Duration::from_secs(5),
-                runtime.reconnect_turn(thread.as_ref()),
-            )
-            .await??
-            .context("live turn")?;
+            // Acceptance precedes execution; reconnect follows the executing turn.
+            let (reconnected, mut events) = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(reconnected) = runtime
+                        .reconnect_turn(agent.record().id, thread.as_ref())
+                        .await?
+                    {
+                        return Ok::<_, anyhow::Error>(reconnected);
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await??;
             assert_eq!(reconnected.id, turn.id);
             f.release.add_permits(1);
             tokio::time::timeout(Duration::from_secs(5), async {
@@ -1095,7 +1137,12 @@ async fn reconnect_skips_orphaned_turns_and_follows_live_turns() -> Result<()> {
             })
             .await??;
             drop(original);
-            assert!(runtime.reconnect_turn(thread.as_ref()).await?.is_none());
+            assert!(
+                runtime
+                    .reconnect_turn(agent.record().id, thread.as_ref())
+                    .await?
+                    .is_none()
+            );
         }
     }
     remote.shutdown().await?;

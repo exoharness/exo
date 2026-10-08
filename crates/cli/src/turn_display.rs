@@ -429,7 +429,7 @@ mod tests {
             ..Default::default()
         };
         for usage_first in [false, true] {
-            let turn = thread.begin_turn(Default::default()).await?;
+            let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
             let mut events = vec![text.clone(); 101];
             events.insert(
                 if usage_first { 0 } else { 101 },
@@ -461,7 +461,7 @@ mod tests {
             tracker.refresh(thread.as_ref(), None).await?;
             assert_eq!(tracker.total.tokens(), Some(total));
         }
-        let turn = thread.begin_turn(Default::default()).await?;
+        let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
         let mut attached = text.clone();
         if let EventData::Messages { usage: record, .. } = &mut attached {
             *record = Some(Box::new(usage));

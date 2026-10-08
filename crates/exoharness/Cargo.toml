@@ -121,7 +121,7 @@ tokio-rustls = { version = "0.26.4", default-features = false, features = [
   "ring",
   "tls12",
 ], optional = true }
-tokio-stream = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true, features = ["sync"] }
 tokio-tungstenite = { version = "0.26.2", default-features = false, features = [
   "connect",
   "rustls-tls-webpki-roots",

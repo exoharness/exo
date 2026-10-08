@@ -260,7 +260,6 @@ pub async fn list_threads(agent: &dyn AgentHandle) -> Result<Vec<Arc<dyn ThreadH
             .list_threads(ListThreadsRequest {
                 cursor,
                 limit: None,
-                ..Default::default()
             })
             .await?;
         threads.extend(page.threads);

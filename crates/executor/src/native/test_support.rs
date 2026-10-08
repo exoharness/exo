@@ -41,3 +41,51 @@ pub(crate) async fn create_test_credential(exoharness: &dyn exoharness::ExoHarne
         .await
         .expect("test secret should register");
 }
+
+/// Seed a crash after queue admission using the same ordering as the runtime.
+pub(crate) async fn begin_queued_turn(
+    coordinator: &dyn exoharness::turn_coordinator::TurnQueue<crate::TurnWork>,
+    agent_id: exoharness::AgentId,
+    thread: &dyn exoharness::ThreadHandle,
+    work: &crate::TurnWork,
+    input: Vec<lingua::Message>,
+    initial_events: Vec<exoharness::EventData>,
+) -> exoharness::Result<std::sync::Arc<dyn exoharness::TurnHandle>> {
+    use exoharness::turn_coordinator::{TurnSubmission, TurnThread};
+    let scope = TurnThread {
+        agent_id,
+        thread_id: thread.record().id,
+    };
+    let turn = exoharness::TurnRecord {
+        id: exoharness::Uuid7::now(),
+        session_id: work
+            .request
+            .session_id
+            .unwrap_or_else(exoharness::Uuid7::now),
+    };
+    coordinator
+        .enqueue(
+            scope,
+            TurnSubmission {
+                turn: turn.clone(),
+                work: work.clone(),
+                principal: thread.caller().map(|caller| caller.principal.clone()),
+                options: Default::default(),
+            },
+        )
+        .await?;
+    let lease = coordinator
+        .claim(scope)
+        .await?
+        .expect("fixture owns the queue");
+    coordinator.start(&lease, turn.id).await?;
+    drop(lease);
+    thread
+        .begin_turn(exoharness::BeginTurnRequest {
+            turn,
+            new_session: work.request.session_id.is_none(),
+            input,
+            initial_events,
+        })
+        .await
+}

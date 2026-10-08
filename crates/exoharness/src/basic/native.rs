@@ -843,6 +843,7 @@ impl BasicExoHarness {
             sessions: None,
             caller: None,
             inner: Arc::new(BasicExoHarnessInner {
+                turn_queue_locks: Arc::default(),
                 access_policy: std::sync::OnceLock::new(),
                 vaults,
                 storage,

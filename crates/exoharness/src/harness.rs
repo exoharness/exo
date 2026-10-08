@@ -5,19 +5,33 @@ use async_trait::async_trait;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HarnessTurnKey {
+    pub agent_id: crate::AgentId,
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
 }
 
 impl HarnessTurnKey {
-    pub fn new(thread_id: ThreadId, turn_id: TurnId) -> Self {
-        Self { thread_id, turn_id }
+    pub fn new(agent_id: crate::AgentId, thread_id: ThreadId, turn_id: TurnId) -> Self {
+        Self {
+            agent_id,
+            thread_id,
+            turn_id,
+        }
     }
 }
 
 pub enum HarnessCommand<T> {
     StartTurn(T),
-    CancelTurn { key: HarnessTurnKey },
+    CancelTurn {
+        key: HarnessTurnKey,
+    },
+    SuspendTurn {
+        key: HarnessTurnKey,
+    },
+    /// Clear a pending suspension while execution is still running.
+    ResumeTurn {
+        key: HarnessTurnKey,
+    },
 }
 
 #[derive(Debug)]
@@ -26,6 +40,7 @@ pub enum HarnessTurnOutcome {
     Failed(Error),
     Cancelled,
     Interrupted,
+    Suspended,
 }
 
 pub enum HarnessEvent {

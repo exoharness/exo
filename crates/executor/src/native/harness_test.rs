@@ -7,8 +7,8 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use exoharness::{
-    AgentHandle, BasicExoHarness, BeginTurnRequest, ConversationHandle, EventData, ExoHarness,
-    NewAgentRequest, NewThreadRequest, TurnHandle,
+    AgentHandle, BasicExoHarness, ConversationHandle, EventData, ExoHarness, NewAgentRequest,
+    NewThreadRequest, TurnHandle,
 };
 use tempfile::TempDir;
 use tokio::sync::{Notify, Semaphore, mpsc};
@@ -204,11 +204,9 @@ async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Resul
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
         .await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     let key = HarnessTurnKey {
+        agent_id: fixture.agent.record().id,
         thread_id: fixture.thread.record().id,
         turn_id: turn.record().id,
     };
@@ -242,10 +240,7 @@ async fn submission_is_nonblocking_and_cancellation_waits_for_cleanup() -> Resul
         Some(HarnessEvent::ExecutionStopped { .. })
     ));
     harness.shutdown().await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     assert!(
         harness
             .submit(HarnessCommand::StartTurn(fixture.work(turn, false)))
@@ -270,10 +265,7 @@ async fn failed_shutdown_cleanup_keeps_turn_interrupted() -> Result<()> {
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
         .await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     harness
         .submit(HarnessCommand::StartTurn(fixture.work(turn, false)))
         .await?;
@@ -308,10 +300,7 @@ async fn panic_reports_failure_and_releases_execution() -> Result<()> {
     harness
         .init(HarnessEventSink::new(Arc::new(Recorder(tx))))
         .await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     harness
         .submit(HarnessCommand::StartTurn(fixture.work(turn, true)))
         .await?;
@@ -331,36 +320,47 @@ async fn panic_reports_failure_and_releases_execution() -> Result<()> {
 }
 
 #[tokio::test]
-async fn dropping_stream_holds_thread_lock_until_cancelled_execution_stops() -> Result<()> {
+async fn queued_turn_waits_for_cancelled_execution_cleanup() -> Result<()> {
     let fixture = Fixture::new().await?;
     let executor = ControlledExecutor::default();
     let runtime = Runtime::new(
         crate::LocalProvider::new(Arc::clone(&fixture.storage), Arc::new(executor.clone())),
         None,
     );
-    let first = runtime
+    let (first_turn, first) = runtime
+        .start_turn(
+            Arc::clone(&fixture.agent),
+            Arc::clone(&fixture.thread),
+            fixture.request(),
+            true,
+            None,
+            Default::default(),
+        )
+        .await?;
+    executor.started.notified().await;
+    drop(first);
+    runtime
+        .cancel_turn(HarnessTurnKey::new(
+            fixture.agent.record().id,
+            fixture.thread.record().id,
+            first_turn.id,
+        ))
+        .await?;
+    executor.cancelling.notified().await;
+    let mut second = runtime
         .send_stream(
             Arc::clone(&fixture.agent),
             Arc::clone(&fixture.thread),
             fixture.request(),
         )
         .await?;
-    executor.started.notified().await;
-    drop(first);
-    executor.cancelling.notified().await;
-    let second = runtime.send_stream(
-        Arc::clone(&fixture.agent),
-        Arc::clone(&fixture.thread),
-        fixture.request(),
-    );
-    tokio::pin!(second);
     assert!(
-        tokio::time::timeout(Duration::from_millis(20), &mut second)
+        tokio::time::timeout(Duration::from_millis(20), executor.started.notified())
             .await
             .is_err()
     );
     executor.cleanup.add_permits(1);
-    let mut second = tokio::time::timeout(Duration::from_secs(1), second).await??;
+    tokio::time::timeout(Duration::from_secs(1), executor.started.notified()).await?;
     executor.release.add_permits(1);
     assert!(matches!(
         second.next().await.transpose()?,
@@ -374,16 +374,19 @@ async fn dropping_stream_holds_thread_lock_until_cancelled_execution_stops() -> 
 #[tokio::test]
 async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() -> Result<()> {
     let fixture = Fixture::new().await?;
-    let turn = fixture
-        .thread
-        .begin_turn(BeginTurnRequest::default())
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
     let key = HarnessTurnKey {
+        agent_id: fixture.agent.record().id,
         thread_id: fixture.thread.record().id,
         turn_id: turn.record().id,
     };
     let events = HarnessEvents::default();
-    let mut completion = events.register(Arc::clone(&fixture.thread), turn, None)?;
+    let mut completion = events.register(
+        fixture.agent.record().id,
+        Arc::clone(&fixture.thread),
+        turn,
+        None,
+    )?;
     let ack = events
         .emit(HarnessEvent::TurnEvents {
             key,
@@ -450,11 +453,20 @@ async fn event_sink_acknowledges_persistence_and_requires_execution_stopped() ->
 #[tokio::test]
 async fn harness_turn_publishes_canonical_tools_after_persistence() -> Result<()> {
     let fixture = Fixture::new().await?;
-    let turn = fixture.thread.begin_turn(Default::default()).await?;
-    let key = HarnessTurnKey::new(fixture.thread.record().id, turn.record().id);
+    let turn = exoharness::test_support::begin_test_turn(fixture.thread.as_ref()).await?;
+    let key = HarnessTurnKey::new(
+        fixture.agent.record().id,
+        fixture.thread.record().id,
+        turn.record().id,
+    );
     let events = Arc::new(HarnessEvents::default());
     let (stream, mut receiver) = mpsc::unbounded_channel();
-    let completion = events.register(fixture.thread.clone(), turn.clone(), Some(stream))?;
+    let completion = events.register(
+        fixture.agent.record().id,
+        fixture.thread.clone(),
+        turn.clone(),
+        Some(stream),
+    )?;
     let turn = HarnessTurn::new(turn, HarnessEventSink::new(events.clone()), key);
     let result = turn
         .add_events(vec![

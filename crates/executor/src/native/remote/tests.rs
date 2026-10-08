@@ -656,13 +656,7 @@ async fn multiplayer_shares_history_but_keeps_vaults_models_and_approvals_privat
             .await
             .is_err()
     );
-    let turn = thread
-        .begin_turn(exoharness::BeginTurnRequest {
-            session_id: None,
-            input: vec![],
-            ..Default::default()
-        })
-        .await?;
+    let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
     assert_eq!(
         crate::permissions::turn_caller(bob_thread.as_ref(), turn.record().id).await?,
         Some(aid)
@@ -903,7 +897,7 @@ async fn event_stream_survives_token_rotation_but_closes_on_revocation() -> Resu
         .error_for_status()?
         .json()
         .await?;
-    let turn = thread.begin_turn(Default::default()).await?;
+    let turn = exoharness::test_support::begin_test_turn(thread.as_ref()).await?;
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         loop {
             let event = events

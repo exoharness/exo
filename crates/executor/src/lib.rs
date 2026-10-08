@@ -4,7 +4,6 @@ mod native;
 pub use native::*;
 
 mod basic;
-mod conversation_lock;
 pub mod conversation_sandbox;
 pub mod execution_tracing;
 mod executor_types;
@@ -24,7 +23,10 @@ mod model_events;
 mod model_execution;
 pub mod permissions;
 mod provider;
+mod turn_queue;
 pub use exoharness::runtime_host;
+pub use exoharness::turn_coordinator::TurnOptions;
+pub use harness_executor::TurnWork;
 pub mod sandbox_policy;
 mod shared;
 

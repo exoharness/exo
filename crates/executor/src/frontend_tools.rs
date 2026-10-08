@@ -9,7 +9,7 @@ use exoharness::{
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentConfig, ToolDefinition, harness_executor::RecoverableTurn};
+use crate::{AgentConfig, ToolDefinition, TurnWork};
 
 pub(crate) const FRONTEND_TOOL_RESPONSE: &str = "agent_runtime.frontend_tool_response";
 
@@ -214,7 +214,7 @@ pub(crate) async fn respond(
                 event_type,
                 payload,
             } if event_type == crate::harness_executor::RUNTIME_TURN_WORK => {
-                work = Some(serde_json::from_value::<RecoverableTurn>(payload.clone())?);
+                work = Some(serde_json::from_value::<TurnWork>(payload.clone())?);
             }
             EventData::ToolRequested {
                 tool_call_id,
@@ -309,7 +309,8 @@ mod tests {
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
                 defer_loading: false,
             });
-            let work = RecoverableTurn {
+            let work = TurnWork {
+                streaming: false,
                 agent_config: config.clone(),
                 thread_config: ConversationConfig::default(),
                 request: SendRequest {
@@ -324,6 +325,9 @@ mod tests {
             };
             let turn = thread
                 .begin_turn(BeginTurnRequest {
+                    turn: exoharness::test_support::new_test_turn_record(),
+                    new_session: true,
+                    input: Vec::new(),
                     initial_events: vec![
                         work.event()?,
                         EventData::Custom {
@@ -338,7 +342,6 @@ mod tests {
                             request: request.clone(),
                         },
                     ],
-                    ..Default::default()
                 })
                 .await?;
             Ok(Self {
