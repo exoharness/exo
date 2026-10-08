@@ -129,6 +129,17 @@ impl AgentBackend for HttpProvider {
 
 #[async_trait]
 impl Provider for HttpProvider {
+    async fn preview_endpoint(
+        &self,
+        agent: &dyn exoharness::AgentHandle,
+        thread: &dyn exoharness::ThreadHandle,
+    ) -> Result<Option<PreviewEndpoint>> {
+        self.transport
+            .client
+            .preview_endpoint(agent.record().id, thread.record().id)
+            .await
+    }
+
     fn runtime_host(&self) -> Arc<dyn crate::runtime_host::RuntimeHost> {
         Arc::new(crate::TokioRuntimeHost)
     }

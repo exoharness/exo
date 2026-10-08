@@ -225,6 +225,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
                 web::get().to(get_thread),
             )
             .route(
+                "/agent/{agent_id}/thread/{thread_id}/previews",
+                web::get().to(preview_endpoint),
+            )
+            .route(
                 "/agent/{agent_id}/thread/{thread_id}",
                 web::delete().to(delete_thread),
             )
@@ -576,6 +580,26 @@ async fn get_thread(
         .await
         .map(web::Json)
         .map_err(request_error)
+}
+
+async fn preview_endpoint(
+    service: Service,
+    path: web::Path<ThreadPath>,
+) -> Result<web::Json<Option<PreviewEndpoint>>, Error> {
+    let agent = service.agent(path.agent_id).await?;
+    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
+    let endpoint = service.runtime.active_preview_endpoint();
+    if endpoint.is_some() {
+        let previews = service
+            .runtime
+            .register_previews(agent.as_ref(), thread)
+            .await
+            .map_err(ErrorBadRequest)?;
+        if previews.is_none() {
+            return Ok(web::Json(None));
+        }
+    }
+    Ok(web::Json(endpoint))
 }
 
 async fn list_threads(

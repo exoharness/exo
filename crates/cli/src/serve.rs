@@ -29,6 +29,9 @@ pub struct ServeArgs {
     /// Address for the HTTP server.
     #[arg(long, default_value = "127.0.0.1:4766")]
     bind: SocketAddr,
+    /// DNS suffix for browser previews; resolve it to this host or an SSH tunnel.
+    #[arg(long, default_value = "localhost")]
+    preview_domain: String,
     /// Deployment configuration for adapters named in agent specs.
     #[arg(long)]
     adapters_file: Option<PathBuf>,
@@ -91,11 +94,14 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         service = service.with_auth(auth.clone(), args.multiplayer);
     }
     let mut store = executor::AdapterStore::new(root.join("adapters"));
-    if let Some(reference) = args.agent {
+    let only_agent = if let Some(reference) = args.agent {
         let agent = crate::must_get_agent(&runtime, &reference).await?;
         service = service.for_agent(agent.record().id);
         store = store.for_agent(agent.record().id.to_string());
-    }
+        Some(agent.record().id)
+    } else {
+        None
+    };
     let definitions = args
         .adapters_file
         .as_deref()
@@ -134,6 +140,13 @@ pub async fn run(runtime: Arc<Runtime>, root: &Path, args: ServeArgs) -> Result<
         service.shutdown_callers().await?;
         return result;
     }
+    let previews = runtime
+        .start_preview_server(root, &args.preview_domain, only_agent)
+        .await?;
+    println!(
+        "preview listener: 127.0.0.1:{} (domain: {})",
+        previews.port, previews.domain
+    );
     let listener = TcpListener::bind(args.bind)?;
     println!(
         "listening: http://{}{}",
