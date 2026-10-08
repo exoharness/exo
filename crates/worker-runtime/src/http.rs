@@ -190,6 +190,11 @@ async fn route(
             };
             match (method, tail) {
                 ("GET", []) => return json(api::get_thread(&service, &thread).await?),
+                ("GET", ["previews"]) => {
+                    api::get_thread(&service, &thread).await?;
+                    // Workers do not host the native browser preview listener.
+                    return json(None::<exo_managed_agents::http::protocol::PreviewEndpoint>);
+                }
                 ("DELETE", []) => return json(api::delete_thread(&service, &thread).await?),
                 ("PUT", ["environment"]) => {
                     return json(

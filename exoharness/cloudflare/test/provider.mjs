@@ -508,6 +508,13 @@ test("Access forwards HTTP bodies and SSE over the trusted Durable Object bindin
 
 test("managed basic turn calls the model, executes one tool and persists canonical events", async () => {
   const { agent, thread, path } = await create();
+  assert.equal(await api(`${path}/previews`), null);
+  await api(
+    `agent/${agent.id}/thread/${crypto.randomUUID()}/previews`,
+    "GET",
+    undefined,
+    404,
+  );
   const submitted = await sendTurn(path);
   const events = await waitTurn(path);
   assert(
