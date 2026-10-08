@@ -110,6 +110,44 @@ jobs:
       - run: cargo check --locked -p exoharness --no-default-features --features store --target wasm32-unknown-unknown
       - run: cargo check --locked -p executor --no-default-features --target wasm32-unknown-unknown
 
+  cloudflare-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.15.0
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            exoharness/cloudflare/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          shared-key: cloudflare-worker
+          cache-directories: exoharness/cloudflare/.local/tools
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir exoharness/cloudflare install --frozen-lockfile
+      - name: Install matching wasm-bindgen CLI
+        run: |
+          version=$(python3 -c 'import tomllib; print(next(p["version"] for p in tomllib.load(open("Cargo.lock", "rb"))["package"] if p["name"] == "wasm-bindgen"))')
+          cargo install wasm-bindgen-cli --version "$version" --locked \
+            --root exoharness/cloudflare/.local/tools --target-dir target/wasm-bindgen-cli
+      - name: Build wasm bindings
+        run: pnpm --dir exoharness/cloudflare run build:runtime
+      - name: Typecheck Worker
+        run: pnpm --dir exoharness/cloudflare typecheck
+      - name: Build and test Worker, including Rust contracts
+        run: pnpm --dir exoharness/cloudflare test
+
   # Both supported VM backends run the same real CLI + mocked model test.
   # Hosted macOS ARM runners lack nested virtualization; macOS still runs the
   # regular Rust jobs above. Fail explicitly if Linux KVM is unavailable.

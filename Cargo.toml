@@ -8,6 +8,7 @@ members = [
   "crates/firecracker-guest",
   "crates/executor",
   "crates/mcp",
+  "crates/worker-runtime",
   "exo/scheduler-runner",
 ]
 resolver = "2"

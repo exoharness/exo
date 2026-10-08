@@ -31,8 +31,8 @@ use crate::{
     LocalProvider, Runtime,
     harness_executor::{ExecutorStreamMode, HarnessExecutor, RecoveryRuntimeResolver},
     harness_executor::{RUNTIME_TURN_COMPLETED, TurnWork},
-    harness_tool::ensure_shell_sandbox,
     http_service::{RuntimeHttpService, server},
+    shell_tool::ensure_shell_sandbox,
 };
 
 struct RecoveryPolicy(Uuid7);

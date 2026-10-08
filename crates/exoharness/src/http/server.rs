@@ -87,20 +87,10 @@ async fn handle_http_request(
             "exoharness request"
         );
     }
-    let response = match state.server.handle_request(request).await {
-        Ok(response) => ServerMessage::Response {
-            id,
-            ok: true,
-            response: Some(response),
-            error: None,
-        },
-        Err(error) => ServerMessage::Response {
-            id,
-            ok: false,
-            response: None,
-            error: Some(error.to_string()),
-        },
-    };
+    let response = state
+        .server
+        .handle_message(ClientMessage::Request { id, request })
+        .await;
     if state.options.verbosity > 0 {
         log_http_response(&response, start);
     }

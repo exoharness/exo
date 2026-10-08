@@ -1,4 +1,4 @@
-use std::{net::TcpListener, ops::Bound, sync::Arc};
+use std::{net::TcpListener, sync::Arc};
 
 use crate::managed_agents::service::{AgentPath, ThreadPath, TurnPath, VaultPath};
 use actix_web::{
@@ -15,13 +15,11 @@ use actix_web::{
 };
 use anyhow::{Context, Result, bail};
 use exo_managed_agents::http::{RUNTIME_PATH, protocol::*, sse};
-use exoharness::{
-    AgentHandle, AgentId, Event, EventData, EventStream, ThreadHandle, ThreadId, Uuid7,
-};
+use exoharness::{AgentHandle, AgentId, Event, ThreadHandle, ThreadId};
 use futures::StreamExt;
 use tokio::sync::{broadcast, oneshot};
 
-use crate::{ExecutionStreamEvent, Runtime};
+use crate::Runtime;
 
 // Thread creation can include a large environment definition. Bytes buffers the request.
 const OPTIONAL_JSON_BODY_LIMIT: usize = 256 * 1024 * 1024;
@@ -715,7 +713,7 @@ async fn submit_turn(
             true,
         )
         .await;
-        let (result, mut events) = match admitted {
+        let (result, events) = match admitted {
             Ok(admitted) => admitted,
             Err(error) => {
                 if receipt.send(Err(error)).is_err() {
@@ -728,25 +726,13 @@ async fn submit_turn(
         if receipt.send(Ok(result)).is_err() {
             tracing::debug!(turn_id = %turn.id, "turn requester disconnected after admission");
         }
-        while let Some(event) = events.next().await {
-            match event {
-                Ok(ExecutionStreamEvent::Chunk(chunk)) => {
-                    let event = Event {
-                        id: Uuid7::now(),
-                        thread_id: thread.record().id,
-                        session_id: Some(turn.session_id),
-                        turn_id: Some(turn.id),
-                        created_at: chrono::Utc::now(),
-                        data: EventData::LinguaStreamChunk { chunk },
-                    };
-                    if progress.send(event).is_err() {
-                        tracing::trace!("no runtime progress subscribers");
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, turn_id = %turn.id, "runtime turn failed"),
-            }
-        }
+        crate::managed_agents::service::forward_progress(
+            events,
+            thread.record().id,
+            turn,
+            progress,
+        )
+        .await;
     });
     let result = received
         .await
@@ -831,19 +817,13 @@ async fn watch(
 ) -> Result<HttpResponse, Error> {
     let agent = service.agent(path.agent_id).await?;
     let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let receiver = service.progress.subscribe();
-    let thread_id = path.thread_id;
-    // Unbounded is live-only; the nil cursor includes all saved events.
-    let durable = thread
-        .watch_events(Bound::Excluded(
-            query.after.unwrap_or_else(|| Uuid7(Default::default())),
-        ))
-        .await
-        .map_err(ErrorBadRequest)?;
-    let mut stream: EventStream = Box::pin(futures::stream::select(
-        durable,
-        progress_stream(receiver, thread_id),
-    ));
+    let mut stream = crate::managed_agents::service::watch_events(
+        thread.as_ref(),
+        service.progress.subscribe(),
+        query.after,
+    )
+    .await
+    .map_err(ErrorBadRequest)?;
     if let Some(auth) = service.auth.clone() {
         let session = service
             .session
@@ -876,73 +856,9 @@ async fn watch(
         ))
 }
 
-fn progress_stream(receiver: broadcast::Receiver<Event>, thread_id: ThreadId) -> EventStream {
-    Box::pin(futures::stream::unfold(
-        receiver,
-        move |mut receiver| async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) if event.thread_id == thread_id => {
-                        return Some((Ok(event), receiver));
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                }
-            }
-        },
-    ))
-}
-
 fn request_error(error: anyhow::Error) -> Error {
     let status =
         actix_web::http::StatusCode::from_u16(crate::managed_agents::service::error_status(&error))
             .expect("valid request status");
     actix_web::error::InternalError::new(error, status).into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Context;
-
-    #[tokio::test]
-    async fn lagged_progress_skips_lost_chunks_and_keeps_the_stream_open() -> Result<()> {
-        let thread_id = Uuid7::now();
-        let event = |thread_id| Event {
-            id: Uuid7::now(),
-            thread_id,
-            session_id: None,
-            turn_id: None,
-            created_at: chrono::Utc::now(),
-            data: EventData::LinguaStreamChunk {
-                chunk: lingua::UniversalStreamChunk::new(
-                    Some("chunk".into()),
-                    None,
-                    vec![],
-                    None,
-                    None,
-                ),
-            },
-        };
-        let (sender, receiver) = broadcast::channel(2);
-        let mut progress = progress_stream(receiver, thread_id);
-        sender.send(event(thread_id))?;
-        sender.send(event(Uuid7::now()))?;
-        let retained = event(thread_id);
-        sender.send(retained.clone())?;
-        let actual = tokio::time::timeout(std::time::Duration::from_secs(1), progress.next())
-            .await?
-            .context("progress stream ended after lag")??;
-        assert_eq!(actual.id, retained.id);
-        let next = event(thread_id);
-        sender.send(next.clone())?;
-        assert_eq!(
-            progress.next().await.context("progress stream ended")??.id,
-            next.id
-        );
-        drop(sender);
-        assert!(progress.next().await.is_none());
-        Ok(())
-    }
 }

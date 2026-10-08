@@ -81,17 +81,13 @@ impl BasicObjectStore {
                 *remaining = Some(count - 1);
             }
         }
-        let bytes = serde_json::to_vec_pretty(value)?;
-        let blob = bytes.len() > 64 * 1024;
-        self.store
-            .put(&normalize_path(key.as_ref()), bytes, blob)
-            .await?;
-        Ok(())
+        self.put_bytes(key, serde_json::to_vec_pretty(value)?).await
     }
 
     pub(crate) async fn put_bytes(&self, key: impl AsRef<Path>, value: Vec<u8>) -> Result<()> {
+        let blob = value.len() > 64 * 1024;
         self.store
-            .put(&normalize_path(key.as_ref()), value, true)
+            .put(&normalize_path(key.as_ref()), value, blob)
             .await?;
         Ok(())
     }

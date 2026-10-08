@@ -2,8 +2,10 @@
 use crate::{AgentConfig, AgentHarnessKind, ConversationModelConfig, Runtime, SendRequest};
 use anyhow::Result;
 use exo_managed_agents::http::protocol::*;
-use exoharness::{AgentHandle, ThreadHandle};
+use exoharness::{AgentHandle, Event, EventData, EventStream, ThreadHandle, Uuid7};
+use futures::StreamExt;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 #[derive(Debug)]
 pub struct UnsupportedRequest(pub &'static str);
@@ -753,29 +755,111 @@ pub async fn cancel_turn(
     })
 }
 
-/// Register the watcher before loading history so an append cannot fall between them.
-pub async fn wait_events(
-    service: &Service<'_>,
-    path: &ThreadPath,
-    query: EventsQuery,
-) -> Result<exoharness::GetEventsResult> {
-    use futures::StreamExt;
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let after = query.after;
-    let mut watcher = thread
+/// Forward transient model chunks from the turn stream to live subscribers.
+pub async fn forward_progress(
+    mut events: crate::ExecutionStreamHandle,
+    thread_id: ThreadId,
+    turn: exoharness::TurnRecord,
+    progress: broadcast::Sender<Event>,
+) {
+    while let Some(event) = events.next().await {
+        match event {
+            Ok(crate::ExecutionStreamEvent::Chunk(chunk)) => {
+                let event = Event {
+                    id: Uuid7::now(),
+                    thread_id,
+                    session_id: Some(turn.session_id),
+                    turn_id: Some(turn.id),
+                    created_at: chrono::Utc::now(),
+                    data: EventData::LinguaStreamChunk { chunk },
+                };
+                if progress.send(event).is_err() {
+                    tracing::trace!("no runtime progress subscribers");
+                }
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, turn_id = %turn.id, "runtime turn failed"),
+        }
+    }
+}
+
+/// Subscribe before loading history so both transports merge saved events with live progress.
+pub async fn watch_events(
+    thread: &dyn ThreadHandle,
+    receiver: broadcast::Receiver<Event>,
+    after: Option<exoharness::EventId>,
+) -> Result<EventStream> {
+    let durable = thread
         .watch_events(std::ops::Bound::Excluded(
-            after.unwrap_or_else(|| exoharness::Uuid7(Default::default())),
+            after.unwrap_or_else(|| Uuid7(Default::default())),
         ))
         .await?;
-    let mut page = events(service, path, query).await?;
-    if page.events.is_empty() {
-        let event = watcher
-            .next()
-            .await
-            .ok_or_else(|| bad_request("event stream closed"))??;
-        page.cursor = Some(event.id);
-        page.events.push(event);
+    Ok(Box::pin(futures::stream::select(
+        durable,
+        progress_stream(receiver, thread.record().id),
+    )))
+}
+
+fn progress_stream(receiver: broadcast::Receiver<Event>, thread_id: ThreadId) -> EventStream {
+    Box::pin(futures::stream::unfold(
+        receiver,
+        move |mut receiver| async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(event) if event.thread_id == thread_id => {
+                        return Some((Ok(event), receiver));
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        },
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Context;
+
+    #[tokio::test]
+    async fn lagged_progress_skips_lost_chunks_and_keeps_the_stream_open() -> Result<()> {
+        let thread_id = Uuid7::now();
+        let event = |thread_id| Event {
+            id: Uuid7::now(),
+            thread_id,
+            session_id: None,
+            turn_id: None,
+            created_at: chrono::Utc::now(),
+            data: EventData::LinguaStreamChunk {
+                chunk: lingua::UniversalStreamChunk::new(
+                    Some("chunk".into()),
+                    None,
+                    vec![],
+                    None,
+                    None,
+                ),
+            },
+        };
+        let (sender, receiver) = broadcast::channel(2);
+        let mut progress = progress_stream(receiver, thread_id);
+        sender.send(event(thread_id))?;
+        sender.send(event(Uuid7::now()))?;
+        let retained = event(thread_id);
+        sender.send(retained.clone())?;
+        let actual = tokio::time::timeout(std::time::Duration::from_secs(1), progress.next())
+            .await?
+            .context("progress stream ended after lag")??;
+        assert_eq!(actual.id, retained.id);
+        let next = event(thread_id);
+        sender.send(next.clone())?;
+        assert_eq!(
+            progress.next().await.context("progress stream ended")??.id,
+            next.id
+        );
+        drop(sender);
+        assert!(progress.next().await.is_none());
+        Ok(())
     }
-    Ok(page)
 }

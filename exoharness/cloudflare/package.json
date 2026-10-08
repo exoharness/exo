@@ -1,0 +1,26 @@
+{
+  "name": "@exo/cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm run build:runtime && wrangler deploy --dry-run --outdir dist",
+    "dev": "wrangler dev",
+    "deploy": "pnpm run build:runtime && wrangler deploy",
+    "test": "pnpm run build && node --test test/*.mjs",
+    "test:live": "node scripts/live-test.mjs",
+    "test:live:codex": "node scripts/live-codex-test.mjs",
+    "build:runtime": "node scripts/build-runtime.mjs",
+    "test:live:contracts": "node scripts/live-contract-test.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261004.1",
+    "@types/node": "25.5.0",
+    "miniflare": "5.20261001.0-alpha",
+    "typescript": "5.9.3",
+    "wrangler": "4.147.0"
+  },
+  "packageManager": "pnpm@10.26.2"
+}
