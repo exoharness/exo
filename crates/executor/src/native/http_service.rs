@@ -5,10 +5,7 @@ use actix_web::{
     App, Error, HttpMessage, HttpRequest, HttpResponse, HttpServer,
     body::MessageBody,
     dev::{Server, ServiceRequest, ServiceResponse},
-    error::{
-        ErrorBadRequest, ErrorInternalServerError, ErrorNotFound, ErrorNotImplemented,
-        ErrorUnauthorized,
-    },
+    error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound, ErrorUnauthorized},
     http::header::{AUTHORIZATION, HeaderValue},
     middleware::{Next, from_fn},
     mime, web,
@@ -267,7 +264,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/frontend-tool-result",
-                web::post().to(unsupported_interaction),
+                web::post().to(frontend_tool_result),
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}/event",
@@ -807,10 +804,17 @@ async fn approval_response(
         .map_err(request_error)
 }
 
-async fn unsupported_interaction(_service: Service) -> Result<HttpResponse, Error> {
-    Err(ErrorNotImplemented(
-        "this runtime does not execute frontend tools",
-    ))
+async fn frontend_tool_result(
+    service: Service,
+    path: web::Path<TurnPath>,
+    body: web::Json<FrontendToolResultBody>,
+) -> Result<web::Json<EventResult>, Error> {
+    let event_id = service
+        .runtime
+        .frontend_tool_result(path.agent_id, path.thread_id, path.turn_id, &body)
+        .await
+        .map_err(ErrorBadRequest)?;
+    Ok(web::Json(EventResult { event_id }))
 }
 
 async fn events(

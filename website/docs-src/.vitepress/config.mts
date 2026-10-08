@@ -83,6 +83,23 @@ export default defineConfig({
           },
         ],
       },
+      {
+        text: "ExoV2",
+        link: "/exov2/",
+        collapsed: false,
+        items: [
+          { text: "Overview", link: "/exov2/" },
+          { text: "Agent definition", link: "/exov2/agent-definition" },
+          {
+            text: "Tutorials",
+            collapsed: false,
+            items: [
+              { text: "Support agent tutorial", link: "/exov2/tutorial" },
+            ],
+          },
+          { text: "Architecture", link: "/exov2/architecture" },
+        ],
+      },
       { text: "Development", link: "/development/" },
     ],
   },

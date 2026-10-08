@@ -47,6 +47,7 @@ function fixture(events: AsyncIterable<unknown>) {
   const context = {
     agentConfig: { model: "claude-sonnet-4-6", instructions: [] },
     conversationConfig: { mounts: [], toolPolicies: {} },
+    tools: [],
     mcpServers: [],
     exoharness: {
       current: {

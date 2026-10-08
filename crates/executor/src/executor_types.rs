@@ -19,6 +19,9 @@ use crate::BraintrustTracingConfig;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AgentConfig {
+    /// Client tools supplied for this turn, saved with its recovery configuration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frontend_tools: Vec<exo_managed_agents::http::protocol::FrontendToolDefinition>,
     #[serde(default)]
     pub resources: Vec<exoharness::resources::PreparedResource>,
     pub instructions: Vec<Message>,
@@ -66,6 +69,8 @@ pub struct ConversationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview_port: Option<u16>,
     #[serde(default)]
+    pub harness: Option<ConversationHarnessConfig>,
+    #[serde(default)]
     pub resources: Vec<exoharness::resources::PreparedResource>,
     #[serde(default)]
     pub resource_mounts: Vec<FileSystemMount>,
@@ -86,6 +91,13 @@ pub struct ConversationConfig {
     pub durable_file_systems: Vec<DurableFileSystem>,
     #[serde(default)]
     pub sandbox_scope: Option<SandboxScope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationHarnessConfig {
+    pub kind: AgentHarnessKind,
+    pub module_path: Option<String>,
+    pub preset: Option<crate::managed_agents::TypeScriptHarnessPreset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +123,7 @@ impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
             preview_port: None,
+            harness: None,
             resources: Vec::new(),
             resource_mounts: Vec::new(),
             permissions: Default::default(),

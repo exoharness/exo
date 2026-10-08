@@ -1310,6 +1310,7 @@ fn test_secret_metadata() -> SecretMetadata {
 
 fn default_agent_config() -> AgentConfig {
     AgentConfig {
+        frontend_tools: Vec::new(),
         credential: Some("test-secret".into()),
         base_url: None,
         reasoning_effort: None,

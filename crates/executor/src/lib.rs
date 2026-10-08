@@ -7,6 +7,7 @@ mod basic;
 pub mod conversation_sandbox;
 pub mod execution_tracing;
 mod executor_types;
+mod frontend_tools;
 pub use exoharness::harness;
 mod harness_adapter;
 mod harness_config;
@@ -30,11 +31,12 @@ pub mod sandbox_policy;
 mod shared;
 
 pub use executor_types::{
-    AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig, ConversationModelConfig,
-    ExecutionStreamEvent, ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse,
-    ModelResponseStream, PendingToolCall, SandboxScope, SendRequest, SendResult,
-    ShellToolArguments, ShellToolResult, ToolDefinition, ToolRuntime, TypeScriptHarnessConfig,
-    TypeScriptStreamEvent, effective_sandbox_scope, to_execution_stream_event,
+    AgentConfig, AgentHarnessKind, AgentSandboxConfig, ConversationConfig,
+    ConversationHarnessConfig, ConversationModelConfig, ExecutionStreamEvent,
+    ExecutionStreamHandle, ModelClient, ModelRequest, ModelResponse, ModelResponseStream,
+    PendingToolCall, SandboxScope, SendRequest, SendResult, ShellToolArguments, ShellToolResult,
+    ToolDefinition, ToolRuntime, TypeScriptHarnessConfig, TypeScriptStreamEvent,
+    effective_sandbox_scope, to_execution_stream_event,
 };
 pub use exo_managed_agents::{BraintrustProject, BraintrustTracingConfig};
 

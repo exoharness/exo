@@ -54,7 +54,6 @@ exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin 
 
 cat > gameboy.md <<'EOF'
 ---
-name: "Gameboy"
 harness: exoharness/examples/gameboy-agent/agent/harness.ts
 config:
   model: gpt-5.5

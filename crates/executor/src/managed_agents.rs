@@ -2,6 +2,7 @@ pub(crate) mod config;
 pub mod service;
 #[cfg(feature = "native")]
 pub use crate::native::config::agent_config;
+pub(crate) use config::apply_thread_harness;
 pub use config::{
     HarnessModules, TypeScriptHarnessPreset, agent_config_with_modules,
     model_credential_destination,
@@ -19,6 +20,7 @@ use crate::{AgentConfig, ConversationConfig, ConversationModelConfig, LocalProvi
 #[derive(Clone, Default)]
 pub struct LocalAgentSetup {
     pub agent: Option<AgentConfig>,
+    pub harness: Option<String>,
     pub model: Option<String>,
     pub thread: ConversationConfig,
     pub egress_policy: Option<exoharness::EgressPolicy>,
@@ -52,7 +54,7 @@ impl AgentBackend for LocalProvider {
             None => self.executor.agent_config(definition)?,
         };
         config.instructions = vec![crate::harness_helpers::system_message(
-            &definition.system_prompt(),
+            &definition.instructions,
         )];
         let mut resources = definition.frontmatter.resources.clone();
         let base = definition
@@ -75,29 +77,48 @@ impl AgentBackend for LocalProvider {
         agent: &dyn AgentHandle,
         thread: &dyn ThreadHandle,
         created: bool,
+        options: &managed::ThreadOptions,
     ) -> Result<managed::ThreadInfo> {
-        let agent_config = crate::load_agent_config(agent).await?;
+        let mut agent_config = crate::load_agent_config(agent).await?;
         let current_model = crate::get_conversation_model_override(thread).await?;
         let preferred = current_model
             .as_ref()
             .map(|config| config.model.as_str())
             .unwrap_or(&agent_config.model);
-        let model = self
-            .managed
-            .model
-            .as_deref()
+        let requested_model = options.model.as_ref().or(self.managed.model.as_ref());
+        let model = requested_model
+            .map(String::as_str)
             .unwrap_or(preferred)
             .to_owned();
         let mut config = if created {
             ConversationConfig {
                 resources: agent_config.resources.clone(),
-                sandbox_image: agent_config.sandbox.image.clone(),
                 sandbox_provider: Some(agent_config.sandbox.provider.clone()),
                 ..Default::default()
             }
         } else {
             crate::load_conversation_config(thread).await?
         };
+        if let Some(harness) = options.harness.as_ref().or(self.managed.harness.as_ref()) {
+            config.harness = Some(
+                self.executor
+                    .resolve_thread_harness(thread, &agent_config, harness)
+                    .await?,
+            );
+        }
+        agent_config.model = model.clone();
+        config::apply_thread_harness(&mut agent_config, config.harness.as_ref())?;
+        if !created
+            && config.environment.is_none()
+            && config.sandbox_image.as_deref().is_some_and(|image| {
+                config::is_preset_sandbox_image(image)
+                    && Some(image) != agent_config.sandbox.image.as_deref()
+            })
+        {
+            // Older threads stored the harness's default image as a thread override.
+            // Let them follow the newly selected harness while retaining custom images.
+            config.sandbox_image = None;
+        }
         for resource in &mut config.resources {
             if let Some(updated) = agent_config
                 .resources
@@ -187,7 +208,7 @@ impl AgentBackend for LocalProvider {
             .configure_managed_thread(agent, thread, &agent_config, &config)
             .await?;
         crate::harness_config::store_conversation_config(thread, &config).await?;
-        if self.managed.model.is_some() || model != preferred {
+        if requested_model.is_some() {
             crate::put_conversation_model_override(
                 thread,
                 Some(ConversationModelConfig {

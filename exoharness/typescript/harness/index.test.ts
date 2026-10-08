@@ -243,6 +243,48 @@ describe("HarnessToolRegistry", () => {
 });
 
 describe("materializeEventsToMessages", () => {
+  it("places client context after all results in a tool round", () => {
+    const data: EventData[] = [
+      ...["a", "b"].map((id) => ({
+        type: "tool_requested",
+        tool_call_id: id,
+        request: { function_name: "lookup", arguments: {} },
+      })),
+      {
+        type: "custom",
+        event_type: "agent_runtime.frontend_tool_response",
+        payload: {
+          tool_call_id: "a",
+          result: {
+            type: "frontend_tool_success",
+            output: 1,
+            model_input: "Client context",
+          },
+        },
+      },
+      toolResultEvent("a", 1),
+      toolResultEvent("b", 2),
+    ];
+    const messages = materializeEventsToMessages(
+      data.map((data, i) => ({
+        id: String(i),
+        conversationId: "thread",
+        createdAt: "2026-10-05T00:00:00Z",
+        data,
+      })),
+    );
+    expect(messages.map((message) => message.role)).toEqual([
+      "assistant",
+      "assistant",
+      "tool",
+      "tool",
+      "user",
+    ]);
+    expect(messages.at(-1)).toEqual({
+      role: "user",
+      content: "Client context",
+    });
+  });
   it("leaves RLM diagnostics out of conversation replay", () => {
     const data = [
       {

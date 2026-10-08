@@ -24,7 +24,9 @@ use crate::harness_config::{
     load_agent_config, load_conversation_config, store_agent_config, store_conversation_config,
 };
 use crate::harness_events::HarnessEvents;
-use crate::harness_helpers::{resolve_agent_handle, resolve_conversation_handle};
+use crate::harness_helpers::{
+    get_conversation_model_override, resolve_agent_handle, resolve_conversation_handle,
+};
 use crate::runtime_host::TaskGroup;
 use crate::shared::finalize_turn;
 use crate::{
@@ -104,6 +106,17 @@ pub trait HarnessExecutor: Send + Sync + 'static {
         _definition: &exo_managed_agents::AgentDefinition,
     ) -> Result<AgentConfig> {
         Err(anyhow!("this executor does not configure managed agents"))
+    }
+
+    async fn resolve_thread_harness(
+        &self,
+        _thread: &dyn ConversationHandle,
+        _config: &AgentConfig,
+        _harness: &str,
+    ) -> Result<crate::ConversationHarnessConfig> {
+        Err(anyhow!(
+            "this executor does not configure managed harnesses"
+        ))
     }
 
     async fn configure_managed_thread(
@@ -388,6 +401,18 @@ impl Runtime {
     ) -> Result<exoharness::EventId> {
         self.provider
             .approval_response(agent, thread, turn, body)
+            .await
+    }
+
+    pub async fn frontend_tool_result(
+        &self,
+        agent: exoharness::AgentId,
+        thread: exoharness::ThreadId,
+        turn: exoharness::TurnId,
+        body: &exo_managed_agents::http::protocol::FrontendToolResultBody,
+    ) -> Result<exoharness::EventId> {
+        self.provider
+            .frontend_tool_result(agent, thread, turn, body)
             .await
     }
 
@@ -753,6 +778,35 @@ impl Runtime {
         load_agent_config(agent).await
     }
 
+    pub(crate) async fn resolve_thread_harness(
+        &self,
+        thread: &dyn ConversationHandle,
+        config: &AgentConfig,
+        harness: &str,
+    ) -> Result<crate::ConversationHarnessConfig> {
+        self.provider
+            .resolve_thread_harness(thread, config, harness)
+            .await
+    }
+
+    pub async fn get_thread_agent_config(
+        &self,
+        agent: &dyn AgentHandle,
+        thread: &dyn ConversationHandle,
+    ) -> Result<AgentConfig> {
+        let (mut config, thread_config, model) = tokio::try_join!(
+            self.get_agent_config(agent),
+            self.get_conversation_config(thread),
+            get_conversation_model_override(thread),
+        )?;
+        if let Some(model) = model {
+            config.model = model.model;
+            config.max_output_tokens = model.max_output_tokens;
+        }
+        crate::managed_agents::apply_thread_harness(&mut config, thread_config.harness.as_ref())?;
+        Ok(config)
+    }
+
     pub async fn put_agent_config(
         &self,
         agent: &dyn AgentHandle,
@@ -914,9 +968,10 @@ impl Runtime {
     pub async fn create_managed_agent(
         &self,
         definition: &exo_managed_agents::AgentDefinition,
+        name: &str,
         slug: &str,
     ) -> Result<Arc<dyn AgentHandle>> {
-        exo_managed_agents::create_agent(self.provider.as_ref(), definition, slug).await
+        exo_managed_agents::create_agent(self.provider.as_ref(), definition, name, slug).await
     }
 
     pub async fn open_managed_thread(
@@ -924,10 +979,16 @@ impl Runtime {
         agent: &Arc<dyn AgentHandle>,
         reference: Option<&str>,
         request: NewConversationRequest,
+        options: &exo_managed_agents::ThreadOptions,
     ) -> Result<exo_managed_agents::OpenedThread> {
-        let opened =
-            exo_managed_agents::open_thread(self.provider.as_ref(), agent, reference, request)
-                .await?;
+        let opened = exo_managed_agents::open_thread(
+            self.provider.as_ref(),
+            agent,
+            reference,
+            request,
+            options,
+        )
+        .await?;
         #[cfg(feature = "native")]
         self.register_previews(agent.as_ref(), opened.thread.clone())
             .await?;
@@ -957,6 +1018,7 @@ impl Runtime {
     pub async fn create_agent(&self, request: CreateAgentRequest) -> Result<Arc<dyn AgentHandle>> {
         let name = request.name.clone().unwrap_or_else(|| request.slug.clone());
         let config = AgentConfig {
+            frontend_tools: Vec::new(),
             resources: Vec::new(),
             instructions: Vec::new(),
             harness: request.harness,
@@ -1074,6 +1136,7 @@ impl Runtime {
         };
         let conversation_config = ConversationConfig {
             preview_port: None,
+            harness: None,
             resources: agent_config.resources.clone(),
             resource_mounts,
             sandbox_image: request.sandbox_image.or(agent_config.sandbox.image),

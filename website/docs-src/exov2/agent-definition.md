@@ -1,0 +1,526 @@
+---
+title: Agent definition
+description: Agent definitions, threads, environments, credentials, and hosting.
+---
+
+# Agent definition
+
+An **agent** is a configurable bundle of system instructions, [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers, custom tools,
+resources (eg git repositories), and defaults (harness, model).
+
+A **thread** is an instance of that agent, containing its conversation history, execution state, filesystem state, and configuration
+(environment, vaults, and overrides from the default agent settings).
+
+A **session** represents a client’s interaction with an agent within a thread and can span multiple **turns**. A turn begins
+with submitted input and includes the agent’s work in response. A thread or even a turn can continue across multiple sessions.
+
+Each thread runs in an **environment** (sandbox and network configuration) and has access to selected **vaults** (named collections
+of secrets). The environment can restrict which hosts and ports the sandbox can reach, and each secret can restrict which origins
+or URLs it can be used with.
+
+## Defining an agent
+
+This configuration is just data that is commonly embedded in the frontmatter of a markdown file. For example, `support-analyst.md`:
+
+```markdown
+---
+harness: codex
+model:
+  name: gpt-6.1-sol
+  credential: openai
+---
+
+For each support ticket, determine whether it describes a technical
+issue. If it does, try to reproduce it, explain what you found, and
+suggest a workaround.
+```
+
+The following sections walk through the various ways to configure an agent, which belong in its frontmatter. The text below
+that contains system instructions sent to the agent.
+
+### Harness and model
+
+A **harness** accepts messages and produces events, deciding how to call the model, use tools, manage context, etc. Exo supports
+Codex (`codex`), Claude Code (`claude-code`), and Pi (`pi`), as well as custom harnesses. A custom harness can be selected by its
+TypeScript module path, eg. `harness: ./my-harness.ts`.
+
+The `model` object supplies the model name and its configuration. `credential` names a secret in one of the thread's vaults.
+You can also set `base_url` for a custom model endpoint, or `max_output_tokens` to limit the output. Codex supports
+`reasoning_effort`, eg. `high` or `max`. The model and its settings need to be supported by the harness you choose.
+
+### MCP servers
+
+One of the key design principles of Exo is that you don't write code _inside_ tha agent implementation, but _around_ it. The
+MCP integration allows you to do just that by providing tools that can be accessed remotely.
+
+To connect an MCP server, add it to the frontmatter:
+
+```yaml
+mcp_servers:
+  - type: url
+    name: helpdesk
+    url: https://helpdesk.example.com/mcp
+```
+
+Exo connects to the server and exposes its tools to the harness. It automatically uses vault credentials that are mapped to
+the MCP's URL.
+
+You can control which tools are exposed and which require approval.
+
+```yaml
+mcp_servers:
+  - type: url
+    name: helpdesk
+    url: https://helpdesk.example.com/mcp
+    allowed_tools: [get_ticket, update_ticket]
+    permission_policy: {type: always_allow}
+    tool_policies:
+      update_ticket: {type: always_ask}
+```
+
+By default, MCP tools require approval. Here, the agent can `get_ticket` without asking, but needs approval for `update_ticket`.
+You can also use `blocked_tools` to exclude specific tools.
+
+### Custom tools
+
+Custom tools are passed to the agent and once invoked, are executed outside of Exo, either in your client code or in the
+agent's environment.
+
+To add one, declare it in the agent's frontmatter:
+
+```yaml
+tools:
+  - name: ask_user
+    description: Ask the user a question and return their answer.
+    parameters:
+      type: object
+      properties:
+        question: {type: string}
+      required: [question]
+      additionalProperties: false
+```
+
+By default, a custom tool call will be sent through the agent's event stream, and it's up to the client to execute the tool and
+provide a result. This allows you to implement features like pushing a button in a UI or soliciting some interactive feedback
+from a user. Alternatively, you can implement the tool in the agent's [environment](#tool-implementations), in which case it
+will automatically run there.
+
+### Resources
+
+Resources give the agent access to files, eg. a git repository or a local directory:
+
+```yaml
+resources:
+  - name: autoevals
+    type: git_repository
+    url: https://github.com/braintrustdata/autoevals
+  - name: fixtures
+    type: directory
+    path: ./fixtures
+    mount_path: /workspace/fixtures
+    mode: ro
+```
+
+`mount_path` is where the resource appears inside the sandbox. A git repository defaults to `/workspace/<repo name>`. Each thread
+gets its own isolated copy, so edits are localized to the thread. Resources are writable by default, so `mode: ro` makes it read-only.
+
+For a git URL, a new thread starts from the repository's default branch. You can set `checkout` to a branch name, tag, or
+commit ID, eg. `checkout: main`. Exo resolves it when creating the thread, caches the source, and uses copy-on-write storage
+for thread copies. Resuming a thread keeps its existing checkout, including any changes the agent made.
+
+For private repositories, set `credential: github` on the resource and attach a vault containing that credential. The
+credential needs permission to access the git server's origin, eg. `https://github.com`.
+
+Local paths resolve relative to the agent file and are captured when the agent is created or updated. Existing threads keep
+their copies. With a remote provider, local paths refer to files on the provider's host.
+
+### Adapters
+
+Adapters connect an agent to chat providers like Slack, WhatsApp, and Discord. Configure them in the agent's frontmatter:
+
+```yaml
+adapters:
+  - name: support-slack
+    type: slack
+    bot_token: slack-bot
+    signing_secret: slack-signing
+    allowed_channels: [C123456]
+```
+
+`bot_token` and `signing_secret` are vault references. Adapers do not run with `exo agent run ...` but they do when
+you run `exo serve ...`.
+
+## Threads, sessions, and turns
+
+A thread has an id, slug (which must be unique), and display name. When you run an agent, it creates a new thread and auto-generates
+these fielde. If you specify a slug, it will either create a new thread with that slug name or resume the existing one.
+
+```bash
+exo agent run --agent support-analyst
+exo thread list support-analyst
+exo agent run --agent support-analyst --thread THREAD
+```
+
+Each time you connect, you interact through a session. Each submitted input starts a turn, which can include multiple model
+calls, tool calls, and intermediate results before the agent finishes. A turn stays associated with the session that started it,
+even if another client later follows its progress.
+
+### What persists
+
+Each thread's history is an append-only event log including messages, tool requests, results, and lifecycle events (eg start and
+end of a turn). Many of the operations that Exo provides, like durable execution and policy enforcement, work by querying this
+event log to reconstruct state.
+
+Threads can also store **artifacts**: named, versioned blobs, eg. a memories or reports. These are stored by Exo
+and can be retrieved independently of the sandbox's files.
+
+Each thread's sandbox shares its lifecycle (although harnesses can customize it), and generally speaking, each sandbox is assumed
+to have a persistent disk that survives across sessions.
+
+### Configuration overrides
+
+To override an agent's default configuration, you can provide an `overides` object to a thread, even after it's started. 
+The override itself has the same schema as the agent definition with some special rules:
+
+- Omit a field to inherit its value.
+- Supply a field to replace its value in full, including objects and lists.
+- Supply `[]` to clear a list.
+
+Configuration is resolved in order: agent defaults, then thread overrides, then turn overrides. Thread overrides persist when
+you resume; turn overrides apply only to that turn. For example, a thread could select a different harness and model:
+
+```json
+{
+  "overrides": {
+    "harness": "pi",
+    "model": {"name": "gpt-6.1-sol", "credential": "openai"}
+  }
+}
+```
+
+The CLI lets you override the harness and model when opening or resuming a thread:
+
+```bash
+exo agent run --agent support-analyst --thread THREAD \
+  --harness pi --model gpt-6.1-sol
+```
+
+These choices are saved on the thread and used when you resume it again. 
+
+### Forking
+
+You can fork a thread's event history at the latest event, or select an earlier event with `--up-to`:
+
+```bash
+exo thread fork support-analyst THREAD 
+exo thread fork support-analyst THREAD --up-to EVENT_ID
+```
+
+This creates another thread with the copied history.
+
+## Environments
+
+Agents benefit from a sandboxed environment they can work in to read files, write/run code, and accumulate scratch work.
+Exo uses SmolVM by default, with a development image for the selected harness:
+
+- `ghcr.io/exoharness/codex-devbox`
+- `ghcr.io/exoharness/claude-code-devbox`
+- `ghcr.io/exoharness/pi-devbox`
+
+These include the harness, Python, and a Node.js/TypeScript development environment. Exo pins the defaults to tested image
+digests. Networking is unrestricted by default, while credentials retain their own destination policies.
+
+You can use these defaults without creating an environment file. To customize the image or network policy, define an environment
+in `environment.yaml`, eg.:
+
+```yaml
+name: support-analyst-env
+image: ghcr.io/exoharness/codex-devbox:latest
+networking:
+  type: limited
+  allowed_hosts:
+    - api.openai.com
+    - github.com
+    - api.github.com
+allowed_tcp_ports: [443]
+```
+
+This allows HTTPS connections to the listed hosts. Include hosts needed by the model, MCP servers, and any dependencies the
+agent downloads. `networking.type` can also be `unrestricted` or `disabled`. Omitting `allowed_tcp_ports` allows all outbound
+TCP ports allowed by the host policy.
+
+Like agents, environments can be used directly or set up and configured.
+
+```bash
+exo agent run --agent support-analyst --environment-file environment.yaml
+
+exo environment create support-analyst-env --file environment.yaml
+exo agent run --agent support-analyst --environment support-analyst-env
+```
+
+An environment can also set `provider`, `default_workdir`, `file_system_mounts`, and `tool_modules` for
+[tool implementations](#tool-implementations). Host mounts refer to paths on the runtime host and can be read-only or writable.
+Unlike resources, host mounts expose the host's files directly.
+
+In addition to SmolVM, Exo supports a variety of local options including Apple Containers, Docker, Firecracker (with Lima
+on macOS), and hosted sandboxes including AWS AgentCore, Daytona, E2B, Sprites, and Vercel. Support varies by provider.
+Exo's credential substitution and proxy-based network controls currently require SmolVM or Firecracker. Firecracker also
+supports full VM snapshots, including memory.
+
+### Tool implementations
+
+An environment can supply implementations for tools declared by the agent, using TypeScript modules:
+
+```yaml
+name: support-analyst-env
+tool_modules:
+  - ./tools.ts
+```
+
+Each module exports a tool, or a collection of tools, using the [TypeScript tool format](../tutorials/write-your-own-agent#step-2-add-a-custom-tool).
+Exo matches the exported tools to the agent's declarations by name. A tool's `initialize()` method returns a handler with an
+`execute(args, execution)` method, which runs when the harness calls the tool.
+
+Module handlers run on the runtime host. They can use `execution.context` to run commands in the thread's sandbox, read its
+events, or write artifacts. Relative module paths resolve from the environment file; with a remote provider, the modules need
+to be available on that provider's host.
+
+The same agent can use different implementations in different environments. Any declared tools without an environment
+implementation are handled by the client.
+
+## Vaults and credentials
+
+A **vault** is a named collection of secrets, such as API keys and OAuth credentials, stored safely at rest. Each secret
+has a name and a policy describing where it can be used.
+
+With the local provider, threads inherit the `global` vault, vaults attached to their agent, and any explicitly attached vaults.
+When multiple vaults contain a matching credential, the more specifically attached vault takes precedence. With remote
+providers, the thread automatically uses the authenticated user's vaults.
+
+### Creating and selecting credentials
+
+With `OPENAI_API_KEY` set, save a model credential:
+
+```bash
+exo vault secret create global --preset openai
+```
+
+This creates a secret named `openai` with permission to access `https://api.openai.com`. `model.credential: openai` selects it.
+The preset is short-hand for:
+
+```bash
+exo vault secret create global openai \
+  --token-env OPENAI_API_KEY --allow-origin https://api.openai.com
+```
+
+To add a GitHub credential:
+
+```bash
+exo vault secret create global --preset github
+```
+
+The GitHub preset uses `gh` to access your login and permits credential use at `https://github.com` and `https://api.github.com`.
+It creates a secret named `github`. With `GITHUB_PAT` set, you can import a token instead:
+
+```bash
+exo vault secret create global --preset github --token-env GITHUB_PAT
+```
+
+For an MCP server that supports OAuth, you can log in using its resource URL:
+
+```bash
+exo vault secret create global helpdesk --url https://helpdesk.example.com/mcp
+```
+
+Exo discovers the server's OAuth settings and stores the resulting credential with permission to access that URL. MCP
+credentials are selected by their destination policies, so the secret does not have to share the server's name.
+
+### Per-user vaults
+
+You can use the same agent for different users or customers, with a separate vault for each. For example, with
+`ALICE_GITHUB_PAT` and `BOB_GITHUB_PAT` set:
+
+```bash
+exo vault create alice
+exo vault secret create alice --preset github --token-env ALICE_GITHUB_PAT
+
+exo vault create bob
+exo vault secret create bob --preset github --token-env BOB_GITHUB_PAT
+```
+
+Select the user's vault when creating their thread:
+
+```bash
+exo agent run --agent support-analyst --vault alice
+exo agent run --agent support-analyst --vault bob
+```
+
+Both vaults contain a secret named `github`, so the agent definition stays the same. Each thread uses its selected vault's
+credential, which takes precedence over a shared credential with the same name. Shared credentials, eg. a model API key,
+can still come from `global`.
+
+Vaults stay attached when you resume a thread. You can repeat `--vault` to attach multiple vaults, or add another vault when
+resuming with `--thread THREAD`.
+
+### Destination policies
+
+`--allow-origin` permits a secret's use at an origin (scheme, host, and port). `--allow-url` permits its use at an exact URL.
+Both can be repeated. You can update the policy without replacing the secret:
+
+```bash
+exo vault secret update global helpdesk --allow-url https://helpdesk.example.com/mcp
+```
+
+For sandbox credentials, both the environment's network policy and the secret's destination policy need to allow the request.
+Unrestricted networking still respects each secret's policy.
+
+### Credential substitution
+
+Agents get placeholder credentials like `OPENAI_API_KEY=exo_egress_d81f72ff9a6b4ff2bd4e1bae63c207b0`. Exo substitutes the real
+credential outside of the sandbox, on requests to permitted destinations. This lets the agent use a credential without being
+able to read its value. MCP connections use credentials outside the sandbox as well.
+
+## Running and hosting
+
+### Saved agents
+
+Save a definition, then run it by its slug:
+
+```bash
+exo agent create support-analyst --file support-analyst.md
+exo agent run --agent support-analyst
+```
+
+The creation argument supplies the display name, and Exo derives its slug from that name. You can set a different slug with
+`--slug`. With `--agent-file`, the filename supplies the display name.
+
+Without `--prompt`, this opens a REPL. With `--prompt`, it runs a single turn. You can update the saved definition or inspect it:
+
+```bash
+exo agent update support-analyst --file support-analyst.md
+exo agent get support-analyst
+```
+
+`exo agent run --agent-file support-analyst.md` syncs the definition from the file before opening a thread. This is convenient
+while editing the definition, and is what we use in the tutorial.
+
+The local provider stores its state under `~/.exo` by default. Use `--root` to select another directory, and point the CLI and
+server at the same root to share their local state.
+
+### Serving over HTTP
+
+To serve the local provider, run:
+
+```bash
+exo serve --bind 127.0.0.1:8080
+```
+
+The HTTP API is available under `/exo`. In another terminal, get the saved agent's ID using `jq`:
+
+```bash
+AGENT_ID=$(curl -fsS http://127.0.0.1:8080/exo/agent \
+  | jq -r '.agents[] | select(.slug == "support-analyst") | .id')
+```
+
+Create a thread:
+
+```bash
+THREAD_ID=$(curl -fsS -X POST "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread" \
+  -H 'Content-Type: application/json' \
+  -d '{}' | jq -r '.thread.id')
+```
+
+Submit a turn:
+
+```bash
+curl -fsS -X POST "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread/$THREAD_ID/turn" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":{"role":"user","content":"Triage this ticket: CSV uploads return HTTP 500 after 30 seconds."}}'
+```
+
+Watch the thread's events:
+
+```bash
+curl -N "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread/$THREAD_ID/event/watch"
+```
+
+The turn request returns a receipt after the input is accepted. Watching events replays the saved history and follows new
+events. To reconnect after a particular event, add `?after=EVENT_ID` to the watch URL. You can stop watching and come back later;
+the turn keeps running on the server.
+
+Post to the same `/turn` URL to continue the thread. Supply `session_id` if you want multiple turns to belong to the same session;
+otherwise, the server creates a session for the submitted turn. To cancel the turn, use the receipt's `turn.id` in place of
+`TURN_ID`:
+
+```bash
+curl -fsS -X POST "http://127.0.0.1:8080/exo/agent/$AGENT_ID/thread/$THREAD_ID/turn/TURN_ID/cancel"
+```
+
+When binding to a non-loopback address, configure authentication with `--auth-file`. You can also serve a single agent with
+`exo serve --agent support-analyst`.
+
+### Handling client tool calls
+
+The application handles calls to [custom tools](#custom-tools) that aren't implemented by the environment. Their declarations are
+inherited from the agent definition and can be replaced with `overrides.tools` on a thread or turn.
+
+When the harness calls one, Exo emits a `tool_requested` event and waits for the result. The application handles the call and
+posts to `/exo/agent/AGENT_ID/thread/THREAD_ID/turn/TURN_ID/frontend-tool-result`:
+
+```json
+{
+  "session_id": "SESSION_ID",
+  "tool_call_id": "TOOL_CALL_ID",
+  "result": {
+    "type": "frontend_tool_success",
+    "output": {"answer": "The problem started after yesterday's release."}
+  }
+}
+```
+
+Use the session ID from the turn receipt and the tool call ID from the event. The result is saved in the thread's history, and
+the harness continues with it. The tool's implementation and any UI interaction belong to the application.
+
+### Providers
+
+A **provider** executes an agent on top of an **exoharness** which manages thread state, environments, vaults, and integrations.
+Exo comes with a built-in provider that you can run locally, as well as an http-based client that works with remote providers
+(like Braintrust).
+
+To use a provider, run:
+
+```bash
+exo provider create braintrust --url https://api.braintrust.dev/exo
+exo provider switch braintrust
+```
+
+Commands like `exo agent create` will automatically run against the provider. You can also point the CLI at your own Exo server:
+
+```bash
+exo provider create dev --url http://127.0.0.1:8080/exo
+exo provider switch dev
+```
+
+The provider hosts the execution and state, including environments and vaults. Changing providers selects a different place
+to run your agents; moving existing agents and threads between providers requires transferring their state.
+
+## Planned additions
+
+- [ ] Flatten environment definitions: expose sandbox settings and network policy fields at the top level, removing the
+  `config` and `policy` wrappers from files and the API.
+- [ ] Configure adapters directly in agent frontmatter, resolve their vault credentials, and provision their workers; remove
+  the separate `--adapters-file` configuration.
+- [ ] Accept resource `checkout` as a Git ref string (branch, tag, or commit), replacing the tagged branch/commit object.
+- [ ] Support tool declarations in agent frontmatter and inherit them during execution.
+- [ ] Move TypeScript tool module registration and path resolution into environments, bind implementations by declared tool
+  name, and route calls without an environment implementation to the client.
+- [ ] Load environment tool implementations in the Codex, Claude Code, and Pi harnesses.
+- [ ] Support environment tool implementations in Python and other languages, alongside TypeScript.
+- [ ] Implement one partial agent definition `overrides` schema for threads and turns: persist thread overrides, apply turn
+  overrides temporarily, inherit omitted fields, replace supplied fields in full, and use `[]` to clear lists.
+- [ ] Skills in agent definitions
+- [ ] Memory store
+- [ ] Support remote outbound connections, so that you can have a local environment that receives commands from a remote agent server
+- [ ] Scheduled deployments (eg CMA).
+
+<!-- TODO: Reconcile planned additions with GitHub issues before publishing. -->

@@ -108,7 +108,7 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn policies_use_specific_tool_then_server_defaults() {
-        let definition = crate::AgentDefinition::parse("---\nname: Policies\nharness: basic\nconfig:\n  model: gpt-5-mini\npermission_policy: {type: always_ask}\ntool_policies:\n  shell: {type: always_allow}\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n    permission_policy: {type: always_allow}\n    tool_policies:\n      write: {type: always_ask}\n---\nUse tools.\n".into()).unwrap();
+        let definition = crate::AgentDefinition::parse("---\nharness: basic\nconfig:\n  model: gpt-5-mini\npermission_policy: {type: always_ask}\ntool_policies:\n  shell: {type: always_allow}\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n    permission_policy: {type: always_allow}\n    tool_policies:\n      write: {type: always_ask}\n---\nUse tools.\n".into()).unwrap();
         let mut policies = definition.permissions();
         assert_eq!(policies.for_tool("other"), PermissionPolicy::AlwaysAsk {});
         assert_eq!(policies.for_tool("shell"), PermissionPolicy::AlwaysAllow {});
@@ -139,7 +139,7 @@ mod tests {
     #[cfg(feature = "client")]
     #[test]
     fn builtin_tools_default_to_allow_and_mcp_tools_default_to_ask() {
-        let definition = crate::AgentDefinition::parse("---\nname: Defaults\nharness: basic\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n---\nUse tools.\n".into()).unwrap();
+        let definition = crate::AgentDefinition::parse("---\nharness: basic\nconfig:\n  model: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n---\nUse tools.\n".into()).unwrap();
         let mut policies = definition.permissions();
         let tool = exo_mcp::McpTool {
             name: "exo_mcp__notes__read".into(),

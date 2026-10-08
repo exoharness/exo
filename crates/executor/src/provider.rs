@@ -31,6 +31,16 @@ pub trait Provider: AgentBackend {
     }
 
     fn harness(&self) -> &dyn Harness<ProviderTurn>;
+
+    async fn resolve_thread_harness(
+        &self,
+        _thread: &dyn ThreadHandle,
+        _config: &AgentConfig,
+        _harness: &str,
+    ) -> Result<crate::ConversationHarnessConfig> {
+        anyhow::bail!("this provider does not configure managed harnesses")
+    }
+
     async fn cancel_turn(
         &self,
         runtime: &Runtime,
@@ -77,6 +87,16 @@ pub trait Provider: AgentBackend {
     ) -> Result<exoharness::EventId> {
         anyhow::bail!("this provider does not support tool approvals")
     }
+
+    async fn frontend_tool_result(
+        &self,
+        _agent: exoharness::AgentId,
+        _thread: exoharness::ThreadId,
+        _turn: exoharness::TurnId,
+        _body: &exo_managed_agents::http::protocol::FrontendToolResultBody,
+    ) -> Result<exoharness::EventId> {
+        anyhow::bail!("this provider does not support client tools")
+    }
 }
 
 pub struct ProviderTurn {
@@ -101,6 +121,7 @@ pub struct LocalProvider {
     // One provider-wide lock serializes the pending check and decision write so
     // concurrent responses cannot accept the same approval twice.
     approval_responses: Arc<tokio::sync::Mutex<()>>,
+    frontend_responses: Arc<tokio::sync::Mutex<()>>,
     pub(crate) live_turns:
         Arc<tokio::sync::RwLock<HashMap<crate::harness::HarnessTurnKey, Weak<()>>>>,
     pub(crate) turns: Arc<crate::turn_queue::TurnQueueRuntime>,
@@ -122,6 +143,7 @@ impl LocalProvider {
             resource_preparations: Arc::new(Mutex::new(TaskGroup::new(host.clone()))),
             host: host.clone(),
             approval_responses: Default::default(),
+            frontend_responses: Default::default(),
             live_turns: Arc::default(),
             turns: {
                 let coordinator =
@@ -180,6 +202,17 @@ impl Provider for LocalProvider {
             .filter(|response| response.status().is_success())
             .map(|_| endpoint))
     }
+    async fn resolve_thread_harness(
+        &self,
+        thread: &dyn ThreadHandle,
+        config: &AgentConfig,
+        harness: &str,
+    ) -> Result<crate::ConversationHarnessConfig> {
+        self.executor
+            .resolve_thread_harness(thread, config, harness)
+            .await
+    }
+
     async fn execute_turn(
         &self,
         runtime: &Runtime,
@@ -229,6 +262,7 @@ impl Provider for LocalProvider {
             .with_managed_agents(self.managed.clone());
         provider.live_turns = self.live_turns.clone();
         provider.resource_preparations = self.resource_preparations.clone();
+        provider.frontend_responses = self.frontend_responses.clone();
         provider.turns = self.turns.clone();
         Ok(Arc::new(provider))
     }
@@ -286,6 +320,44 @@ impl Provider for LocalProvider {
         crate::permissions::respond(
             thread.as_ref(),
             exoharness::TurnRecord {
+                id: turn,
+                session_id: body.session_id,
+            },
+            body,
+        )
+        .await
+    }
+
+    async fn frontend_tool_result(
+        &self,
+        agent: exoharness::AgentId,
+        thread: exoharness::ThreadId,
+        turn: exoharness::TurnId,
+        body: &exo_managed_agents::http::protocol::FrontendToolResultBody,
+    ) -> Result<exoharness::EventId> {
+        use anyhow::{Context, ensure};
+        let agent = self
+            .state
+            .get_agent(&agent)
+            .await?
+            .context("agent not found")?;
+        let thread = agent
+            .get_thread(&thread)
+            .await?
+            .context("thread not found")?;
+        if let Some(caller) = self.state.caller() {
+            ensure!(
+                crate::permissions::turn_caller(thread.as_ref(), turn)
+                    .await?
+                    .as_deref()
+                    == Some(caller.principal.as_str()),
+                "only the caller who started this turn may submit client tool results"
+            );
+        }
+        let _guard = self.frontend_responses.lock().await;
+        crate::frontend_tools::respond(
+            thread.as_ref(),
+            TurnRecord {
                 id: turn,
                 session_id: body.session_id,
             },

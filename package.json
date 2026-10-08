@@ -20,7 +20,7 @@
     "docs:build": "vitepress build website/docs-src",
     "docs:dev": "vitepress dev website/docs-src",
     "website:build": "vite build --config website/vite.config.js && pnpm run docs:build",
-    "website:dev": "vite --config website/vite.config.js",
+    "website:dev": "node scripts/website-dev.mjs",
     "website:preview": "vite preview --config website/vite.config.js"
   },
   "dependencies": {
@@ -31,6 +31,7 @@
     "@braintrust/lingua-wasm": "^0.1.0",
     "@cursor/sdk": "^1.0.12",
     "@discordjs/voice": "^0.19.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@mozilla/readability": "^0.6.0",
     "@shadcn/react": "^0.1.0",
     "@whiskeysockets/baileys": "7.0.0-rc13",
@@ -60,6 +61,7 @@
     "@types/turndown": "^5.0.6",
     "@typescript/native-preview": "7.0.0-dev.20260328.1",
     "@vitejs/plugin-react": "^6.0.3",
+    "gray-matter": "4.0.3",
     "oxfmt": "^0.42.0",
     "oxlint": "^1.57.0",
     "shadcn": "^4.12.0",

@@ -20,6 +20,10 @@ import {
   WarmJsonlSandboxWorker,
 } from "@exo/model-runtime/shared";
 import { modelUsageRecord } from "@exo/model-runtime/usage";
+import {
+  clientModelInputContent,
+  getClientToolModelInput,
+} from "../../typescript/harness/client-tools";
 
 const PI_EXTENSION = String.raw`
 import { readFileSync } from "node:fs";
@@ -47,10 +51,11 @@ export default function (pi) {
   for (const tool of tools) {
     pi.registerTool({
       name: tool.name, label: tool.name, description: tool.description, parameters: tool.parameters,
-      async execute(_id, args, _signal, _onUpdate, ctx) {
-        const result = await request(ctx, "exo.execute_tool", { functionName: tool.name, arguments: args });
+      async execute(id, args, _signal, _onUpdate, ctx) {
+        const response = await request(ctx, "exo.execute_tool", { functionName: tool.name, arguments: args, toolCallId: id });
+        const result = response.output;
         if (result && (result.is_error === true || result.ok === false)) throw new Error(JSON.stringify(result));
-        return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+        return { content: response.content ?? [{ type: "text", text: JSON.stringify(result) }], details: result };
       },
     });
   }
@@ -193,10 +198,29 @@ export default defineHarness({
                 functionName: request.functionName,
                 arguments: toJsonObject(request.arguments),
               };
-              const result =
-                event.title === "exo.execute_tool"
-                  ? await context.executeTool(tool)
-                  : (await context.authorizeTool(tool), null);
+              let result: JsonValue = null;
+              if (event.title === "exo.execute_tool") {
+                const id =
+                  typeof request.toolCallId === "string"
+                    ? request.toolCallId
+                    : undefined;
+                const output = await context.executeTool(tool, id);
+                const input = id
+                  ? await getClientToolModelInput(
+                      context,
+                      tool.functionName,
+                      id,
+                    )
+                  : null;
+                result = {
+                  output,
+                  ...(input == null
+                    ? {}
+                    : { content: toJsonValue(clientModelInputContent(input)) }),
+                };
+              } else {
+                await context.authorizeTool(tool);
+              }
               response = { ok: true, result };
             } catch (error) {
               response = {

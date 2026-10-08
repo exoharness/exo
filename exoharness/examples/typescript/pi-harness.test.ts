@@ -123,6 +123,7 @@ it("accepts always_ask, forwards native and MCP approvals, and records a denial 
       placeholder: JSON.stringify({
         functionName: "exo_mcp__test__read",
         arguments: {},
+        toolCallId: "mcp-call",
       }),
     },
     { type: "agent_settled" },
@@ -139,10 +140,13 @@ it("accepts always_ask, forwards native and MCP approvals, and records a denial 
     functionName: "pi.bash",
     arguments: { command: "pwd" },
   });
-  expect(context.executeTool).toHaveBeenCalledWith({
-    functionName: "exo_mcp__test__read",
-    arguments: {},
-  });
+  expect(context.executeTool).toHaveBeenCalledWith(
+    {
+      functionName: "exo_mcp__test__read",
+      arguments: {},
+    },
+    "mcp-call",
+  );
   expect(recorded).toContainEqual({
     type: "tool_result",
     tool_call_id: "call",

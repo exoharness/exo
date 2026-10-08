@@ -213,7 +213,6 @@ exo vault secret create global openai --token-env OPENAI_API_KEY --allow-origin 
 
 cat > sysmon.md <<'EOF'
 ---
-name: "Sysmon"
 harness: exoharness/examples/typescript/sysmon-harness.ts
 config:
   model: gpt-5.5

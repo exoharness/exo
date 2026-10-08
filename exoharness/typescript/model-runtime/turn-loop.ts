@@ -131,11 +131,14 @@ async function runResponsesTurnLoop(
         definition,
         source: "built_in",
         handler: {
-          execute: (args) =>
-            context.executeTool({
-              functionName: definition.name,
-              arguments: args,
-            }),
+          execute: (args, execution) =>
+            context.executeTool(
+              {
+                functionName: definition.name,
+                arguments: args,
+              },
+              execution.toolCallId,
+            ),
         },
       });
     }

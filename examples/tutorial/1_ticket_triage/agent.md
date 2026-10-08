@@ -1,8 +1,7 @@
 ---
-name: support-analyst
 harness: codex
 model:
-  name: gpt-6-sol
+  name: gpt-6.1-sol
   credential: openai
 ---
 

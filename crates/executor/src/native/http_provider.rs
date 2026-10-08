@@ -208,6 +208,21 @@ impl Provider for HttpProvider {
             .event_id)
     }
 
+    async fn frontend_tool_result(
+        &self,
+        agent: exoharness::AgentId,
+        thread: exoharness::ThreadId,
+        turn: exoharness::TurnId,
+        body: &FrontendToolResultBody,
+    ) -> Result<EventId> {
+        Ok(self
+            .transport
+            .client
+            .frontend_tool_result(agent, thread, turn, body)
+            .await?
+            .event_id)
+    }
+
     fn harness(&self) -> &dyn Harness<ProviderTurn> {
         self
     }

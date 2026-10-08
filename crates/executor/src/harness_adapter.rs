@@ -397,7 +397,8 @@ async fn restore_recovery_tools(
                     && !responses.contains(&approval.approval_id)
             });
         anyhow::ensure!(
-            pending_approval,
+            pending_approval
+                || crate::frontend_tools::contains(&work.agent_config, &request.function_name),
             "cannot safely resume unresolved tool call `{tool_call_id}` (`{}`) for turn {}",
             request.function_name,
             work.turn.record().id

@@ -320,15 +320,6 @@ enum HarnessSelection {
     TypeScriptModule(PathBuf),
 }
 
-impl HarnessSelection {
-    fn harness_kind(&self) -> HarnessKind {
-        match self {
-            Self::Kind(kind) => *kind,
-            Self::TypeScriptPreset(_) | Self::TypeScriptModule(_) => HarnessKind::TypeScript,
-        }
-    }
-}
-
 impl FromStr for HarnessSelection {
     type Err = String;
 
@@ -1176,7 +1167,7 @@ async fn run_selected(
                     provider_store.ensure_agent_alias_available(&slug)?;
                 }
                 eprintln!("Preparing agent resources...");
-                let agent = harness.create_managed_agent(definition, &slug).await?;
+                let agent = harness.create_managed_agent(definition, &name, &slug).await?;
                 if let Some(provider) = &selected_provider {
                     provider_store.pin_agent(agent.record().slug.clone(), provider.selection, &provider.account, agent.record().id)?;
                 }
@@ -2022,15 +2013,6 @@ fn init_firecracker_bridge_tracing() {
     }
 }
 
-fn to_agent_harness_kind(kind: HarnessKind) -> AgentHarnessKind {
-    match kind {
-        HarnessKind::Basic => AgentHarnessKind::Basic,
-        HarnessKind::Rlm => AgentHarnessKind::Rlm,
-        HarnessKind::TypeScript => AgentHarnessKind::TypeScript,
-        HarnessKind::Exo => AgentHarnessKind::Exo,
-    }
-}
-
 fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
     match kind {
         AgentHarnessKind::Basic => "basic",
@@ -2042,62 +2024,6 @@ fn format_harness_kind(kind: AgentHarnessKind) -> &'static str {
 
 fn format_sandbox_provider(provider: &SandboxProvider) -> &str {
     provider.as_str()
-}
-
-async fn ensure_agent_matches_harness_selection(
-    agent: &dyn AgentHandle,
-    selection: &HarnessSelection,
-) -> Result<()> {
-    let config = executor::load_agent_config(agent).await?;
-    let expected = to_agent_harness_kind(selection.harness_kind());
-    if config.harness != expected {
-        bail!(
-            "agent {} is configured for {}; --harness {} requires {}",
-            agent.record().slug,
-            format_harness_kind(config.harness),
-            format_harness_selection(selection),
-            format_harness_kind(expected)
-        );
-    }
-
-    if matches!(
-        selection.harness_kind(),
-        HarnessKind::TypeScript | HarnessKind::Exo
-    ) && config.typescript.is_none()
-    {
-        bail!(
-            "agent {} is configured for {} but has no module path",
-            agent.record().slug,
-            format_harness_selection(selection)
-        );
-    }
-
-    let module = match selection {
-        HarnessSelection::TypeScriptPreset(preset) => Some(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join(preset.module_path()),
-        ),
-        HarnessSelection::TypeScriptModule(module) => Some(module.clone()),
-        HarnessSelection::Kind(_) => None,
-    };
-    if let Some(module) = module {
-        let expected = module.canonicalize()?.to_string_lossy().into_owned();
-        let actual = config
-            .typescript
-            .as_ref()
-            .context("agent has no TypeScript module")?;
-        anyhow::ensure!(
-            actual.module_path == expected,
-            "agent {} uses TypeScript module {}; --harness {} resolved to {}",
-            agent.record().slug,
-            actual.module_path,
-            format_harness_selection(selection),
-            expected
-        );
-    }
-
-    Ok(())
 }
 
 fn looks_like_typescript_module_path(value: &str) -> bool {

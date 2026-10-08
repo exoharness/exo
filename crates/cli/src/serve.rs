@@ -278,10 +278,14 @@ mod tests {
             )?,
             None,
         ));
-        let source = "---\nname: worker\nharness: basic\nconfig:\n  model: test\nadapters: [inbox]\n---\nHandle incoming messages.";
+        let source = "---\nharness: basic\nconfig:\n  model: test\nadapters: [inbox]\n---\nHandle incoming messages.";
         let definition = exo_managed_agents::AgentDefinition::parse(source.into())?;
-        let agent = runtime.create_managed_agent(&definition, "worker").await?;
-        let other = runtime.create_managed_agent(&definition, "other").await?;
+        let agent = runtime
+            .create_managed_agent(&definition, "worker", "worker")
+            .await?;
+        let other = runtime
+            .create_managed_agent(&definition, "other", "other")
+            .await?;
         let store = executor::AdapterStore::new(temp.path().join("adapters"))
             .for_agent(agent.record().id.to_string());
         let mut definitions = BTreeMap::new();

@@ -88,7 +88,8 @@ where
                 bail!("RLM turn exceeded the configured round budget");
             }
 
-            let external_tools = self.tools.definitions();
+            let mut external_tools = self.tools.definitions();
+            external_tools.extend(crate::frontend_tools::definitions(agent_config));
             let external_names: Vec<_> = external_tools
                 .iter()
                 .map(|tool| tool.name.clone())
@@ -135,8 +136,11 @@ where
             }
 
             let mut tool_messages = Vec::with_capacity(response.tool_calls.len());
+            let mut client_messages = Vec::new();
             for tool_call in response.tool_calls {
-                if let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
+                let client_tool =
+                    crate::frontend_tools::contains(agent_config, &tool_call.request.function_name);
+                if !client_tool && let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
                     try_send_stream_event(
                         event_tx,
                         ExecutionStreamEvent::ToolCall {
@@ -165,6 +169,14 @@ where
                 )
                 .await?;
 
+                if client_tool {
+                    turn.add_events(vec![EventData::ToolRequested {
+                        tool_call_id: tool_call.tool_call_id.clone(),
+                        response_id: None,
+                        request: tool_call.request.clone(),
+                    }])
+                    .await?;
+                }
                 let tool_result = async {
                     crate::permissions::authorize(
                         conversation,
@@ -180,7 +192,25 @@ where
                         stream_mode,
                     )
                     .await?;
-                    if external_names.contains(&tool_call.request.function_name) {
+                    if client_tool {
+                        let result = crate::frontend_tools::execute(
+                            conversation,
+                            turn,
+                            &tool_call.tool_call_id,
+                            &tool_call.request,
+                        )
+                        .await?;
+                        if let Some(content) = crate::frontend_tools::model_input_for_call(
+                            conversation,
+                            turn.record(),
+                            &tool_call.tool_call_id,
+                        )
+                        .await?
+                        {
+                            client_messages.push(Message::User { content });
+                        }
+                        Ok(result)
+                    } else if external_names.contains(&tool_call.request.function_name) {
                         self.tools
                             .execute(
                                 agent,
@@ -226,7 +256,14 @@ where
                     },
                 )
                 .await?;
-                if let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
+                if client_tool {
+                    turn.add_events(vec![EventData::ToolResult {
+                        tool_call_id: tool_call.tool_call_id.clone(),
+                        result: result.clone(),
+                    }])
+                    .await?;
+                }
+                if !client_tool && let ExecutorStreamMode::Enabled(event_tx) = stream_mode {
                     try_send_stream_event(
                         event_tx,
                         ExecutionStreamEvent::ToolResult {
@@ -249,6 +286,7 @@ where
                 });
             }
             history.extend(tool_messages);
+            history.extend(client_messages);
             round += 1;
         }
     }
@@ -364,12 +402,13 @@ where
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
-        conversation_config.permissions.validate_tool_names(
-            build_rlm_tool_definitions()
-                .iter()
-                .chain(self.tools.definitions().iter())
-                .map(|tool| tool.name.as_str()),
-        )?;
+        let mut definitions = build_rlm_tool_definitions();
+        definitions.extend(self.tools.definitions());
+        crate::frontend_tools::validate(agent_config, &definitions)?;
+        definitions.extend(crate::frontend_tools::definitions(agent_config));
+        conversation_config
+            .permissions
+            .validate_tool_names(definitions.iter().map(|tool| tool.name.as_str()))?;
         self.tools
             .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await

@@ -1,5 +1,4 @@
 ---
-name: exo-developer
 harness: codex
 config:
   model: gpt-5.6-sol

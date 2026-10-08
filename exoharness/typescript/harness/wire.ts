@@ -9,6 +9,7 @@ import type {
 
 export interface RawAgentConfig {
   instructions: Message[];
+  frontend_tools?: AgentConfig["frontendTools"];
   harness: "basic" | "rlm" | "typescript" | "type_script" | "exo";
   typescript?: {
     module_path: string;
@@ -61,6 +62,7 @@ export interface RawSendRequest {
 export function toAgentConfig(raw: RawAgentConfig): AgentConfig {
   return {
     instructions: raw.instructions,
+    frontendTools: raw.frontend_tools ?? [],
     harness: raw.harness === "type_script" ? "typescript" : raw.harness,
     typescript: raw.typescript
       ? {

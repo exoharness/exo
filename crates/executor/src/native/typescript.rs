@@ -115,6 +115,7 @@ where
         agent_config: &AgentConfig,
         conversation_config: &ConversationConfig,
     ) -> Result<()> {
+        crate::frontend_tools::validate(agent_config, &self.tools.definitions())?;
         self.tools
             .prepare_conversation(agent, conversation, agent_config, conversation_config)
             .await
@@ -1156,10 +1157,15 @@ export default {
     if (value !== "ready 🧪") throw new Error(`lost process output: ${value}`);
     await process.wait();
 
-    await context.exoharness.current.turn.addEvents([
+    const turn = context.exoharness.current.turn;
+    await turn.addEvents([
       { type: "tool_requested", tool_call_id: "call", response_id: null,
-        request: { function_name: "shell", arguments: { command: "pwd" } } },
-      { type: "tool_result", tool_call_id: "call", result: { stdout: "/workspace" } },
+        request: { function_name: "lookup", arguments: {} } }
+    ]);
+    await turn.addEvents(await context.executePendingTools([
+      { toolCallId: "call", request: { functionName: "lookup", arguments: {} } }
+    ]));
+    await turn.addEvents([
       { type: "messages", response_id: null, messages: [{ role: "assistant", content: "done" }] }
     ]);
   }
@@ -1179,6 +1185,7 @@ export default {
         let config: AgentConfig = serde_json::from_value(serde_json::json!({
             "instructions": [], "harness": "typescript",
             "typescript": { "module_path": module },
+            "frontend_tools": [{ "name": "lookup", "description": "Client tool", "parameters": { "type": "object" } }],
             "sandbox": { "provider": "local_process" }, "model": "gpt-5-mini"
         }))?;
         let runtime = Runtime::new(
@@ -1190,7 +1197,8 @@ export default {
             ),
             None,
         );
-        let (_, mut stream) = runtime
+        let agent_id = agent.record().id;
+        let (turn, mut stream) = runtime
             .start_turn(
                 agent,
                 thread.clone(),
@@ -1212,6 +1220,13 @@ export default {
                     ExecutionStreamEvent::ToolCall { tool_call_id, .. } => {
                         assert_eq!(tool_call_id, "call");
                         calls += 1;
+                        runtime.frontend_tool_result(agent_id, thread.record().id, turn.id,
+                            &exo_managed_agents::http::protocol::FrontendToolResultBody {
+                                session_id: turn.session_id, tool_call_id,
+                                result: exo_managed_agents::http::protocol::FrontendToolExecutionResult::FrontendToolSuccess {
+                                    output: serde_json::json!({"stdout": "/workspace"}), model_input: None,
+                                },
+                            }).await?;
                     }
                     ExecutionStreamEvent::ToolResult { tool_call_id, .. } => {
                         assert_eq!(tool_call_id, "call");

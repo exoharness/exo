@@ -1059,7 +1059,9 @@ async fn shared_vaults_require_attachment_and_keep_writes_with_the_owner() -> Re
     )
     .await?;
     assert!(vault.get_secret(&secret).await.is_err());
-    let definition = exo_managed_agents::AgentDefinition::parse("---\nname: shared\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: key\n---\nHelp.\n".into())?;
+    let definition = exo_managed_agents::AgentDefinition::parse(
+        "---\nharness: basic\nconfig:\n  model: gpt-5-mini\n  credential: key\n---\nHelp.\n".into(),
+    )?;
     let mut model = crate::managed_agents::agent_config(
         &definition,
         exoharness::SandboxProvider::LocalProcess,
@@ -1222,19 +1224,40 @@ async fn host_configuration_requires_the_operator() -> Result<()> {
         "adapters: [inbox]",
     ] {
         let definition = exo_managed_agents::AgentDefinition::parse(format!(
-            "---\nname: worker\nharness: basic\nconfig:\n  model: test\n{extra}\n---\nWork"
+            "---\nharness: basic\nconfig:\n  model: test\n{extra}\n---\nWork"
         ))?;
         let error = runtime
-            .create_managed_agent(&definition, "worker")
+            .create_managed_agent(&definition, "worker", "worker")
             .await
             .err()
             .context("non-owner configured host execution")?;
         assert!(format!("{error:#}").contains("server owner"), "{error:#}");
     }
     let definition = exo_managed_agents::AgentDefinition::parse(
-        "---\nname: worker\nharness: basic\nconfig:\n  model: test\n---\nWork".into(),
+        "---\nharness: basic\nconfig:\n  model: test\n---\nWork".into(),
     )?;
-    let agent = runtime.create_managed_agent(&definition, "worker").await?;
+    let agent = runtime
+        .create_managed_agent(&definition, "worker", "worker")
+        .await?;
+    let error = runtime
+        .open_managed_thread(
+            &agent,
+            None,
+            Default::default(),
+            &exo_managed_agents::ThreadOptions {
+                harness: Some("module.ts".into()),
+                model: None,
+            },
+        )
+        .await
+        .err()
+        .context("non-owner selected a host module for a thread")?;
+    assert!(format!("{error:#}").contains("server owner"), "{error:#}");
+    assert!(
+        exo_managed_agents::list_threads(agent.as_ref())
+            .await?
+            .is_empty()
+    );
     let environment = exoharness::EnvironmentDefinition {
         name: "published".into(),
         config: serde_json::from_value(json!({ "provider": "local-process", "image": "local" }))?,

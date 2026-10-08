@@ -372,17 +372,13 @@ impl Runtime {
                 })
                 .await?;
         }
-        let override_supplied = config_override.is_some();
-        let mut agent_config = match config_override {
+        let agent_config = match config_override {
             Some(config) => config,
-            None => self.get_agent_config(agent.as_ref()).await?,
+            None => {
+                self.get_thread_agent_config(agent.as_ref(), thread.as_ref())
+                    .await?
+            }
         };
-        if !override_supplied
-            && let Some(model) = crate::get_conversation_model_override(thread.as_ref()).await?
-        {
-            agent_config.model = model.model;
-            agent_config.max_output_tokens = model.max_output_tokens;
-        }
         let work = TurnWork {
             streaming,
             agent_config,

@@ -173,7 +173,7 @@ export interface RawTypeScriptInitPayload {
 
 export type RawRuntimeRequest =
   | { type: "authorize_tool"; request: RawToolRequest }
-  | { type: "execute_tool"; request: RawToolRequest }
+  | { type: "execute_tool"; request: RawToolRequest; tool_call_id?: string }
   | {
       type: "start_sandbox_process";
       command: string[];
@@ -1131,10 +1131,11 @@ export function createTurnContext(
         request: toRawToolRequest(request),
       });
     },
-    async executeTool(request): Promise<ToolResult> {
+    async executeTool(request, toolCallId): Promise<ToolResult> {
       const payload = await client.requestRuntime({
         type: "execute_tool",
         request: toRawToolRequest(request),
+        tool_call_id: toolCallId,
       });
       if (payload.type !== "tool_result") {
         throw new Error(`expected tool_result payload, got ${payload.type}`);
@@ -1153,7 +1154,10 @@ export function createTurnContext(
       for (const toolCall of toolCalls) {
         let result: ToolResult;
         try {
-          result = await context.executeTool(toolCall.request);
+          result = await context.executeTool(
+            toolCall.request,
+            toolCall.toolCallId,
+          );
         } catch (error) {
           result = {
             ok: false,

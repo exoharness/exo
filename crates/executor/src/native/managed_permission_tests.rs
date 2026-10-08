@@ -20,13 +20,13 @@ async fn resumed_threads_use_updated_agent_permissions() -> Result<()> {
         )?,
         None,
     );
-    let source = "---\nname: permissions\nharness: basic\nconfig:\n  model: fixture\npermission_policy: {type: always_allow}\n---\nUse tools.\n";
+    let source = "---\nharness: basic\nconfig:\n  model: fixture\npermission_policy: {type: always_allow}\n---\nUse tools.\n";
     let definition = AgentDefinition::parse(source.into())?;
     let agent = runtime
-        .create_managed_agent(&definition, "permissions")
+        .create_managed_agent(&definition, "permissions", "permissions")
         .await?;
     let opened = runtime
-        .open_managed_thread(&agent, None, Default::default())
+        .open_managed_thread(&agent, None, Default::default(), &Default::default())
         .await?;
     let thread = opened.thread;
     assert_eq!(
@@ -52,6 +52,7 @@ async fn resumed_threads_use_updated_agent_permissions() -> Result<()> {
                 &agent,
                 Some(&thread.record().id.to_string()),
                 Default::default(),
+                &Default::default(),
             )
             .await?;
         assert!(!resumed.created);

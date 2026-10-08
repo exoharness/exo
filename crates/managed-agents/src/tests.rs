@@ -28,7 +28,7 @@ use exoharness::{
     SecretBackendChoice,
 };
 
-const SOURCE: &str = "---\nname: support-analyst\nharness: codex\nconfig:\n  model: gpt-5.6-sol\n---\n\nInvestigate tickets.\n\n---\nCite each ticket.\n";
+const SOURCE: &str = "---\nharness: codex\nconfig:\n  model: gpt-5.6-sol\n---\n\nInvestigate tickets.\n\n---\nCite each ticket.\n";
 
 #[test]
 fn sandbox_networking_defaults_to_enabled() -> Result<()> {
@@ -51,7 +51,13 @@ async fn provider_mcp_definitions_resolve_in_the_host_context() -> Result<()> {
     let source = SOURCE.replace("config:\n", "mcp_servers:\n  - type: provider\n    name: tickets\n    allowed_tools: [search]\n    blocked_tools: [delete]\nconfig:\n");
     let definition = AgentDefinition::parse(source.clone())?;
     let root = storage().await?;
-    let agent = create_agent(&StorageBackend(root.clone()), &definition, "support").await?;
+    let agent = create_agent(
+        &StorageBackend(root.clone()),
+        &definition,
+        "support",
+        "support",
+    )
+    .await?;
     let saved = load_definition(agent.as_ref()).await?.unwrap();
     assert_eq!(saved.source, source);
     for url in ["http://127.0.0.1:8000/mcp", "https://tickets.example/mcp"] {
@@ -121,7 +127,13 @@ async fn saved_mcp_definitions_preserve_filters_and_reject_embedded_credentials(
     let source = SOURCE.replace("config:\n", "mcp_servers:\n  - type: url\n    name: tickets\n    url: https://tickets.example/mcp\n    allowed_tools: [search, read]\n    blocked_tools: [delete]\nconfig:\n");
     let definition = AgentDefinition::parse(source.clone())?;
     let root = storage().await?;
-    let agent = create_agent(&StorageBackend(root.clone()), &definition, "support").await?;
+    let agent = create_agent(
+        &StorageBackend(root.clone()),
+        &definition,
+        "support",
+        "support",
+    )
+    .await?;
     let saved = load_definition(agent.as_ref()).await?.unwrap();
     assert_eq!(saved.source, source);
     let servers = saved.resolve_mcp_servers(&()).await?;
@@ -149,10 +161,10 @@ async fn saved_mcp_definitions_preserve_filters_and_reject_embedded_credentials(
 fn parses_frontmatter_and_preserves_the_original_document() -> Result<()> {
     for source in [
         SOURCE.to_string(),
+        SOURCE.replacen("---\n", "---\nname: support-analyst\n", 1),
         format!("\u{feff}{}", SOURCE.replace('\n', "\r\n")),
     ] {
         let definition = AgentDefinition::parse(source.clone())?;
-        assert_eq!(definition.frontmatter.name, "support-analyst");
         assert_eq!(definition.frontmatter.harness, "codex");
         assert_eq!(definition.frontmatter.config.model, "gpt-5.6-sol");
         assert_eq!(
@@ -160,13 +172,8 @@ fn parses_frontmatter_and_preserves_the_original_document() -> Result<()> {
             "Investigate tickets.\n\n---\nCite each ticket."
         );
         assert_eq!(definition.source, source);
-        assert_eq!(
-            definition.system_prompt(),
-            "You are support-analyst.\n\nInvestigate tickets.\n\n---\nCite each ticket."
-        );
     }
     for source in [
-        SOURCE.replace("name: support-analyst", "name: ''"),
         SOURCE.replace("harness: codex", "harness: ''"),
         SOURCE.replace("model: gpt-5.6-sol", "model: ''"),
         SOURCE.replace("model: gpt-5.6-sol", "model: gpt-5.6-sol\n  temperature: 1"),
@@ -176,7 +183,7 @@ fn parses_frontmatter_and_preserves_the_original_document() -> Result<()> {
             "sandbox: {provider: docker, image: ubuntu:24.04}\nconfig:\n",
         ),
         SOURCE.replacen("---\n", "", 1),
-        "---\nname: support-analyst".to_string(),
+        "---\nharness: codex".to_string(),
         SOURCE.split("\n\nInvestigate").next().unwrap().to_string(),
     ] {
         assert!(AgentDefinition::parse(source).is_err());
@@ -202,9 +209,11 @@ async fn saves_definitions_and_resumes_only_threads_owned_by_the_agent() -> Resu
     let root = storage().await?;
     let backend = StorageBackend(root.clone());
     let definition = AgentDefinition::parse(SOURCE.to_string())?;
-    let agent = create_agent(&backend, &definition, "support").await?;
+    let agent = create_agent(&backend, &definition, "Support Analyst", "support").await?;
+    assert_eq!(agent.record().name, "Support Analyst");
+    assert_eq!(agent.record().slug, "support");
     assert!(
-        create_agent(&backend, &definition, "support")
+        create_agent(&backend, &definition, "support", "support")
             .await
             .is_err()
     );
@@ -239,22 +248,36 @@ async fn saves_definitions_and_resumes_only_threads_owned_by_the_agent() -> Resu
             slug: Some("tickets".to_string()),
             name: None,
         },
+        &Default::default(),
     )
     .await?;
     assert!(opened.created);
     for reference in ["tickets".to_string(), opened.thread.record().id.to_string()] {
-        let resumed = open_thread(&backend, &agent, Some(&reference), Default::default()).await?;
+        let resumed = open_thread(
+            &backend,
+            &agent,
+            Some(&reference),
+            Default::default(),
+            &Default::default(),
+        )
+        .await?;
         assert!(!resumed.created);
         assert_eq!(resumed.thread.record().id, opened.thread.record().id);
     }
     assert!(
-        open_thread(&backend, &agent, Some("missing"), Default::default())
-            .await
-            .is_err()
+        open_thread(
+            &backend,
+            &agent,
+            Some("missing"),
+            Default::default(),
+            &Default::default()
+        )
+        .await
+        .is_err()
     );
     assert_eq!(list_threads(agent.as_ref()).await?.len(), 1);
     assert!(find_agent(root.as_ref(), "support-analyst").await.is_err());
-    let other = create_agent(&backend, &definition, "support-analyst").await?;
+    let other = create_agent(&backend, &definition, "support-analyst", "support-analyst").await?;
     assert_eq!(
         find_agent(root.as_ref(), "support-analyst")
             .await?
@@ -292,7 +315,13 @@ impl AgentBackend for FailingBackend {
 async fn removes_incomplete_agents_when_runtime_configuration_fails() -> Result<()> {
     let root = storage().await?;
     let definition = AgentDefinition::parse(SOURCE.to_string())?;
-    let result = create_agent(&FailingBackend(root.clone()), &definition, "support").await;
+    let result = create_agent(
+        &FailingBackend(root.clone()),
+        &definition,
+        "support",
+        "support",
+    )
+    .await;
     assert!(
         result
             .err()
@@ -301,7 +330,13 @@ async fn removes_incomplete_agents_when_runtime_configuration_fails() -> Result<
             .contains("runtime configuration failed")
     );
     assert!(root.list_agents().await?.is_empty());
-    create_agent(&StorageBackend(root.clone()), &definition, "support").await?;
+    create_agent(
+        &StorageBackend(root.clone()),
+        &definition,
+        "support",
+        "support",
+    )
+    .await?;
     Ok(())
 }
 

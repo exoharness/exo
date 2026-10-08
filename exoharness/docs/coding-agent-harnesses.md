@@ -69,7 +69,6 @@ Create the agent and start a conversation:
 ```bash
 cat > ts-codex.md <<'EOF'
 ---
-name: "TS Codex"
 harness: codex
 config:
   model: gpt-5.5
@@ -106,7 +105,6 @@ Create the agent and start a conversation:
 ```bash
 cat > ts-claude-code.md <<'EOF'
 ---
-name: "TS Claude Code"
 harness: claude-code
 config:
   model: claude-sonnet-4-6
@@ -144,7 +142,6 @@ Create the agent and start a conversation:
 ```bash
 cat > ts-cursor.md <<'EOF'
 ---
-name: "TS Cursor"
 harness: cursor
 config:
   model: auto
@@ -184,7 +181,6 @@ Create the agent and start a conversation:
 ```bash
 cat > ts-pi.md <<'EOF'
 ---
-name: "TS Pi"
 harness: pi
 config:
   model: gpt-5.5

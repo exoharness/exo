@@ -77,7 +77,12 @@ impl TypeScriptRuntime {
             streaming: matches!(context.stream, ExecutorStreamMode::Enabled(_)),
             recovering,
             braintrust_parent,
-            tools: self.tools.definitions(),
+            tools: self
+                .tools
+                .definitions()
+                .into_iter()
+                .chain(crate::frontend_tools::definitions(context.agent_config))
+                .collect(),
             mcp_servers: self.tools.mcp_servers(context.conversation).await?,
         })
     }
@@ -170,8 +175,8 @@ impl TypeScriptRuntime {
         context: Option<RequestContext<'_>>,
         request: RuntimeRequest,
     ) -> Result<RuntimeResponsePayload> {
-        if let RuntimeRequest::ExecuteTool { request } | RuntimeRequest::AuthorizeTool { request } =
-            &request
+        if let RuntimeRequest::ExecuteTool { request, .. }
+        | RuntimeRequest::AuthorizeTool { request } = &request
         {
             let context = context.as_ref().context("TypeScript turn is not active")?;
             crate::permissions::authorize(
@@ -193,8 +198,24 @@ impl TypeScriptRuntime {
             RuntimeRequest::AuthorizeTool { .. } => Ok(RuntimeResponsePayload::ToolResult {
                 result: serde_json::Value::Null,
             }),
-            RuntimeRequest::ExecuteTool { request } => {
+            RuntimeRequest::ExecuteTool {
+                request,
+                tool_call_id,
+            } => {
                 let context = context.context("TypeScript turn is not active")?;
+                if crate::frontend_tools::contains(context.agent_config, &request.function_name) {
+                    return Ok(RuntimeResponsePayload::ToolResult {
+                        result: crate::frontend_tools::execute(
+                            context.conversation,
+                            context.turn,
+                            tool_call_id
+                                .as_deref()
+                                .context("client tool execution requires a tool call ID")?,
+                            &request,
+                        )
+                        .await?,
+                    });
+                }
                 Ok(RuntimeResponsePayload::ToolResult {
                     result: self
                         .tools
@@ -509,6 +530,7 @@ pub enum RuntimeRequest {
     },
     ExecuteTool {
         request: ToolRequest,
+        tool_call_id: Option<String>,
     },
     StartSandboxProcess {
         command: Vec<String>,

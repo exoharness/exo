@@ -57,7 +57,10 @@ async fn model_credentials_resolve_only_from_the_selected_vaults() -> Result<()>
             ..Default::default()
         })
         .await?;
-    let definition = exo_managed_agents::AgentDefinition::parse("---\nname: test\nharness: basic\nconfig:\n  model: gpt-5.6-sol\n  credential: provider\n---\nTest.".into())?;
+    let definition = exo_managed_agents::AgentDefinition::parse(
+        "---\nharness: basic\nconfig:\n  model: gpt-5.6-sol\n  credential: provider\n---\nTest."
+            .into(),
+    )?;
     let mut config = crate::managed_agents::agent_config(
         &definition,
         SandboxProvider::LocalProcess,

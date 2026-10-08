@@ -183,11 +183,7 @@ pub async fn open_thread(
             .context("resolving agent file")?;
         let name = path.file_stem().context("agent file has no filename")?;
         let hash = format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes()));
-        let slug = format!(
-            "{}-{}",
-            crate::slugify(&name.to_string_lossy()),
-            &hash[..16]
-        );
+        let slug = format!("{}-{}", crate::slugify(&name.to_string_lossy()), &hash[..8]);
         progress
             .wait(async {
                 tracing::info!(target: "exoharness::progress", "Syncing agent resources...");
@@ -196,7 +192,11 @@ pub async fn open_thread(
                         runtime.update_managed_agent(&agent, definition).await?;
                         Ok(agent)
                     }
-                    None => runtime.create_managed_agent(definition, &slug).await,
+                    None => {
+                        runtime
+                            .create_managed_agent(definition, &name.to_string_lossy(), &slug)
+                            .await
+                    }
                 }
             })
             .await?
@@ -267,9 +267,10 @@ pub async fn open_thread(
             NewThreadRequest {
                 environment,
                 vaults: vaults.iter().map(|vault| vault.record().id).collect(),
-                slug: Some(slug.clone()),
-                name: Some(slug),
+                slug: Some(slug),
+                name: args.thread.clone(),
             },
+            &Default::default(),
         ))
         .await?;
     println!("agent: {} ({})", agent.record().slug, agent.record().id);
@@ -289,7 +290,9 @@ pub async fn open_thread(
     {
         println!("mcp: {count} tools");
     }
-    let config = runtime.get_agent_config(agent.as_ref()).await?;
+    let config = runtime
+        .get_thread_agent_config(agent.as_ref(), opened.thread.as_ref())
+        .await?;
     if let Some(name) = config.credential.as_deref() {
         let reference = exoharness::vault::find_secret(opened.thread.as_ref(), name)
                 .await?
@@ -344,7 +347,11 @@ pub async fn list_threads(harness: &Runtime, agent: &str) -> Result<()> {
                 vec![
                     record.slug.clone(),
                     record.id.to_string(),
-                    record.name.clone(),
+                    if record.name.is_empty() {
+                        "Untitled".into()
+                    } else {
+                        record.name.clone()
+                    },
                 ]
             })
             .collect(),

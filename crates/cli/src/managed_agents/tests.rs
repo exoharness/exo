@@ -13,7 +13,7 @@ use tempfile::TempDir;
 
 use super::*;
 
-const SOURCE: &str = "---\nname: support-analyst\nharness: basic\nconfig:\n  model: gpt-5.4\n  credential: test-openai\n---\n\nInvestigate support tickets.\n";
+const SOURCE: &str = "---\nharness: basic\nconfig:\n  model: gpt-5.4\n  credential: test-openai\n---\n\nInvestigate support tickets.\n";
 
 #[derive(Default)]
 struct RecordingModel {
@@ -100,6 +100,7 @@ fn configured_runtime(
     args: &ThreadArgs,
 ) -> Result<Runtime> {
     let setup = executor::managed_agents::LocalAgentSetup {
+        harness: None,
         agent: definition
             .map(|definition| local_agent_config(definition, &harness_selection(definition)?, None))
             .transpose()?,
@@ -153,10 +154,12 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
     let model = Arc::new(RecordingModel::default());
     let storage_root = temp.path().join("state");
     let runtime = harness(&storage_root, Arc::clone(&model)).await?;
-    let saved = runtime.create_managed_agent(&definition, "support").await?;
+    let saved = runtime
+        .create_managed_agent(&definition, "support", "support")
+        .await?;
     assert!(
         runtime
-            .create_managed_agent(&definition, "support")
+            .create_managed_agent(&definition, "support", "support")
             .await
             .is_err()
     );
@@ -222,7 +225,7 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
     for request in requests.iter() {
         assert!(
             matches!(&request.messages[0], Message::System { content: UserContent::String(text) }
-            if text == "You are support-analyst.\n\nInvestigate support tickets.")
+            if text == "Investigate support tickets.")
         );
     }
     assert!(requests[1].messages.iter().any(|message| matches!(message,
@@ -250,6 +253,7 @@ async fn file_runs_reuse_saved_agents_and_mounts_stay_on_threads() -> Result<()>
     );
     let (first, thread) =
         open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
+    assert_eq!(first.record().name, "agent");
     let (second, second_thread) =
         open_configured_thread(runtime.as_ref(), Some(&definition), &args).await?;
     assert_eq!(first.record().id, second.record().id);

@@ -14,7 +14,6 @@ own a sandbox.
 ```bash
 cat > sandbox-example.md <<'EOF'
 ---
-name: "Sandbox Example"
 harness: basic
 config:
   model: gpt-5.5

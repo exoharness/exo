@@ -1,5 +1,4 @@
 ---
-name: Gameboy
 harness: ./agent/harness.ts
 config:
   model: gpt-5.5

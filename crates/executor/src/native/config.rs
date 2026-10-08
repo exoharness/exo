@@ -31,3 +31,17 @@ pub fn agent_config(
 ) -> Result<AgentConfig> {
     agent_config_with_modules(definition, sandbox, harness, model, &NativeHarnessModules)
 }
+
+pub(crate) async fn resolve_thread_harness(
+    thread: &dyn exoharness::ThreadHandle,
+    config: &AgentConfig,
+    harness: &str,
+) -> Result<crate::ConversationHarnessConfig> {
+    crate::managed_agents::config::resolve_thread_harness(
+        thread,
+        config,
+        harness,
+        &NativeHarnessModules,
+    )
+    .await
+}

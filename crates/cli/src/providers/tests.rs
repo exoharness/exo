@@ -54,7 +54,7 @@ async fn http_runtime_does_not_initialize_local_state_or_resolve_remote_harnesse
         "hello",
     ])?;
     let definition = exo_managed_agents::AgentDefinition::parse(
-        "---\nname: remote-agent\nharness: server-owned-harness\nconfig:\n  model: server-model\n---\n\nAnswer questions.".into(),
+        "---\nharness: server-owned-harness\nconfig:\n  model: server-model\n---\n\nAnswer questions.".into(),
     )?;
     let runtime = runtime(
         &cli,

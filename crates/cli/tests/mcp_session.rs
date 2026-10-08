@@ -84,7 +84,7 @@ async fn vault_credentials_stay_host_side_and_typescript_preserves_oauth_refresh
     std::fs::write(
         &definition,
         format!(
-            "---\nname: test-agent\nharness: {}\nconfig:\n  model: fixture\nmcp_servers:\n  - type: url\n    name: fixture\n    url: {}\n---\nTest credentials.\n",
+            "---\nharness: {}\nconfig:\n  model: fixture\nmcp_servers:\n  - type: url\n    name: fixture\n    url: {}\n---\nTest credentials.\n",
             module.display(),
             server.uri()
         ),

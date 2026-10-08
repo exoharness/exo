@@ -559,7 +559,7 @@ mod tests {
             ),
         ] {
             let definition = exo_managed_agents::AgentDefinition::parse(format!(
-                "---\nname: test\nharness: {harness_name}\nconfig:\n  model: {model}\n  credential: {harness_name}\n---\nHelp."
+                "---\nharness: {harness_name}\nconfig:\n  model: {model}\n  credential: {harness_name}\n---\nHelp."
             ))?;
             let mut agent_config = crate::managed_agents::agent_config(
                 &definition,
@@ -666,7 +666,7 @@ mod tests {
             .await?;
         let thread = agent.new_thread(NewThreadRequest::default()).await?;
         let definition = exo_managed_agents::AgentDefinition::parse(
-            "---\nname: test\nharness: basic\nconfig:\n  model: test\n---\nUse tools.".into(),
+            "---\nharness: basic\nconfig:\n  model: test\n---\nUse tools.".into(),
         )?;
         let mut agent_config =
             crate::managed_agents::agent_config(&definition, SandboxProvider::Docker, None, None)?;

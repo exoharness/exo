@@ -226,7 +226,6 @@ export default defineHarness({
 ```bash
 cat > coder.md <<'EOF'
 ---
-name: "Coder"
 harness: exoharness/examples/typescript/coding-agent-harness.ts
 config:
   model: gpt-5.5
