@@ -23,8 +23,9 @@ use crate::render::{
     ASSISTANT_LABEL, Verbosity, compact_result_status, compact_timestamp, print_transcript,
     render_assistant_content, render_tool_call, render_tool_result,
 };
-use crate::run_sandbox_shell_command;
 use crate::turn_display::{TurnProgress, UsageTotals, UsageTracker, interruptible};
+use crate::{SandboxProviderArg, run_sandbox_shell_command};
+use clap::ValueEnum;
 use executor::harness::HarnessTurnKey;
 
 const DEFAULT_SHELL_PROGRAM: &str = "/bin/bash";
@@ -60,6 +61,23 @@ impl AssistantLine {
         self.break_line(writer)?;
         self.active = false;
         Ok(())
+    }
+}
+
+/// Resolve the provider name a user typed at `/teleport`.
+///
+/// `--provider` advertises kebab-case names for the providers exo ships
+/// (`apple-container`, `local-process`, `aws-agentcore`), but those are
+/// registered under the snake_case constants, and since sandbox providers
+/// became an open set any string parses as-is. Routing the built-ins through
+/// the same mapping `--provider` uses keeps one spelling working everywhere;
+/// any other name belongs to a provider this build does not define, so it is
+/// taken verbatim and out-of-tree backends still reach their registration.
+fn resolve_sandbox_provider(provider_str: &str) -> Result<SandboxProvider> {
+    let provider_str = provider_str.trim();
+    match SandboxProviderArg::from_str(provider_str, true) {
+        Ok(builtin) => Ok(builtin.into()),
+        Err(_) => Ok(provider_str.parse::<SandboxProvider>()?),
     }
 }
 
@@ -599,9 +617,7 @@ impl ChatRepl {
     /// provider. Prints progress between the slow steps, which is why the
     /// line-mode repl doesn't use the TUI's silent `teleport_lines`.
     async fn teleport_sandbox(&self, provider_str: &str) -> Result<(SandboxId, SandboxProvider)> {
-        let provider = provider_str
-            .parse::<SandboxProvider>()
-            .map_err(|error| anyhow::anyhow!("invalid provider `{provider_str}`: {error}"))?;
+        let provider = resolve_sandbox_provider(provider_str)?;
         let sandbox_id = latest_sandbox_id(self.conversation.as_ref())
             .await?
             .ok_or_else(|| {
@@ -1094,9 +1110,7 @@ async fn teleport_sandbox(
     conversation: &dyn ConversationHandle,
     provider_str: &str,
 ) -> Result<(SandboxId, SandboxProvider)> {
-    let provider = provider_str
-        .parse::<SandboxProvider>()
-        .map_err(|error| anyhow::anyhow!("invalid provider `{provider_str}`: {error}"))?;
+    let provider = resolve_sandbox_provider(provider_str)?;
     let sandbox_id = latest_sandbox_id(conversation)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no sandbox has been created in this conversation yet"))?;
@@ -1269,10 +1283,45 @@ mod tests {
         );
     }
 
-    use super::{Verbosity, render_external_event, render_user_content_for_history};
+    use super::{
+        SandboxProvider, Verbosity, render_external_event, render_user_content_for_history,
+        resolve_sandbox_provider,
+    };
     use executor::EventData;
     use lingua::Message;
     use lingua::universal::UserContent;
+
+    #[test]
+    fn teleport_accepts_the_provider_spellings_the_cli_advertises() {
+        // `--provider apple-container` and `/teleport apple-container` have to
+        // reach the same backend; the constants are snake_case.
+        assert_eq!(
+            resolve_sandbox_provider("apple-container").unwrap(),
+            SandboxProvider::AppleContainer
+        );
+        assert_eq!(
+            resolve_sandbox_provider("local-process").unwrap(),
+            SandboxProvider::LocalProcess
+        );
+        assert_eq!(
+            resolve_sandbox_provider("aws-agentcore").unwrap(),
+            SandboxProvider::AwsAgentCore
+        );
+        assert_eq!(
+            resolve_sandbox_provider(" docker ").unwrap(),
+            SandboxProvider::Docker
+        );
+    }
+
+    #[test]
+    fn teleport_passes_through_providers_this_build_does_not_define() {
+        // Sandbox providers are an open set, so a name exo does not ship must
+        // reach the registry exactly as the operator registered it.
+        assert_eq!(
+            resolve_sandbox_provider("my-own-vm").unwrap().as_str(),
+            "my-own-vm"
+        );
+    }
 
     #[test]
     fn renders_scheduled_task_wakeup_user_messages() {
