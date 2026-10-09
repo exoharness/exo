@@ -14,7 +14,8 @@ plus arbitrary command execution inside them.
 
 | Backend | Type | Notes |
 |:--------|:-----|:------|
-| `docker` | Local | Container; the default |
+| `smolvm` | Local | MicroVM; the default (KVM on Linux or Apple Silicon on macOS) |
+| `docker` | Local | Container; requires Docker |
 | `apple-container` | Local | Container (macOS) |
 | `local-process` | Local | No isolation — commands run on the host |
 | `daytona` | Remote | [daytona.io](https://www.daytona.io) |
