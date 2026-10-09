@@ -46,6 +46,7 @@ SKIP_BUILD="${EXO_SKIP_BUILD:-false}"
 TEMPLATE="${EXO_TEMPLATE:-canonical}"
 PROFILE="${EXO_PROFILE:-practical}"
 PROVIDER_EXPLICIT=false
+[[ -z "$PROVIDER" ]] || PROVIDER_EXPLICIT=true
 declare -a CONTROL_PIDS=()
 SETUP_ADAPTER="${EXO_SETUP_ADAPTER:-}"
 declare -a SETUP_ADAPTERS=()
@@ -72,7 +73,7 @@ Usage:
   ./exo.sh setup-sandbox
 
 Default behavior starts the canonical stack: it creates or reuses an Exo
-agent and conversation with a Docker sandbox, repo self-map mount, ExoChat
+agent and conversation with a SmolVM sandbox, repo self-map mount, ExoChat
 setup, guardian config, and control logs, starts the local scheduler and
 adapter loops, then starts a REPL. It reads .env by default if present.
 Choose a different template with --template.
@@ -86,9 +87,9 @@ Subcommands:
   write-profile    Write the local profile prompt non-interactively; uses
                    --user-name and --local-prompt-file
   setup-profile    Prompt interactively and write the local profile prompt
-  setup-sandbox    Pull the sandbox image
-  setup-agent      Create the agent and conversation (and pull the sandbox
-                   image) without starting anything
+  setup-sandbox    Pull a Docker sandbox image (SmolVM prepares on first use)
+  setup-agent      Create the agent and conversation without starting anything;
+                   SmolVM prepares its sandbox image on first use
 
 Options:
   --model <model>              Upstream model name (default: gpt-5.6-terra)
@@ -102,11 +103,11 @@ Options:
   --conversation-name <name>   Conversation display name (default: Dev)
   --module <path>              Exo TypeScript harness module
   --template <name>            Launch template (default: canonical):
-                                 canonical  Docker sandbox, repo self-map mount, ExoChat
+                                 canonical  SmolVM sandbox, repo self-map mount, ExoChat
                                             setup, control logs, and guardian config
                                  dev        Same as canonical but with IRC+Discord
                                             instead of ExoChat
-                                 minimal    No Docker defaults, adapter setup prompts,
+                                 minimal    No sandbox defaults, adapter setup prompts,
                                             control console, or guardian config
   --profile <name>             Checked-in tool profile: practical (default) or bootstrap
   --sandbox-image <image>      Sandbox image (default: ubuntu:24.04)
@@ -134,7 +135,7 @@ Options:
                                 For exochat, print a browser URL; for whatsapp/signal,
                                 print pairing QR and pause.
   --initial-prompt-file <path> Send this file as the first message before REPL
-  --pull-sandbox               Pull the sandbox image before starting
+  --pull-sandbox               Pull a Docker sandbox image before starting
   --skip-build                 Do not build the exo CLI before starting; requires
                                --exo-bin to already exist
   --no-sandbox                 Do not require or configure sandbox shell support
@@ -258,7 +259,7 @@ apply_template_defaults() {
   START_ADAPTERS=true
   CONTROL=true
   if [[ "$PROVIDER_EXPLICIT" != true ]]; then
-    PROVIDER="docker"
+    PROVIDER="smolvm"
   fi
   case "$TEMPLATE" in
     canonical)
@@ -285,7 +286,7 @@ configure_guardian_for_current_launch() {
     --scheduler-bin "$SCHEDULER_BIN" \
     --scheduler-interval "$SCHEDULER_INTERVAL_SECONDS" \
     --adapter-limit "$ADAPTER_LIMIT" >/dev/null
-  echo "Configured guardian for Docker-backed Exo services."
+  echo "Configured guardian for Exo services."
 }
 
 build_exo() {
@@ -502,6 +503,9 @@ container_pull_image() {
 }
 
 ensure_sandbox_image() {
+  # SmolVM uses the embedded SDK to provision its runtime; the backend
+  # prepares the image when it first acquires a sandbox.
+  [[ "${PROVIDER:-smolvm}" == docker ]] || return 0
   local status=0
   container_image_exists || status=$?
   case "$status" in
@@ -524,7 +528,11 @@ ensure_sandbox_image() {
 
 setup_sandbox() {
   ensure_exo_bin
-  container_pull_image
+  if [[ "${PROVIDER:-smolvm}" == docker ]]; then
+    container_pull_image
+  else
+    echo "${PROVIDER:-smolvm} prepares its sandbox image on first use."
+  fi
 }
 
 setup_agent() {
@@ -620,7 +628,7 @@ write_launch_environment() {
   fi
 
   # Resuming a thread restores its mounts from the saved environment.
-  python3 - "$environment" "${PROVIDER:-docker}" "$SANDBOX_IMAGE" "$NETWORKING" \
+  python3 - "$environment" "${PROVIDER:-smolvm}" "$SANDBOX_IMAGE" "$NETWORKING" \
     "$ROOT_DIR" "$SELF_REPO_MOUNT_PATH" "$AGENT_CLI_MOUNT_ROOT" "$AGENT_CLI_MOUNT_PATH" <<'PYTHON'
 import json, pathlib, sys
 path, provider, image, networking, root, repo_mount, cli_root, cli_mount = sys.argv[1:]

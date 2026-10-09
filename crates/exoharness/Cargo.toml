@@ -106,7 +106,7 @@ rcgen = { version = "0.14.7", optional = true }
 reqwest = { workspace = true, optional = true }
 rustix = { workspace = true, optional = true, features = ["fs"] }
 semver = "1"
-smolmachines = { version = "=1.20.0", optional = true }
+smolmachines = { version = "=1.25.2", optional = true }
 serde.workspace = true
 serde_bytes = "0.11.19"
 serde_json.workspace = true

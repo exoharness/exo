@@ -27,7 +27,7 @@ exo thread create sandbox-example "Local Dev"
 cat > sandbox-environment.yaml <<'EOF'
 name: dev
 config:
-  provider: docker
+  provider: smolvm
   image: ubuntu:24.04
   enable_networking: true
 EOF
@@ -43,7 +43,8 @@ Set `config.provider` in the environment file to choose a backend:
 
 | Backend | Isolation | Notes |
 |:--------|:----------|:------|
-| `docker` | Container | Default choice; requires Docker |
+| `smolvm` | MicroVM | Default; KVM on Linux or Apple Silicon on macOS |
+| `docker` | Container | Requires Docker |
 | `apple_container` | Container | macOS |
 | `local_process` | **None** | Runs directly on the host |
 

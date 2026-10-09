@@ -47,7 +47,7 @@ Service restarts drain instead of killing blindly: the guardian writes a restart
 
 Reboots are announced through the adapters: because restarts are deferred, the agent can post a "going down" message with `send_adapter_message` in the same turn that requests the restart. The guardian writes `.exo/exo-reboot-notice.json`; the fresh adapter runner claims it and sends one wakeup per adapter conversation so the agent can announce its return. Announcements queue in the durable adapter outbox and deliver when the worker reconnects. Stale notices (older than 15 minutes) are discarded.
 
-The canonical local startup is plain `./exo.sh` (Docker provider/backend, repo self-map mount, guardian config, adapter setup prompts, control REPL — the default `--template canonical`). `./exo.sh fresh` gives the same shape from a clean agent/conversation state.
+The canonical local startup is plain `./exo.sh` (SmolVM provider/backend, repo self-map mount, guardian config, adapter setup prompts, control REPL — the default `--template canonical`). `./exo.sh fresh` gives the same shape from a clean agent/conversation state.
 
 ## 2. Durable Memory and Identity
 
@@ -113,7 +113,7 @@ Checkpointing tools:
 - `snapshot_sandbox` captures a filesystem checkpoint.
 - `rewind_sandbox` restarts the selected sandbox from a prior snapshot id.
 
-Tool results return the selected scope, sandbox id, owner conversation id, and snapshot id so later actions can target the same environment explicitly. Snapshot/rewind availability depends on the backend: Docker warm sandboxes support the flow; unsupported backends report clear errors. Rewind restores filesystem state only (see area 2 for what it does not roll back).
+Tool results return the selected scope, sandbox id, owner conversation id, and snapshot id so later actions can target the same environment explicitly. Snapshot/rewind availability depends on the backend: Docker and SmolVM warm sandboxes support the flow; unsupported backends report clear errors. Rewind does not roll back canonical conversation state (see area 2).
 
 Gap: there is no sandbox _cloning_ — starting a second sandbox from an existing snapshot while keeping the original running. That is the natural primitive for self-experimentation (try a change in a clone, compare, then adopt) and a prerequisite for cloning the whole agent (area 7).
 

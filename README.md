@@ -67,9 +67,9 @@ curl -fsSL https://raw.githubusercontent.com/exoharness/exo/main/setup.sh -o set
 bash setup.sh
 ```
 
-_Note that Exo requires git and Docker. The setup script offers to install
-them if missing, and installs pinned node, pnpm, and rust toolchains
-automatically via [mise](https://mise.jdx.dev)._
+_Note that Exo requires git and a local hypervisor (KVM on Linux or Apple Silicon
+on macOS). The setup script offers to install Git if missing, and installs pinned
+node, pnpm, and rust toolchains automatically via [mise](https://mise.jdx.dev)._
 
 It'll build Exo (may take a few minutes), then ask for the API key and your name
 and your agent's name, and give you the command to start Exo (./exo.sh).
@@ -113,7 +113,7 @@ arguments starts (or reconnects to) the local agent so you can talk to it via
 the command line.
 
 ```
-./exo.sh                # start the full stack (Docker sandbox, ExoChat) and open the CLI chat interface
+./exo.sh                # start the full stack (SmolVM sandbox, ExoChat) and open the CLI chat interface
 ./exo.sh list           # list agents and conversations
 ./exo.sh stop-all       # stop the scheduler and adapter runners; state is preserved
 ./exo.sh fresh          # rebuild, delete all agents/conversations, start clean
@@ -125,10 +125,12 @@ The most common command for the `./exo.sh` starter script: use `stop-all` when y
 plain `./exo.sh` to bring it back with all state intact, and `fresh` when you
 want to throw everything away and start over with a brand-new agent.
 
-By default `./exo.sh` uses the `canonical` template: a Docker sandbox, the repo
-mounted at `/workspace/exo`, and ExoChat for remote access. Pass
-`--template dev` for a developer variant that sets up IRC and Discord instead
-of ExoChat, or `--template minimal` for a bare REPL with no Docker defaults or
+By default `./exo.sh` uses the `canonical` template: a SmolVM sandbox, the repo
+mounted at `/workspace/exo`, and ExoChat for remote access. The embedded
+`smolmachines` SDK provisions its matching local runtime when the sandbox is
+first used; no Docker daemon is required. Pass `--sandbox docker` to use Docker
+instead. Pass `--template dev` for a developer variant that sets up IRC and Discord instead
+of ExoChat, or `--template minimal` for a bare REPL with no sandbox defaults or
 adapter setup.
 
 ## Basic Debugging and Visibility
