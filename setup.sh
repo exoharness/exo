@@ -11,7 +11,6 @@ AGENT_NAME="${EXO_AGENT_NAME:-Exo}"
 USER_NAME="${EXO_USER_NAME:-}"
 FORCE_INSTALL="${EXO_SETUP_FORCE:-false}"
 INSTALL_DEPS="${EXO_SETUP_INSTALL_DEPS:-false}"
-DOCKER_GROUP_ADDED=false
 SETUP_ARGS=()
 DEFAULT_EXO_CHAT_BASE_URL="https://exoharness.ai"
 DEFAULT_OPENROUTER_BASE_URL="https://openrouter.ai/api/v1"
@@ -92,7 +91,7 @@ source_cargo_env() {
   fi
 }
 
-# git, docker, and (on Linux) a C toolchain must be installed by the system
+# git and (on Linux) a C toolchain must be installed by the system
 # package manager. node, pnpm, and rust are installed by mise after clone,
 # pinned to the versions in mise.toml, when not already present.
 collect_missing_dependencies() {
@@ -102,10 +101,6 @@ collect_missing_dependencies() {
   if ! command -v git >/dev/null 2>&1; then
     MISSING_DEPS+=("git")
     SYSTEM_MISSING+=("git")
-  fi
-  if ! command -v docker >/dev/null 2>&1; then
-    MISSING_DEPS+=("docker")
-    SYSTEM_MISSING+=("docker")
   fi
   if [[ "$(uname -s)" == "Linux" ]] && ! command -v cc >/dev/null 2>&1; then
     MISSING_DEPS+=("build-tools")
@@ -123,7 +118,7 @@ collect_missing_dependencies() {
 print_dependency_status() {
   local dep
   echo "Exo uses these dependencies:"
-  for dep in git node pnpm rust docker; do
+  for dep in git node pnpm rust; do
     if missing_has "$dep" "${MISSING_DEPS[@]}"; then
       echo "  - $dep (missing)"
     else
@@ -175,7 +170,6 @@ check_dependencies() {
     missing_has rust "${MISSING_DEPS[@]}"; then
     echo "node, pnpm, and rust will be installed with mise once the repository is in place."
   fi
-  maybe_reexec_for_docker_group
 }
 
 can_auto_install_dependencies() {
@@ -196,7 +190,7 @@ choose_dependency_install_mode() {
     return
   fi
   echo "How should the missing dependencies be installed?" >&2
-  echo "1) Automatically (recommended): the system package manager installs git and Docker; mise (https://mise.jdx.dev) installs pinned node, pnpm, and rust" >&2
+  echo "1) Automatically (recommended): the system package manager installs git; mise (https://mise.jdx.dev) installs pinned node, pnpm, and rust" >&2
   echo "2) Manually: print the install commands for each and exit" >&2
   local choice
   while true; do
@@ -238,15 +232,6 @@ install_missing_dependencies_linux() {
     apt_packages+=("build-essential" "pkg-config" "libssl-dev")
   fi
   sudo_run apt-get install -y "${apt_packages[@]}"
-  if missing_has docker "$@"; then
-    info "Installing Docker Engine (get.docker.com)"
-    curl -fsSL https://get.docker.com | sudo_run sh
-    sudo_run systemctl enable --now docker 2>/dev/null || true
-    if [[ "$(id -u)" != "0" ]]; then
-      sudo_run usermod -aG docker "$(id -un)"
-      DOCKER_GROUP_ADDED=true
-    fi
-  fi
 }
 
 install_missing_dependencies_macos() {
@@ -264,11 +249,6 @@ install_missing_dependencies_macos() {
   if missing_has git "$@"; then
     info "Installing git with Homebrew"
     brew install git
-  fi
-  if missing_has docker "$@"; then
-    info "Installing Docker Desktop"
-    brew install --cask docker
-    open -a Docker || true
   fi
 }
 
@@ -297,23 +277,6 @@ ensure_toolchains() {
     command -v "$tool" >/dev/null 2>&1 ||
       die "$tool is still unavailable after mise install"
   done
-}
-
-maybe_reexec_for_docker_group() {
-  if [[ "$DOCKER_GROUP_ADDED" != true ]]; then
-    return
-  fi
-  if docker info >/dev/null 2>&1; then
-    return
-  fi
-  # Group membership from usermod does not apply to the current shell.
-  if command -v sg >/dev/null 2>&1; then
-    echo "Re-running setup with the docker group applied..."
-    exec sg docker -c "EXO_SETUP_INSTALL_DEPS=true bash '$0' ${SETUP_ARGS[*]:-}"
-  fi
-  echo "You were added to the docker group, but it requires a new login session." >&2
-  echo "Log out and back in (or run: newgrp docker), then rerun this script." >&2
-  exit 1
 }
 
 print_dependency_install_help() {
@@ -356,10 +319,6 @@ print_macos_dependency_install_help() {
   if missing_has git "$@"; then
     echo "  xcode-select --install  # includes Git, if Apple developer tools are missing" >&2
   fi
-  if missing_has docker "$@"; then
-    echo "  brew install --cask docker" >&2
-    echo "  open -a Docker" >&2
-  fi
 }
 
 print_linux_dependency_install_help() {
@@ -377,17 +336,12 @@ print_linux_dependency_install_help() {
   if ((${#apt_packages[@]} > 0)); then
     echo "  sudo apt-get install -y ${apt_packages[*]}" >&2
   fi
-  if missing_has docker "$@"; then
-    echo "  # Install Docker Engine for your distro, then start it:" >&2
-    echo "  # https://docs.docker.com/engine/install/" >&2
-  fi
 }
 
 print_generic_dependency_install_help() {
   echo >&2
-  echo "Install Git and Docker Desktop/Engine (node, pnpm, and rust are handled by mise during setup)." >&2
+  echo "Install Git (node, pnpm, and rust are handled by mise during setup)." >&2
   echo "  Git: https://git-scm.com/downloads" >&2
-  echo "  Docker: https://www.docker.com/products/docker-desktop/" >&2
 }
 
 missing_has() {
@@ -593,40 +547,7 @@ prompt_env_secret() {
   fi
 }
 
-ensure_docker_running() {
-  require_command docker "Install Docker Desktop: https://www.docker.com/products/docker-desktop/"
-  if docker info >/dev/null 2>&1; then
-    return
-  fi
-  if [[ "$(uname -s)" == "Darwin" ]] && command -v open >/dev/null 2>&1; then
-    echo "Docker does not appear to be running. Opening Docker Desktop..."
-    open -a Docker || true
-    for _ in $(seq 1 60); do
-      if docker info >/dev/null 2>&1; then
-        return
-      fi
-      sleep 2
-    done
-    die "Docker is not running. Start Docker Desktop, then rerun this script."
-  fi
-  # Linux: docker is installed but not reachable. If the daemon runs and the
-  # user is just missing docker group membership, offer to fix that.
-  if [[ "$(id -u)" != "0" ]] && getent group docker >/dev/null 2>&1 &&
-    ! id -nG | grep -qw docker; then
-    echo "Docker is installed, but your user cannot reach the Docker daemon (not in the docker group)."
-    if [[ "$INSTALL_DEPS" == true ]] || { [[ -t 0 ]] && prompt_yes_no "Add $(id -un) to the docker group now?" y; }; then
-      sudo_run usermod -aG docker "$(id -un)"
-      DOCKER_GROUP_ADDED=true
-      maybe_reexec_for_docker_group
-      docker info >/dev/null 2>&1 && return
-    fi
-  fi
-  sudo_run systemctl start docker 2>/dev/null || true
-  if docker info >/dev/null 2>&1; then
-    return
-  fi
-  die "Docker is installed but the daemon is not reachable. Start it (e.g. sudo systemctl start docker), then rerun this script."
-}
+
 
 trust_mise_config() {
   local config="$1"
@@ -759,6 +680,20 @@ clone_or_reuse_repo() {
   rmdir "$tmp_checkout" "$tmp_parent"
 }
 
+check_hypervisor() {
+  case "$(uname -s)" in
+    Linux)
+      [[ -r /dev/kvm && -w /dev/kvm ]] ||
+        die "SmolVM needs access to /dev/kvm. Enable KVM and grant this user access before running setup."
+      ;;
+    Darwin)
+      [[ "$(uname -m)" == arm64 ]] ||
+        die "SmolVM's default local sandbox requires Apple Silicon on macOS."
+      ;;
+    *) die "SmolVM's default local sandbox requires Linux with KVM or macOS on Apple Silicon." ;;
+  esac
+}
+
 main() {
   SETUP_ARGS=("$@")
   parse_args "$@"
@@ -769,7 +704,7 @@ main() {
   echo "Git ref: $REPO_REF"
 
   check_dependencies
-  ensure_docker_running
+  check_hypervisor
 
   local install_dir launch_dir="$PWD"
   install_dir="$(choose_install_dir)"

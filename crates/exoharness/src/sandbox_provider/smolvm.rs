@@ -233,7 +233,7 @@ impl SmolvmSandboxBackend {
                 let binary = match &self.binary_override {
                     Some(explicit) => explicit.clone(),
                     None => match which_binary(Path::new(DEFAULT_SMOLVM_BIN)).await {
-                        Some(installed) if probe_flag_at(&installed, "machine", "start", INTERCEPTOR_FLAG).await => installed,
+                        Some(installed) if compatible_default_engine(&installed).await => installed,
                         _ => {
                             #[cfg(feature = "smolvm")]
                             {
@@ -1430,6 +1430,37 @@ fn machine_name(key: &str) -> String {
     format!("exo-{hash:016x}")
 }
 
+/// A path lookup must not silently select an older CLI than the SDK we ship.
+/// Explicit binary selections can still target other releases.
+async fn compatible_default_engine(binary: &Path) -> bool {
+    if !probe_flag_at(binary, "machine", "start", INTERCEPTOR_FLAG).await {
+        return false;
+    }
+    #[cfg(feature = "smolvm")]
+    {
+        let Ok(output) = Command::new(binary)
+            .arg("--version")
+            .kill_on_drop(true)
+            .output()
+            .await
+        else {
+            return false;
+        };
+        let wanted =
+            Version::parse(smolmachines::VERSION).expect("smolmachines reports a semver version");
+        parse_version(&String::from_utf8_lossy(&output.stdout)).is_some_and(|version| {
+            version.major == wanted.major
+                && version.minor == wanted.minor
+                && version.patch >= wanted.patch
+                && version.pre.is_empty()
+        })
+    }
+    #[cfg(not(feature = "smolvm"))]
+    {
+        true
+    }
+}
+
 async fn probe_flag_at(binary: &Path, group: &str, subcommand: &str, flag: &str) -> bool {
     let Ok(output) = Command::new(binary)
         .args([group, subcommand, "--help"])
@@ -1996,7 +2027,7 @@ esac"#,
                 .env_remove(SMOLVM_BIN_ENV)
                 .env_remove(SMOLVM_BOOT_BIN_ENV)
                 .env("SMOLMACHINES_CACHE_DIR", dir.path().join("cache"))
-                .env("SMOLMACHINES_ENGINE_VERSION", "1.20.0")
+                .env("SMOLMACHINES_ENGINE_VERSION", "1.25.1")
                 .env("SMOLMACHINES_NO_DOWNLOAD", "1")
                 .output()
                 .await
@@ -2015,7 +2046,7 @@ esac"#,
         assert!(!backend.warm_supported().await);
         let error = format!("{:#}", backend.binary().await.unwrap_err());
         #[cfg(feature = "smolvm")]
-        {
+        let sdk_binary = {
             assert!(error.contains("downloads are disabled"), "{error}");
             let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
                 ("macos", "aarch64") => "darwin-arm64",
@@ -2023,9 +2054,9 @@ esac"#,
                 ("linux", "x86_64") => "linux-x86_64",
                 _ => unreachable!(),
             };
-            let cached = root.join("cache").join(format!("smolvm-1.20.0-{platform}"));
+            let cached = root.join("cache").join(format!("smolvm-1.25.1-{platform}"));
             let binary = cached.join("smolvm");
-            write_test_binary(&binary, "printf 'smolvm 1.20.0\\n'");
+            write_test_binary(&binary, "printf 'smolvm 1.25.1\\n'");
             assert_eq!(backend.binary().await.unwrap(), &binary);
             let mut request = test_request(Some(Duration::from_secs(60)));
             request.spec.policy.networking = SandboxNetworkPolicy::Limited {
@@ -2042,7 +2073,7 @@ esac"#,
             write_test_binary(&root.join("bin/smolvm"), "printf 'smolvm 1.16.2\\n'");
             write_test_binary(
                 &binary,
-                "case \"$*\" in --version) echo 'smolvm 1.20.0';; 'machine start --help') echo '--egress-interceptor <ADDR>';; 'machine create --help') echo '--allow-host-pattern <PATTERN>';; esac",
+                "case \"$*\" in --version) echo 'smolvm 1.25.1';; 'machine start --help') echo '--egress-interceptor <ADDR>';; 'machine create --help') echo '--allow-host-pattern <PATTERN>';; esac",
             );
             write_test_binary(&cached.join("smolvm-bin"), "exit 0");
             let backend = SmolvmSandboxBackend::new();
@@ -2052,7 +2083,8 @@ esac"#,
                 backend.boot_binary().await.unwrap().as_ref().unwrap(),
                 &cached.join("smolvm-bin").canonicalize().unwrap()
             );
-        }
+            binary
+        };
         #[cfg(not(feature = "smolvm"))]
         assert!(
             error.contains("https://smolmachines.com/install.sh"),
@@ -2065,12 +2097,29 @@ esac"#,
             "case \"$*\" in --version) echo 'smolvm 1.19.0';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac",
         );
         let installed = installed.canonicalize().unwrap();
+        #[cfg(feature = "smolvm")]
+        assert_eq!(
+            SmolvmSandboxBackend::new().binary().await.unwrap(),
+            &sdk_binary
+        );
+        #[cfg(not(feature = "smolvm"))]
         assert_eq!(
             SmolvmSandboxBackend::new().binary().await.unwrap(),
             &installed
         );
         #[cfg(not(feature = "smolvm"))]
         assert_eq!(backend.binary().await.unwrap(), &installed);
+        #[cfg(feature = "smolvm")]
+        {
+            write_test_binary(
+                &installed,
+                "case \"$*\" in --version) echo 'smolvm 1.25.1';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac",
+            );
+            assert_eq!(
+                SmolvmSandboxBackend::new().binary().await.unwrap(),
+                &installed
+            );
+        }
     }
 
     #[test]

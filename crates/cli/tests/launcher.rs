@@ -173,6 +173,68 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
         // Exercise both absent and present optional env files on the next launch.
         fs::write(&env_file, "UNUSED_TEST_SETTING=present\n")?;
     }
+    // Canonical setup selects SmolVM without requiring Docker or pulling an
+    // image before the first VM is acquired. The Docker-specific path above
+    // stays available for explicit --sandbox docker launches.
+    executable(&bin.join("docker"), "#!/usr/bin/env bash\nexit 99\n")?;
+    run(Command::new("/bin/bash")
+        .arg(launch.join("exo.sh"))
+        .args([
+            "setup-agent",
+            "--skip-build",
+            "--agent",
+            "canonical-agent",
+            "--conversation",
+            "canonical-thread",
+            "--no-scheduler",
+            "--no-adapters",
+            "--env-file",
+        ])
+        .arg(&env_file)
+        .arg("--module")
+        .arg(repo.join("exo/harness.ts"))
+        .current_dir(&launch)
+        .env("EXO_BIN", &wrapper)
+        .env("PATH", &path))?;
+    let canonical: exoharness::EnvironmentDefinition = serde_json::from_str(&fs::read_to_string(
+        launch.join(".exo/launch-environment.json"),
+    )?)?;
+    assert_eq!(
+        canonical.config.provider,
+        exoharness::SandboxProvider::Smolvm
+    );
+    assert_eq!(canonical.config.image, "ubuntu:24.04");
+
+    executable(
+        &bin.join("docker"),
+        "#!/usr/bin/env bash\n[[ \"$1 $2\" == 'image inspect' ]] || exit 99\n",
+    )?;
+    run(Command::new("/bin/bash")
+        .arg(launch.join("exo.sh"))
+        .args([
+            "setup-agent",
+            "--skip-build",
+            "--agent",
+            "docker-override",
+            "--conversation",
+            "docker-thread",
+            "--env-file",
+        ])
+        .arg(&env_file)
+        .arg("--module")
+        .arg(repo.join("exo/harness.ts"))
+        .current_dir(&launch)
+        .env("EXO_PROVIDER", "docker")
+        .env("EXO_BIN", &wrapper)
+        .env("PATH", &path))?;
+    let overridden: exoharness::EnvironmentDefinition = serde_json::from_str(&fs::read_to_string(
+        launch.join(".exo/launch-environment.json"),
+    )?)?;
+    assert_eq!(
+        overridden.config.provider,
+        exoharness::SandboxProvider::Docker
+    );
+
     exo_managed_agents::AgentDefinition::parse(fs::read_to_string(
         launch.join(".exo/launch-agent.md"),
     )?)?;
