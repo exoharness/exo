@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rmcp::{
     ServiceExt,
     model::CallToolRequestParams,
@@ -107,18 +107,22 @@ struct Connection {
 async fn connect_service(
     server: &McpServerConfig,
     credentials: Arc<dyn McpCredentialProvider>,
+    client: reqwest::Client,
 ) -> Result<RunningService<RoleClient, ()>> {
     let config = StreamableHttpClientTransportConfig::with_uri(server.url.clone());
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(30))
-        .build()?;
     let client = auth::CredentialClient::new(client, server.clone(), credentials);
     let transport = StreamableHttpClientTransport::with_client(client, config);
     tokio::time::timeout(Duration::from_secs(60), ().serve(transport))
         .await
         .context("MCP initialization timed out")?
         .map_err(auth::authentication_context)
+}
+
+fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(30))
+        .build()?)
 }
 
 pub async fn probe_auth_challenge(url: &str) -> Result<Option<String>> {
@@ -129,7 +133,7 @@ pub async fn probe_auth_challenge(url: &str) -> Result<Option<String>> {
         blocked_tools: Vec::new(),
     };
     validate_servers(std::slice::from_ref(&server))?;
-    match connect_service(&server, Arc::new(McpCredentials::default())).await {
+    match connect_service(&server, Arc::new(McpCredentials::default()), http_client()?).await {
         Ok(mut service) => {
             service.close_with_timeout(Duration::from_secs(5)).await?;
             Ok(None)
@@ -165,10 +169,26 @@ impl McpToolSet {
         servers: &[McpServerConfig],
         credentials: Arc<dyn McpCredentialProvider>,
     ) -> Result<Self> {
+        Self::connect_with_http_clients(servers, credentials, &vec![http_client()?; servers.len()])
+            .await
+    }
+
+    /// Connect using a caller-supplied HTTP client for each server, in the same order.
+    /// Hosts can enforce destination restrictions, DNS pinning and redirect policies.
+    pub async fn connect_with_http_clients(
+        servers: &[McpServerConfig],
+        credentials: Arc<dyn McpCredentialProvider>,
+        clients: &[reqwest::Client],
+    ) -> Result<Self> {
         validate_servers(servers)?;
-        let connected = futures::future::try_join_all(servers.iter().map(|server| async {
+        ensure!(
+            servers.len() == clients.len(),
+            "each MCP server requires an HTTP client"
+        );
+        let connections = servers.iter().zip(clients);
+        let connected = futures::future::try_join_all(connections.map(|(server, client)| async {
             let connected = async {
-                let service = connect_service(server, credentials.clone()).await?;
+                let service = connect_service(server, credentials.clone(), client.clone()).await?;
                 let tools = tokio::time::timeout(Duration::from_secs(60), service.list_all_tools())
                     .await
                     .context("MCP tool discovery timed out")?
