@@ -40,7 +40,18 @@ describe("Exo profiles", () => {
       "inspect_tools",
       "manage_tool",
     ]);
-    profile.registerTools(tools, context);
+    // Pinned so an ambient EXO_HOST_NETWORK cannot change what is registered.
+    const hostNetwork = process.env.EXO_HOST_NETWORK;
+    process.env.EXO_HOST_NETWORK = "enabled";
+    try {
+      profile.registerTools(tools, context);
+    } finally {
+      if (hostNetwork === undefined) {
+        delete process.env.EXO_HOST_NETWORK;
+      } else {
+        process.env.EXO_HOST_NETWORK = hostNetwork;
+      }
+    }
 
     expect(tools.get("create_adapter")?.source).toBe("library");
     expect(tools.get("snapshot_sandbox")?.source).toBe("library");
@@ -58,6 +69,31 @@ describe("Exo profiles", () => {
       "manage_tool",
       "rebuild_and_restart_exo",
     ]);
+  });
+
+  it("omits the web tools from practical when host networking is off", () => {
+    const profile = resolveExoProfile("practical");
+    const context = {
+      agentConfig: { enableAgentToolCreation: false },
+    } as TurnContext;
+    const tools = new HarnessToolRegistry(context);
+    const hostNetwork = process.env.EXO_HOST_NETWORK;
+    process.env.EXO_HOST_NETWORK = "disabled";
+    try {
+      profile.registerTools(tools, context);
+    } finally {
+      if (hostNetwork === undefined) {
+        delete process.env.EXO_HOST_NETWORK;
+      } else {
+        process.env.EXO_HOST_NETWORK = hostNetwork;
+      }
+    }
+
+    expect(tools.get("web_search")).toBeUndefined();
+    expect(tools.get("web_fetch")).toBeUndefined();
+    // Only the web tools are withheld: the rest of the profile still loads.
+    expect(tools.get("create_adapter")?.source).toBe("library");
+    expect(tools.get("rebuild_and_restart_exo")?.source).toBe("built_in");
   });
 
   it("exposes legacy agent-tool creation only when enabled", () => {

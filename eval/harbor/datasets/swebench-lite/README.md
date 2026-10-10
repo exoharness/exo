@@ -28,7 +28,12 @@ mirrors SWE-bench's evaluation script. Each task's first run pulls a
 multi-gigabyte image from Docker Hub.
 
 Note: Exo's `web_search` and `web_fetch` tools run on the host, outside the
-container, so the task's network policy does not cover them.
+container, so the task's network policy does not cover them. The eval therefore
+withholds them by default: `--ak host_network=disabled` reaches the harness as
+`EXO_HOST_NETWORK=disabled`. Without that, an agent in a `no-network` container
+can still reach GitHub and read the upstream fix for the issue it is being
+graded on. Pass `--ak host_network=enabled` to ablate what the withheld tools
+are worth; the value is printed at job start and recorded in the plugin log.
 
 The generated task directories are gitignored; only the recipe is tracked.
 Run the eval with:

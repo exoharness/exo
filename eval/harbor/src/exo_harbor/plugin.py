@@ -11,7 +11,7 @@ from harbor.models.environment_type import EnvironmentType
 from harbor.models.job.plugin import BaseJobPlugin
 from harbor.models.job.result import JobResult
 
-from exo_harbor.exo import EXO_HARNESS, ExoClient
+from exo_harbor.exo import EXO_HARNESS, HOST_NETWORK_DISABLED, ExoClient
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class ExoSessionPlugin(BaseJobPlugin):
 
         kwargs = job.config.agents[0].kwargs
         harness = kwargs.get("harness", EXO_HARNESS)
+        host_network = kwargs.get("host_network", HOST_NETWORK_DISABLED)
         if job.config.n_concurrent_trials != 1 and harness == EXO_HARNESS:
             # Exo self-edits, so to avoid races and enable learning from one
             # trial to the next, we require sequential trials. 
@@ -45,13 +46,19 @@ class ExoSessionPlugin(BaseJobPlugin):
                 exo_root=Path(kwargs["exo_root"]),
                 repo_root=Path(kwargs["exo_repo_root"]),
                 harness=harness,
+                host_network=host_network,
             )
         except KeyError as error:
             raise ValueError(f"ExoAgent is missing required --ak {error.args[0]}") from error
 
         await client.ensure_agent(model)
         self._client = client
-        logger.info("Exo ready for job %s under %s", job.id, client.exo_root)
+        logger.info(
+            "Exo ready for job %s under %s (host_network=%s)",
+            job.id,
+            client.exo_root,
+            client.host_network,
+        )
 
     async def on_job_end(self, _job_result: JobResult) -> None:
         # Required by the plugin protocol. The agent's state lives under the

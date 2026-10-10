@@ -45,6 +45,7 @@ CONFIG_FIELDS = {
     "n_concurrent",
     "include_task_names",
     "harness",
+    "host_network",
     "provider_model",
     "api_key_env",
     "base_url",
@@ -73,6 +74,7 @@ def parse_args() -> argparse.Namespace:
         "n_attempts": 1,
         "n_concurrent": 1,
         "include_task_names": [],
+        "host_network": "disabled",
         "provider_model": None,
         "api_key_env": "OPENAI_API_KEY",
         "base_url": None,
@@ -160,6 +162,17 @@ def parse_args() -> argparse.Namespace:
             "shell -- no memory, no skills, no self-editing; `pi` drives the "
             "Pi coding agent inside the task container, installing it there "
             "first"
+        ),
+    )
+    parser.add_argument(
+        "--host-network",
+        dest="host_network",
+        choices=("enabled", "disabled"),
+        help=(
+            "host-side network access for the harness process; `disabled` "
+            "withholds the agent's web_search and web_fetch tools, which run "
+            "on the host and so are not covered by a task's network_mode. "
+            "Defaults to disabled: enable only to ablate what they are worth"
         ),
     )
     parser.add_argument(
@@ -312,6 +325,8 @@ def harbor_command(
         # Read by the agent, and by the plugin through the agent's kwargs.
         "--ak",
         f"harness={args.harness or 'exo'}",
+        "--ak",
+        f"host_network={args.host_network or 'disabled'}",
         "--jobs-dir",
         str(jobs_dir),
         *task_limit,
