@@ -308,7 +308,10 @@ async fn injected_http_client_pins_the_server_destination() -> anyhow::Result<()
         .build()?;
     let tools = McpToolSet::connect_with_http_clients(&servers, credentials, &[client]).await?;
     let result = tools
-        .call("exo_mcp__fixture__search", Default::default())
+        .call(
+            "exo_mcp__fixture__search",
+            serde_json::from_value(json!({"query":"hello"}))?,
+        )
         .await?;
     assert_eq!(result.structured_content, Some(json!({"tool":"search"})));
     tools.close().await?;
