@@ -96,6 +96,39 @@ Use `--tui` to opt into the full-screen interface. Type `/help` for commands or
 Your turn streams as it runs. Updates from other clients appear when you submit
 the next line; pressing Enter on an empty prompt also checks for updates.
 
+### Browser previews
+
+Declare guest TCP ports in the environment:
+
+```yaml
+name: dev
+config:
+  image: my-dev-image
+  tcp_ports: [5173, 8000]
+```
+
+`exo agent run` prints a services page such as
+`http://my-project-<id>.localhost:<port>` and one service URL per declared port:
+`http://5173.my-project-<id>.localhost:<port>`. Exo gives the same URLs to the agent
+for browser API URLs and CORS. `.localhost` resolves to loopback in browsers.
+HTTP and WebSocket traffic passes through unchanged.
+
+Keep an inline CLI session open to use its previews. `exo serve` shares one
+preview listener across its threads and keeps it open when clients exit.
+Both modes reuse the saved listener port when available; a collision selects
+and saves a new port, so use the newly printed URLs. `exo thread ports AGENT THREAD`
+shows the active owner's URLs without starting a VM.
+
+For a remote server, set `exo serve --preview-domain DOMAIN` to a DNS suffix
+resolving to your tunnel and forward the printed port with
+`ssh -L PORT:127.0.0.1:PORT SERVER`. Preview listeners bind to `127.0.0.1` and use HTTP.
+
+A `502` means the sandbox or service is unavailable. Start it and check its logs.
+If the UI works but API or WebSocket requests fail, configure their browser URLs
+and allow the full frontend origin in CORS, including the port.
+For other TCP protocols, use `exo thread sandbox forward AGENT THREAD --port PORT`;
+`--bind 127.0.0.1:LOCAL_PORT` selects the local port, and Ctrl-C stops forwarding.
+
 ### Named agents and threads
 
 ```bash
@@ -212,6 +245,8 @@ exo --provider served agent run --agent support --prompt "Summarize today's tick
 
 The server uses the existing managed-agent HTTP API: agent discovery, saved
 threads, turns, event streaming, cancellation, approval responses, and reconnect.
+`GET /exo/agent/{agent_id}/thread/{thread_id}/previews` returns the server's
+`{domain, port}` preview address, or `null` when previews are unavailable.
 With `--agent NAME`, only that agent is visible and other agents are inaccessible.
 Omit `--agent` to serve the local provider, including agent creation. This does not expose the raw ExoHarness `/request` transport.
 
@@ -388,6 +423,25 @@ change the image reference in the environment; use a versioned tag or digest.
 `exo environment delete NAME` removes only the definition. Explicit host mounts can share data between sandboxes; ordinary sandbox files are private
 to their thread. Persistence after a backend terminates a sandbox still follows
 that backend's existing lifecycle and durable-file-system support.
+
+### FastAPI development example
+
+This example uses the shared Codex devbox and a public repository with a frontend
+on port 5173, an API on port 8000, and PostgreSQL inside the VM. With an OpenAI
+credential saved as `openai` in the global vault, run from this checkout:
+
+```sh
+exo agent create fastapi-dev --file exoharness/examples/managed-agents/fastapi-developer.md
+exo environment create fastapi-local --file exoharness/examples/environments/fastapi-smolvm.yaml
+exo agent run --agent fastapi-dev --environment fastapi-local --thread demo
+```
+
+Ask the agent to start the services, then open the printed sandbox services page.
+The browser contacts the API preview directly; the setup script configures its
+URL and the backend's allowed frontend origin. Log in with `admin@example.com`
+and `changethis`. Initial setup installs the tools and locked dependencies on the
+VM's persistent disks. Resume with `exo agent run --agent fastapi-dev --thread demo`
+and ask the agent to start the services again.
 
 ## Pi
 

@@ -46,6 +46,19 @@ impl RuntimeClient {
         self.http.endpoint()
     }
 
+    pub async fn preview_endpoint(
+        &self,
+        agent: AgentId,
+        thread: ThreadId,
+    ) -> Result<Option<PreviewEndpoint>> {
+        self.http
+            .json(self.http.request(
+                Method::GET,
+                &format!("agent/{agent}/thread/{thread}/previews"),
+            )?)
+            .await
+    }
+
     pub async fn list_environments(&self) -> Result<Vec<exoharness::EnvironmentDefinition>> {
         self.http
             .json(self.http.request(Method::GET, "environment")?)

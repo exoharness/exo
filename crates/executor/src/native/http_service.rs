@@ -96,23 +96,22 @@ impl RuntimeHttpService {
         self
     }
 
-    pub fn spawn_recovery(&self) {
-        self.runtime.begin_recovery_scan();
+    pub fn spawn_recovery(&self) -> Result<()> {
+        // Incoming turns can wake older queue entries before discovery finishes.
+        if self.auth.is_some() {
+            let service = self.clone();
+            self.runtime
+                .set_recovery_resolver(Arc::new(move |principal: String| {
+                    service.caller_runtime(principal)
+                }))?;
+        }
         let service = self.clone();
         tokio::spawn(async move {
-            let resolver = service.auth.as_ref().map(|_| {
-                let service = service.clone();
-                Arc::new(move |principal: String| service.caller_runtime(principal))
-                    as crate::harness_executor::RecoveryRuntimeResolver
-            });
-            if let Err(error) = service
-                .runtime
-                .recover_unfinished_turns_with_resolver(resolver)
-                .await
-            {
+            if let Err(error) = service.runtime.recover_unfinished_turns().await {
                 tracing::error!(%error, "failed to recover unfinished turns");
             }
         });
+        Ok(())
     }
 
     pub fn caller_runtime(&self, principal: String) -> Result<Arc<Runtime>> {
@@ -190,7 +189,9 @@ pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::i
         })
     })
     .listen(listener)?;
-    recovery_service.spawn_recovery();
+    recovery_service
+        .spawn_recovery()
+        .map_err(std::io::Error::other)?;
     Ok(server.run())
 }
 
@@ -226,6 +227,10 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(
                 "/agent/{agent_id}/thread/{thread_id}",
                 web::get().to(get_thread),
+            )
+            .route(
+                "/agent/{agent_id}/thread/{thread_id}/previews",
+                web::get().to(preview_endpoint),
             )
             .route(
                 "/agent/{agent_id}/thread/{thread_id}",
@@ -581,6 +586,26 @@ async fn get_thread(
         .map_err(request_error)
 }
 
+async fn preview_endpoint(
+    service: Service,
+    path: web::Path<ThreadPath>,
+) -> Result<web::Json<Option<PreviewEndpoint>>, Error> {
+    let agent = service.agent(path.agent_id).await?;
+    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
+    let endpoint = service.runtime.active_preview_endpoint();
+    if endpoint.is_some() {
+        let previews = service
+            .runtime
+            .register_previews(agent.as_ref(), thread)
+            .await
+            .map_err(ErrorBadRequest)?;
+        if previews.is_none() {
+            return Ok(web::Json(None));
+        }
+    }
+    Ok(web::Json(endpoint))
+}
+
 async fn list_threads(
     service: Service,
     path: web::Path<AgentPath>,
@@ -760,10 +785,15 @@ async fn cancel_turn(
     } else {
         service.runtime.clone()
     };
-    crate::managed_agents::service::cancel_turn(&runtime, path.thread_id, path.turn_id)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
+    crate::managed_agents::service::cancel_turn(
+        &runtime,
+        path.agent_id,
+        path.thread_id,
+        path.turn_id,
+    )
+    .await
+    .map(web::Json)
+    .map_err(request_error)
 }
 
 async fn approval_response(

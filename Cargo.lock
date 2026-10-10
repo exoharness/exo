@@ -2704,6 +2704,7 @@ dependencies = [
  "exo-mcp",
  "exoharness",
  "futures",
+ "httparse",
  "libc",
  "lingua",
  "openidconnect",
@@ -7049,6 +7050,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

@@ -76,7 +76,7 @@ Trait objects do not cross HTTP. Stable resources are addressed by their durable
 - `binding_id`
 - `secret_id`
 
-Turns are addressed by durable ids. `conversation_begin_turn` returns the conversation identity plus the turn record. Subsequent `turn_add_events`, `turn_write_artifact`, and `turn_finish` requests include `agent_id`, `conversation_id`, `session_id`, and `turn_id`; the server reconstructs the turn from those ids.
+Turns are addressed by durable ids. `conversation_begin_turn` requires a caller-allocated `turn` record with `id` and `session_id`, plus `new_session` to indicate whether to emit `session_started`, and returns the conversation identity plus that record. Subsequent `turn_add_events`, `turn_write_artifact`, and `turn_finish` requests include `agent_id`, `conversation_id`, `session_id`, and `turn_id`; the server reconstructs the turn from those ids.
 
 ## Streaming
 

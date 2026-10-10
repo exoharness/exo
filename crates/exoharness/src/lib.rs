@@ -42,6 +42,7 @@ mod storage;
     feature = "basic-backend"
 ))]
 pub mod test_support;
+pub mod turn_coordinator;
 mod types;
 mod uuid7;
 pub use credential_policy::{CredentialDestination, CredentialPolicy};

@@ -1,0 +1,102 @@
+use super::*;
+use crate::Uuid7;
+use crate::turn_coordinator::contract_tests;
+
+fn queued(principal: &str, attention: TurnAttention) -> TurnSubmission<u32> {
+    TurnSubmission {
+        turn: TurnRecord {
+            id: Uuid7::now(),
+            session_id: Uuid7::now(),
+        },
+        work: 42,
+        principal: Some(principal.into()),
+        options: TurnOptions {
+            attention,
+            ..Default::default()
+        },
+    }
+}
+
+#[tokio::test]
+async fn test_in_memory_coordinator() -> Result<()> {
+    let coordinator = Arc::new(StoredTurnCoordinator::in_memory());
+    let thread = TurnThread {
+        agent_id: Uuid7::now(),
+        thread_id: Uuid7::now(),
+    };
+    contract_tests::test_turn_coordinator(coordinator, thread, 42).await
+}
+
+#[tokio::test]
+async fn released_queue_drops_in_memory_locks() -> Result<()> {
+    let coordinator = StoredTurnCoordinator::<u32>::in_memory();
+    let thread = TurnThread {
+        agent_id: Uuid7::now(),
+        thread_id: Uuid7::now(),
+    };
+    let lease = coordinator.claim(thread).await?.unwrap();
+    assert!(coordinator.release_if_idle(&lease).await?);
+    let next = coordinator.claim(thread).await?.unwrap();
+    assert!(!Arc::ptr_eq(&next.identity, &lease.identity));
+    assert!(coordinator.release_if_idle(&next).await?);
+    drop(next);
+    drop(lease);
+    assert!(coordinator.locks.threads.lock().unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn receipt_resolves_new_identity_to_original_turn() -> Result<()> {
+    let coordinator = StoredTurnCoordinator::in_memory();
+    let thread = TurnThread {
+        agent_id: Uuid7::now(),
+        thread_id: Uuid7::now(),
+    };
+    let mut first = queued("alice", TurnAttention::Wake);
+    first.options.idempotency_key = Some("request-1".into());
+    coordinator.enqueue(thread, first.clone()).await?;
+    let lease = coordinator.claim(thread).await?.unwrap();
+    coordinator.acknowledge(&lease, first.turn.id).await?;
+    let mut retry = queued("alice", TurnAttention::Wake);
+    retry.turn.session_id = first.turn.session_id;
+    retry.options = first.options;
+    let receipt = coordinator.enqueue(thread, retry).await?;
+    assert!(receipt.duplicate);
+    assert_eq!(receipt.turn, first.turn);
+    Ok(())
+}
+
+#[cfg(feature = "basic-backend")]
+#[tokio::test]
+async fn shared_admission_contract() -> Result<()> {
+    let coordinator = StoredTurnCoordinator::in_memory();
+    crate::contract_tests::turn_admission_contract(
+        &coordinator,
+        &coordinator,
+        TurnThread {
+            agent_id: Uuid7::now(),
+            thread_id: Uuid7::now(),
+        },
+        42,
+    )
+    .await
+}
+
+#[cfg(feature = "basic-backend")]
+#[async_trait]
+impl crate::contract_tests::TurnAdmissionHooks for StoredTurnCoordinator<u32> {
+    type Claim = TurnLease;
+
+    async fn claim_head(&self, thread: TurnThread) -> Result<TurnLease> {
+        self.claim(thread).await?.context("head was not claimed")
+    }
+
+    async fn is_cancelled(&self, claim: &TurnLease, turn: TurnId) -> Result<bool> {
+        Ok(self
+            .get(claim.thread, turn)
+            .await?
+            .context("turn is missing")?
+            .control
+            == TurnControl::Cancel)
+    }
+}

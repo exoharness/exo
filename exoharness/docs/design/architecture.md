@@ -243,10 +243,11 @@ inside one process; it is not a cross-process pub/sub service.
 
 ## Sessions And Turns
 
-A session groups related turns. `begin_turn()` accepts an optional `session_id`.
-If none is provided, Exoharness creates a new session and appends
-`session_started` before `turn_started`. If input messages are included, they
-are appended as a `messages` event in the same turn.
+A session groups related turns. `begin_turn()` requires a caller-allocated
+`TurnRecord` containing the turn and session IDs. Set `new_session: true` to
+append `session_started` before `turn_started`; use `false` when continuing an
+existing session, including one opened with `start_session()`. If input messages
+are included, they are appended as a `messages` event in the same turn.
 
 The executor-level `send()` API starts a turn, executes the configured harness,
 and finishes the turn. External systems such as adapters and scheduler wakeups
@@ -398,16 +399,61 @@ artifacts, events, or sandbox execution can use `exoharness_handle()`.
 
 ## Turn Execution Lifecycle
 
-`ExecutorHarnessRuntime` implements the shared send lifecycle:
+`Runtime` separates accepting a turn from executing it:
 
-1. Load agent config.
-2. Load conversation config.
-3. Load any conversation-level model override.
-4. Let the selected executor prepare the conversation.
-5. Prepare the request.
-6. Call `conversation.begin_turn()`.
-7. Execute the turn with streaming enabled or disabled.
-8. Append `turn_ended` through the turn handle.
+1. Authorize the request and capture its configuration and typed work payload.
+2. Assign the turn and session IDs, enqueue the work, and return its receipt.
+3. Claim the thread's queue and persist execution admission for its head.
+4. Prepare the conversation, then call `begin_turn()` with the accepted IDs.
+5. Run the selected executor and persist its terminal events.
+6. Acknowledge the head and execute the next entry in order.
+
+Acceptance does not wait for an earlier turn or VM startup. Dropping the progress
+stream leaves accepted work queued; cancellation explicitly records a request in
+the queue. Interruption records cancellation of the submitter's active turn and
+appends its replacement atomically. Idempotency keys are scoped to the submitter;
+the stored implementation keeps receipts for 24 hours after acceptance.
+
+`TurnCoordinator<Work>` is a separate trait in `exoharness`. It defines ordering,
+ownership, cancellation, suspension, and acknowledgment. Its `pending_threads()`
+method supports startup discovery. A host that knows its thread can
+call `LocalProvider::wake_turn_queue()` after a wakeup without global discovery.
+Timed ownership renewal and worker scheduling belong to the deployment backend.
+
+`Runtime::suspend_turn()` persists a pause and stops execution without ending the
+turn. A suspended head holds queue order across restart. `Runtime::resume_turn()`
+returns a new progress stream and recovers the same turn and session IDs;
+existing observers receive one nonterminal `Suspended` event. `send()` and the
+TUI stop waiting at suspension; stream observers may stay attached for resume.
+Cancellation ends a suspended turn. Executors that cannot reconcile unresolved
+tools defer suspension until their outstanding tool requests have results,
+including approvals. Unsupported suspension returns `false` without saving a
+pause. Resuming during that wait clears the pending suspension.
+The coordinator's control watch delivers changes during execution, including
+writes from another backend worker.
+
+The CLI explicitly supplies `BasicExoHarness::turn_coordinator()`, which persists
+`turn_queue.json` in each thread's directory. Embedded `LocalProvider` constructors
+use a volatile queue with no recovery across process restarts. Durable recovery
+requires a persistent coordinator supplied through `with_turn_coordinator()`. The
+stored implementation requires one host owner; Basic's local session leases
+enforce this across processes and separately protect thread mutations and VMs.
+
+Durable Object hosts must explicitly install a persistent coordinator with
+`with_turn_coordinator()` and schedule their alarm before reporting acceptance.
+An account object serving several threads needs discovery; a host given a thread
+ID can wake that thread directly.
+
+On restart, the runtime reconciles the saved queue head with its recovery journal.
+It retains the accepted ID if execution never started, resumes unfinished work,
+and acknowledges completed work without running it again. The queue is the sole
+source of pending work; new turns queue behind it without waiting for a startup
+scan. Sandbox ownership and shutdown remain with the state implementation.
+
+A competing-worker coordinator must implement atomic storage mutations and
+report lost ownership through the control watch when renewal fails; the runtime
+then stops execution. Queue ownership does not itself fence event or tool writes,
+and recovery does not guarantee exactly-once external side effects.
 
 The actual turn runner is a `HarnessExecutor` implementation. Current executor
 implementations include the basic harness, RLM harness, and TypeScript harness.

@@ -63,6 +63,8 @@ pub fn default_enable_agent_tool_creation() -> bool {
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct ConversationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_port: Option<u16>,
     #[serde(default)]
     pub resources: Vec<exoharness::resources::PreparedResource>,
     #[serde(default)]
@@ -108,6 +110,7 @@ impl fmt::Display for ConversationModelConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
+            preview_port: None,
             resources: Vec::new(),
             resource_mounts: Vec::new(),
             permissions: Default::default(),
@@ -310,6 +313,7 @@ pub enum ExecutionStreamEvent {
         result: ToolResult,
     },
     Completed(SendResult),
+    Suspended(exoharness::TurnRecord),
 }
 
 impl Stream for ExecutionStreamHandle {

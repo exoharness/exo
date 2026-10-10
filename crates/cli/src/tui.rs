@@ -74,7 +74,7 @@ pub async fn run_chat_repl(
     repl.reconnect().await?;
     while interruptible(repl.run()).await?.is_none() {
         if let Some(key) = repl.active_turn.take() {
-            repl.runtime.cancel(key).await?;
+            repl.runtime.cancel_turn(key).await?;
         }
     }
     Ok(())
@@ -632,7 +632,7 @@ impl ChatRepl {
                 .is_some_and(|error| error.kind() == io::ErrorKind::Interrupted)
         }) && let Some(key) = self.active_turn
         {
-            self.runtime.cancel(key).await?;
+            self.runtime.cancel_turn(key).await?;
         }
         self.active_turn = None;
         result
@@ -656,6 +656,7 @@ impl ChatRepl {
                 },
                 true,
                 None,
+                Default::default(),
             ))
             .await?;
         self.observe_turn(turn, stream, started).await
@@ -664,7 +665,7 @@ impl ChatRepl {
     async fn reconnect(&mut self) -> Result<()> {
         if let Some((turn, stream)) = self
             .runtime
-            .reconnect_turn(self.conversation.as_ref())
+            .reconnect_turn(self.agent.record().id, self.conversation.as_ref())
             .await?
         {
             println!("Reconnecting to turn {}", turn.id);
@@ -682,7 +683,11 @@ impl ChatRepl {
     ) -> Result<()> {
         let mut progress = TurnProgress::new();
         self.session_id = Some(turn.session_id);
-        self.active_turn = Some(HarnessTurnKey::new(self.conversation.record().id, turn.id));
+        self.active_turn = Some(HarnessTurnKey::new(
+            self.agent.record().id,
+            self.conversation.record().id,
+            turn.id,
+        ));
         progress.set_status(Some("Waiting for model".to_string()));
         let mut stdout = io::stdout();
         let mut assistant_line = AssistantLine::default();
@@ -751,6 +756,12 @@ impl ChatRepl {
                     } else {
                         "Running tools".to_string()
                     }));
+                }
+                ExecutionStreamEvent::Suspended(turn) => {
+                    self.session_id = Some(turn.session_id);
+                    assistant_line.finish(&mut stdout)?;
+                    println!("turn suspended: {}", turn.id);
+                    break;
                 }
                 ExecutionStreamEvent::Completed(result) => {
                     self.session_id = Some(result.session_id);
