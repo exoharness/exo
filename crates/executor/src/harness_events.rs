@@ -74,8 +74,12 @@ fn update_pending_tools(pending: &mut HashSet<String>, event: &EventData) {
 
 #[async_trait]
 impl SnapshotHandle for HarnessTurn {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
-        self.inner.snapshot_sandbox(id).await
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: exoharness::SnapshotKind,
+    ) -> Result<SnapshotId> {
+        self.inner.snapshot_sandbox(id, kind).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {

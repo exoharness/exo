@@ -483,7 +483,7 @@ async fn snapshot_returns_daytona_snapshot_payload_with_manifest() {
         .await
         .unwrap();
     let payload = handle
-        .snapshot()
+        .snapshot(exoharness::SnapshotKind::Filesystem)
         .await
         .expect("snapshot should succeed against the mock");
 
@@ -539,7 +539,7 @@ async fn snapshot_surfaces_feature_flag_error_on_403() {
         .acquire(make_request(exoharness::Uuid7::now(), "sandbox-flag"))
         .await
         .unwrap();
-    let error = match handle.snapshot().await {
+    let error = match handle.snapshot(exoharness::SnapshotKind::Filesystem).await {
         Ok(_) => panic!("snapshot should fail when the feature flag is off"),
         Err(e) => format!("{e:#}").to_lowercase(),
     };

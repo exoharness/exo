@@ -112,11 +112,11 @@ impl ManagedSandboxHandle for ProcessManagedSandbox {
     async fn detach(&self) -> Result<SandboxAttachment> {
         self.handle.detach().await
     }
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
-        self.handle.snapshot().await
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        self.handle.snapshot(kind).await
     }
-    async fn snapshot_template(&self) -> Result<SnapshotPayload> {
-        self.handle.snapshot_template().await
+    async fn snapshot_template(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        self.handle.snapshot_template(kind).await
     }
     async fn delete_snapshot(&self, payload: SnapshotPayload) -> Result<()> {
         self.handle.delete_snapshot(payload).await

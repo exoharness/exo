@@ -154,6 +154,7 @@ impl SnapshotFormat {
     pub const SmolvmMachinePack: Self = Self::from_static("smolvm-machine-pack");
     /// Reference to an immutable bundle in a Firecracker host's private root.
     pub const FirecrackerHostRef: Self = Self::from_static("firecracker-host-ref");
+    pub const FirecrackerFilesystemRef: Self = Self::from_static("firecracker-filesystem-ref-v1");
 
     pub const fn from_static(format: &'static str) -> Self {
         Self(Cow::Borrowed(format))
@@ -300,11 +301,11 @@ pub trait ManagedSandboxHandle: Send + Sync {
     /// the descriptor required to attach to it elsewhere.
     async fn detach(&self) -> Result<SandboxAttachment>;
 
-    /// Capture the sandbox's current state as an opaque blob. Returns an
-    /// error if this backend doesn't (yet) support snapshotting.
-    async fn snapshot(&self) -> Result<SnapshotPayload>;
+    /// Capture the requested state and leave the source usable. Reject unsupported
+    /// kinds or writable mounts before capture; never silently omit filesystem state.
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload>;
 
-    async fn snapshot_template(&self) -> Result<SnapshotPayload> {
+    async fn snapshot_template(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         bail!("sandbox handle does not support template capture")
     }
 
@@ -473,6 +474,17 @@ pub trait ManagedSandboxBackend: Send + Sync {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>>;
+
+    /// Capture the requested state and release execution resources. Restore it
+    /// with acquire_from_snapshot; unsupported kinds must leave the source intact.
+    /// The returned snapshot has its own lifetime and is deleted with delete_snapshot.
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> Result<SnapshotPayload> {
+        bail!("sandbox backend does not support suspension")
+    }
 
     /// Permanently destroy the sandbox addressed by `request` and any retained
     /// backend state. Unlike stopping a handle, termination must be idempotent.

@@ -101,6 +101,12 @@ pub enum FirecrackerBridgeRequest {
     Snapshot {
         config: FirecrackerConfig,
         request: FirecrackerRequest,
+        kind: crate::SnapshotKind,
+    },
+    Suspend {
+        config: FirecrackerConfig,
+        request: SandboxRequest,
+        kind: crate::SnapshotKind,
     },
     Terminate {
         config: FirecrackerConfig,
@@ -264,6 +270,17 @@ impl BridgeBackendCache {
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let endpoints = request.egress_proxy;
         let handle = backend.acquire_request(request).await?;
+        self.track_egress(backend, handle.as_ref(), endpoints)
+            .await?;
+        Ok(handle)
+    }
+
+    async fn track_egress(
+        &self,
+        backend: &FirecrackerSandboxBackend,
+        handle: &dyn ManagedSandboxHandle,
+        endpoints: Option<crate::SandboxEgressProxy>,
+    ) -> Result<()> {
         if let Some(endpoints) = endpoints {
             let transport = self
                 .egress
@@ -273,9 +290,9 @@ impl BridgeBackendCache {
                 .find(|transport| transport.endpoints() == endpoints && !transport.is_closed())
                 .cloned()
                 .context("sandbox egress listener is no longer available")?;
-            backend.track_egress(handle.as_ref(), transport).await?;
+            backend.track_egress(handle, transport).await?;
         }
-        Ok(handle)
+        Ok(())
     }
 }
 
@@ -515,26 +532,71 @@ async fn handle_request(
             let payload = BASE64
                 .decode(payload)
                 .context("decoding Firecracker snapshot bridge payload")?;
-            let handle = backends
-                .backend(config)
-                .await?
-                .acquire_from_snapshot(
-                    request.sandbox,
-                    SnapshotPayload {
-                        format,
-                        bytes: payload.into(),
-                    },
-                )
-                .await?;
+            let backend = backends.backend(config).await?;
+            let endpoints = request.egress_proxy;
+            let cleanup_request = request.sandbox.clone();
+            let payload = SnapshotPayload {
+                format,
+                bytes: payload.into(),
+            };
+            let filesystem = payload.format == SnapshotFormat::FirecrackerFilesystemRef;
+            let handle = if filesystem {
+                crate::with_process_management(Arc::new(
+                    backend
+                        .acquire_filesystem_request(request, payload, None)
+                        .await?,
+                ))
+            } else {
+                backend
+                    .acquire_from_snapshot(request.sandbox, payload)
+                    .await?
+            };
+            if let Err(error) = backends
+                .track_egress(&backend, handle.as_ref(), endpoints)
+                .await
+            {
+                if filesystem {
+                    return match backend.terminate(cleanup_request).await {
+                        Ok(()) => Err(error),
+                        Err(cleanup) => Err(error
+                            .context(format!("filesystem restore cleanup failed: {cleanup:#}"))),
+                    };
+                }
+                return Err(error);
+            }
+            let source_ipv4 = backend.egress_source(handle.as_ref()).await?;
             Ok(FirecrackerBridgeResponse::Handle {
                 id: handle.id().to_string(),
                 provider_state: handle.provider_state(),
                 effective_image: handle.effective_image(),
-                source_ipv4: None,
+                source_ipv4,
             })
         }
-        FirecrackerBridgeRequest::Snapshot { config, request } => {
-            let snapshot = backends.acquire(config, request).await?.snapshot().await?;
+        FirecrackerBridgeRequest::Snapshot {
+            config,
+            request,
+            kind,
+        } => {
+            let snapshot = backends
+                .acquire(config, request)
+                .await?
+                .snapshot(kind)
+                .await?;
+            Ok(FirecrackerBridgeResponse::Snapshot {
+                format: snapshot.format,
+                payload: BASE64.encode(snapshot.bytes),
+            })
+        }
+        FirecrackerBridgeRequest::Suspend {
+            config,
+            request,
+            kind,
+        } => {
+            let snapshot = backends
+                .backend(config)
+                .await?
+                .suspend(request, kind)
+                .await?;
             Ok(FirecrackerBridgeResponse::Snapshot {
                 format: snapshot.format,
                 payload: BASE64.encode(snapshot.bytes),

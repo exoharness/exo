@@ -86,8 +86,15 @@ enum ReplCommand {
         command: String,
     },
     /// Snapshot a sandbox in this conversation (defaults to the latest one)
-    #[command(override_usage = "/snapshot [<sandbox-id>]", disable_help_flag = true)]
-    Snapshot { sandbox_id: Option<String> },
+    #[command(
+        override_usage = "/snapshot <filesystem|full> [<sandbox-id>]",
+        disable_help_flag = true
+    )]
+    Snapshot {
+        #[arg(value_parser = super::tui::parse_snapshot_kind)]
+        kind: exoharness::SnapshotKind,
+        sandbox_id: Option<String>,
+    },
     /// List snapshots taken in this conversation
     #[command(override_usage = "/snapshots", disable_help_flag = true)]
     Snapshots,
@@ -771,8 +778,8 @@ impl TuiApp {
                     .await
                 });
             }
-            ReplCommand::Snapshot { sandbox_id } => self.spawn_command(tx, async move {
-                snapshot_lines(conversation.as_ref(), sandbox_id).await
+            ReplCommand::Snapshot { kind, sandbox_id } => self.spawn_command(tx, async move {
+                snapshot_lines(conversation.as_ref(), sandbox_id, kind).await
             }),
             ReplCommand::Snapshots => {
                 self.spawn_command(
@@ -1661,8 +1668,9 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_repl_input("/snapshot abc").unwrap(),
+            parse_repl_input("/snapshot full abc").unwrap(),
             ReplInput::Command(ReplCommand::Snapshot {
+                kind: exoharness::SnapshotKind::Full,
                 sandbox_id: Some("abc".to_string())
             })
         );

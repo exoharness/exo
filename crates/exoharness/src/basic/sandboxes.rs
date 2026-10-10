@@ -472,10 +472,14 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         Ok(attachment)
     }
 
-    pub(super) async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    pub(super) async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotId> {
         self.harness.check(self.owner).await?;
         let (snapshot_id, event) =
-            snapshot_sandbox_side_effect(self.harness, &self.owner_dir, id).await?;
+            snapshot_sandbox_side_effect(self.harness, &self.owner_dir, id, kind).await?;
         self.append_events(vec![event]).await?;
         Ok(snapshot_id)
     }
@@ -1147,6 +1151,7 @@ pub(super) async fn snapshot_sandbox_side_effect(
     harness: &BasicExoHarness,
     owner_dir: &Path,
     id: SandboxId,
+    kind: crate::SnapshotKind,
 ) -> Result<(SnapshotId, EventData)> {
     let sandbox = load_stored_sandbox(harness, owner_dir, &id).await?;
     if sandbox.attachment.is_some() {
@@ -1162,7 +1167,7 @@ pub(super) async fn snapshot_sandbox_side_effect(
         .get(&id)
         .cloned()
         .ok_or_else(|| anyhow!("sandbox {id} is not running; start it before snapshotting"))?;
-    let payload = handle.snapshot().await?;
+    let payload = handle.snapshot(kind).await?;
 
     let _guard = harness.inner.write_lock.lock().await;
     let mut sandbox = load_stored_sandbox(harness, owner_dir, &id).await?;

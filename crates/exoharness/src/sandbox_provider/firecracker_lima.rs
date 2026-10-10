@@ -51,7 +51,10 @@ use super::firecracker_bridge::{
     write_frame,
 };
 
-static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::FirecrackerHostRef];
+static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 2] = [
+    SnapshotFormat::FirecrackerHostRef,
+    SnapshotFormat::FirecrackerFilesystemRef,
+];
 
 const BRIDGE_FRAME_QUEUE_DEPTH: usize = 16;
 const BRIDGE_STREAM_QUEUE_DEPTH: usize = 16;
@@ -123,6 +126,7 @@ impl LimaFirecrackerSandboxBackend {
     async fn acquire_request(
         &self,
         request: FirecrackerRequest,
+        snapshot: Option<SnapshotPayload>,
     ) -> Result<LimaFirecrackerSandboxHandle> {
         // A one-shot Firecracker handle destroys its VM after the command. Do
         // not eagerly acquire it here and then acquire a second VM when the
@@ -140,12 +144,19 @@ impl LimaFirecrackerSandboxBackend {
                 bridge: self.bridge.clone(),
             });
         }
-        let response = self
-            .request(FirecrackerBridgeRequest::Acquire {
+        let bridge_request = match snapshot {
+            Some(payload) => FirecrackerBridgeRequest::AcquireFromSnapshot {
                 config: self.config.clone(),
                 request: request.clone(),
-            })
-            .await?;
+                format: payload.format,
+                payload: BASE64.encode(payload.bytes),
+            },
+            None => FirecrackerBridgeRequest::Acquire {
+                config: self.config.clone(),
+                request: request.clone(),
+            },
+        };
+        let response = self.request(bridge_request).await?;
         let FirecrackerBridgeResponse::Handle {
             id,
             provider_state,
@@ -298,10 +309,13 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
                 |policy| async move { self.egress_transport(&policy).await },
                 |egress| async move {
                     let mut handle = self
-                        .acquire_request(FirecrackerRequest {
-                            sandbox: request,
-                            egress_proxy: egress.as_ref().map(|egress| egress.endpoints()),
-                        })
+                        .acquire_request(
+                            FirecrackerRequest {
+                                sandbox: request,
+                                egress_proxy: egress.as_ref().map(|egress| egress.endpoints()),
+                            },
+                            None,
+                        )
                         .await?;
                     if let Some(egress) = egress {
                         let source = handle
@@ -329,6 +343,32 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
     async fn delete_snapshot(&self, payload: SnapshotPayload) -> Result<()> {
         self.bridge
             .delete_snapshot(self.config.clone(), payload)
+            .await
+    }
+
+    async fn suspend(
+        &self,
+        request: SandboxRequest,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotPayload> {
+        let id = request.sandbox_id.clone();
+        self.egress
+            .suspend(&id, async {
+                let response = self
+                    .request(FirecrackerBridgeRequest::Suspend {
+                        config: self.config.clone(),
+                        request,
+                        kind,
+                    })
+                    .await?;
+                let FirecrackerBridgeResponse::Snapshot { format, payload } = response else {
+                    bail!("Firecracker Lima bridge returned the wrong response to suspend");
+                };
+                Ok(SnapshotPayload {
+                    format,
+                    bytes: BASE64.decode(payload)?.into(),
+                })
+            })
             .await
     }
 
@@ -390,39 +430,57 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.resources.get_or_insert_with(Default::default);
-        request
-            .spec
-            .policy
-            .validate_basic("Firecracker snapshot restore")?;
         if request.lifecycle.idle_ttl.is_none() {
             bail!("Firecracker Lima snapshot restores require a managed sandbox lifecycle");
         }
-        let response = self
-            .request(FirecrackerBridgeRequest::AcquireFromSnapshot {
-                config: self.config.clone(),
-                request: request.clone().into(),
-                format: payload.format,
-                payload: BASE64.encode(payload.bytes),
-            })
-            .await?;
-        let FirecrackerBridgeResponse::Handle {
-            id,
-            provider_state,
-            effective_image,
-            source_ipv4,
-        } = response
-        else {
-            bail!("Firecracker Lima bridge returned the wrong response to snapshot restore");
-        };
-        Ok(crate::with_process_management(Arc::new(
-            self.bound_handle(
-                request.into(),
-                id,
-                provider_state,
-                effective_image,
-                source_ipv4,
-            )?,
-        )))
+        if payload.format != SnapshotFormat::FirecrackerFilesystemRef {
+            request
+                .spec
+                .policy
+                .validate_basic("Firecracker snapshot restore")?;
+            let handle = self.acquire_request(request.into(), Some(payload)).await?;
+            return Ok(crate::with_process_management(Arc::new(handle)));
+        }
+        let terminate = self.terminate_request(request.clone());
+        self.egress
+            .restore(
+                request.clone(),
+                self.external_proxy.as_ref(),
+                |policy| async move { self.egress_transport(&policy).await },
+                |egress| async move {
+                    let mut handle = self
+                        .acquire_request(
+                            FirecrackerRequest {
+                                sandbox: request.clone(),
+                                egress_proxy: egress.as_ref().map(|egress| egress.endpoints()),
+                            },
+                            Some(payload),
+                        )
+                        .await?;
+                    if let Some(egress) = egress {
+                        let initialized = async {
+                            let source = handle
+                                .source_ipv4
+                                .context("Firecracker sandbox has no egress source")?;
+                            egress.initialize(&handle, source).await
+                        }
+                        .await;
+                        if let Err(error) = initialized {
+                            return match self.terminate_request(request).await {
+                                Ok(()) => Err(error),
+                                Err(cleanup) => Err(error.context(format!(
+                                    "filesystem restore cleanup failed: {cleanup:#}"
+                                ))),
+                            };
+                        }
+                        handle.egress = Some(egress);
+                    }
+                    Ok(handle)
+                },
+                terminate,
+            )
+            .await
+            .map(|handle| crate::with_process_management(handle))
     }
 }
 
@@ -545,8 +603,8 @@ impl ManagedSandboxHandle for LimaFirecrackerSandboxHandle {
             .await
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
-        if self.egress.is_some() {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        if kind == crate::SnapshotKind::Full && self.egress.is_some() {
             bail!(super::firecracker::PROXIED_SNAPSHOT_UNSUPPORTED);
         }
         if self.request.lifecycle.idle_ttl.is_none() {
@@ -557,6 +615,7 @@ impl ManagedSandboxHandle for LimaFirecrackerSandboxHandle {
             .request(FirecrackerBridgeRequest::Snapshot {
                 config: self.config.clone(),
                 request: self.request.clone(),
+                kind,
             })
             .await?;
         let FirecrackerBridgeResponse::Snapshot { format, payload } = response else {

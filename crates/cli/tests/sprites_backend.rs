@@ -389,7 +389,10 @@ async fn snapshot_returns_sprites_snapshot_payload() {
         .await;
 
     let handle = backend.acquire(request).await.unwrap();
-    let payload = handle.snapshot().await.expect("snapshot");
+    let payload = handle
+        .snapshot(exoharness::SnapshotKind::Filesystem)
+        .await
+        .expect("snapshot");
 
     assert_eq!(payload.format, SnapshotFormat::SpritesRef);
     let manifest: Value = serde_json::from_slice(&payload.bytes).unwrap();

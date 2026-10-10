@@ -597,7 +597,7 @@ impl ManagedSandboxHandle for BorrowedDockerSandboxHandle {
         })
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         bail!("borrowed Docker containers cannot be snapshotted")
     }
 }
@@ -642,7 +642,7 @@ impl ManagedSandboxHandle for OneShotSandboxHandle {
         bail!("one-shot sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         bail!(
             "snapshot is not supported for one-shot sandboxes (set a positive idle_ttl to enable warm sandbox + snapshotting)"
         )
@@ -728,7 +728,21 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
         Ok(SandboxAttachment::DockerContainer { container_id })
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == crate::SnapshotKind::Filesystem,
+            "container backend does not support full execution snapshots"
+        );
+        ensure!(
+            self.request.spec.durable_file_systems.is_empty()
+                && self
+                    .request
+                    .spec
+                    .mounts
+                    .iter()
+                    .all(|mount| mount.access == SandboxMountAccess::ReadOnly),
+            "Docker filesystem snapshots cannot capture writable mounted volumes"
+        );
         match self.cli {
             ContainerCliFlavor::Docker => {
                 let name = ensure_warm_sandbox_ready(
@@ -868,7 +882,7 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
         bail!("local-process sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         // The local-process backend runs commands directly on the host; there
         // is no container filesystem to capture. A meaningful implementation
         // would tar up the writable mounts, but the semantics differ enough

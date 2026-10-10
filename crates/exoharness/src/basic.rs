@@ -740,11 +740,15 @@ impl<T> SnapshotHandle for T
 where
     T: BasicSandboxScope + Send + Sync,
 {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotId> {
         let scope = self.sandbox_handle();
         #[cfg(feature = "basic-backend")]
         let _lease = scope.harness.claim_local_scope(scope.owner).await?;
-        scope.snapshot_sandbox(id).await
+        scope.snapshot_sandbox(id, kind).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {

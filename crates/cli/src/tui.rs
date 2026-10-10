@@ -504,26 +504,22 @@ impl ChatRepl {
                                 self.run_shell(command).await?;
                             }
                         }
-                        "/snapshot" => {
-                            print_lines(snapshot_lines(self.conversation.as_ref(), None).await);
-                        }
-                        other if other.starts_with("/snapshot ") => {
-                            let arg = other
-                                .strip_prefix("/snapshot ")
-                                .expect("prefix checked")
-                                .trim();
-                            if arg.is_empty() {
-                                println!("usage: /snapshot [<sandbox-id>]");
-                            } else if arg.contains(char::is_whitespace) {
-                                println!("/snapshot takes at most one sandbox id; got: {arg:?}");
+                        other if other == "/snapshot" || other.starts_with("/snapshot ") => {
+                            let mut arguments = other.split_whitespace().skip(1);
+                            let kind = arguments.next().map(parse_snapshot_kind);
+                            let id = arguments.next().map(str::to_owned);
+                            if arguments.next().is_some() {
+                                println!("usage: /snapshot <filesystem|full> [<sandbox-id>]");
                             } else {
-                                print_lines(
-                                    snapshot_lines(
-                                        self.conversation.as_ref(),
-                                        Some(arg.to_string()),
-                                    )
-                                    .await,
-                                );
+                                match kind {
+                                    Some(Ok(kind)) => print_lines(
+                                        snapshot_lines(self.conversation.as_ref(), id, kind).await,
+                                    ),
+                                    Some(Err(error)) => println!("{error}"),
+                                    None => println!(
+                                        "usage: /snapshot <filesystem|full> [<sandbox-id>]"
+                                    ),
+                                }
                             }
                         }
                         "/snapshots" => {
@@ -610,7 +606,7 @@ impl ChatRepl {
         println!("snapshotting sandbox {sandbox_id}...");
         let snapshot_id = self
             .conversation
-            .snapshot_sandbox(sandbox_id.clone())
+            .snapshot_sandbox(sandbox_id.clone(), exoharness::SnapshotKind::Filesystem)
             .await?;
         println!("snapshot {snapshot_id} captured; restoring on {provider}...");
         self.conversation
@@ -965,7 +961,7 @@ fn print_help() {
     println!("  /history             reprint the conversation transcript");
     println!("  /verbosity <level>   set tool output detail: minimal, compact, or full");
     println!("  /cost | /usage       summarize token usage and dollar cost");
-    println!("  /snapshot [<id>]     snapshot a sandbox in this conversation");
+    println!("  /snapshot <filesystem|full> [<id>]  capture the requested sandbox state");
     println!("                       (defaults to the latest one if no id is given)");
     println!("  /snapshots           list snapshots taken in this conversation");
     println!("  /rewind <id>         restore the sandbox to a previous snapshot");
@@ -990,13 +986,20 @@ async fn cost_summary(conversation: &dyn ConversationHandle) -> Result<Vec<Strin
     Ok(tracker.cost_lines())
 }
 
-/// `/snapshot` output: snapshot the given sandbox, or the conversation's
-/// latest one when no id is given.
+pub(crate) fn parse_snapshot_kind(value: &str) -> Result<exoharness::SnapshotKind, String> {
+    match value {
+        "filesystem" => Ok(exoharness::SnapshotKind::Filesystem),
+        "full" => Ok(exoharness::SnapshotKind::Full),
+        _ => Err("snapshot kind must be filesystem or full".into()),
+    }
+}
+
 pub(crate) async fn snapshot_lines(
     conversation: &dyn ConversationHandle,
     explicit_id: Option<SandboxId>,
+    kind: exoharness::SnapshotKind,
 ) -> Vec<String> {
-    match snapshot_sandbox(conversation, explicit_id).await {
+    match snapshot_sandbox(conversation, explicit_id, kind).await {
         Ok(snapshot_id) => vec![format!("snapshot {snapshot_id}")],
         Err(error) => vec![format!("snapshot failed: {error:#}")],
     }
@@ -1005,6 +1008,7 @@ pub(crate) async fn snapshot_lines(
 async fn snapshot_sandbox(
     conversation: &dyn ConversationHandle,
     explicit_id: Option<SandboxId>,
+    kind: exoharness::SnapshotKind,
 ) -> Result<SnapshotId> {
     let sandbox_id = match explicit_id {
         Some(id) => id,
@@ -1012,7 +1016,7 @@ async fn snapshot_sandbox(
             anyhow::anyhow!("no sandbox has been created in this conversation yet")
         })?,
     };
-    let id = conversation.snapshot_sandbox(sandbox_id).await?;
+    let id = conversation.snapshot_sandbox(sandbox_id, kind).await?;
     Ok(id)
 }
 
@@ -1100,7 +1104,9 @@ async fn teleport_sandbox(
     let sandbox_id = latest_sandbox_id(conversation)
         .await?
         .ok_or_else(|| anyhow::anyhow!("no sandbox has been created in this conversation yet"))?;
-    let snapshot_id = conversation.snapshot_sandbox(sandbox_id.clone()).await?;
+    let snapshot_id = conversation
+        .snapshot_sandbox(sandbox_id.clone(), exoharness::SnapshotKind::Filesystem)
+        .await?;
     conversation
         .start_sandbox(StartSandboxRequest {
             id: sandbox_id.clone(),
