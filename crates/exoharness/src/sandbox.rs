@@ -295,6 +295,17 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
+    fn live_resource_ceiling(&self) -> Option<crate::SandboxResourceShape> {
+        None
+    }
+
+    async fn expand_resources(
+        &self,
+        _resources: crate::SandboxResourceShape,
+    ) -> Result<crate::SandboxResourceShape> {
+        bail!("sandbox handle does not support live resource expansion")
+    }
+
     async fn stop(&self) -> Result<()>;
 
     /// Relinquish lifecycle ownership without stopping the sandbox and return
