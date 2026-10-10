@@ -287,6 +287,38 @@ async fn discovers_filters_and_calls_json_and_sse_servers() {
 }
 
 #[tokio::test]
+async fn injected_http_client_pins_the_server_destination() -> anyhow::Result<()> {
+    let fixture = Fixture::start(false).await;
+    let mut server = fixture.config("fixture");
+    let mut url = url::Url::parse(&server.url)?;
+    let address = format!("127.0.0.1:{}", url.port().unwrap()).parse()?;
+    url.set_host(Some("mcp.invalid"))?;
+    server.url = url.to_string();
+    let servers = [server];
+    let credentials = Arc::new(credentials(&servers));
+    assert!(
+        McpToolSet::connect_with_http_clients(&servers, credentials.clone(), &[])
+            .await
+            .is_err()
+    );
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve("mcp.invalid", address)
+        .build()?;
+    let tools = McpToolSet::connect_with_http_clients(&servers, credentials, &[client]).await?;
+    let result = tools
+        .call(
+            "exo_mcp__fixture__search",
+            serde_json::from_value(json!({"query":"hello"}))?,
+        )
+        .await?;
+    assert_eq!(result.structured_content, Some(json!({"tool":"search"})));
+    tools.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn preserves_tool_errors_and_reports_protocol_and_auth_errors() {
     let fixture = Fixture::start(false).await;
     let servers = [fixture.config("fixture")];
