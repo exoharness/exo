@@ -104,6 +104,15 @@ impl ManagedSandboxHandle for ProcessManagedSandbox {
     async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
         self.handle.connect_tcp(port).await
     }
+    fn live_resource_ceiling(&self) -> Option<crate::SandboxResourceShape> {
+        self.handle.live_resource_ceiling()
+    }
+    async fn expand_resources(
+        &self,
+        resources: crate::SandboxResourceShape,
+    ) -> Result<crate::SandboxResourceShape> {
+        self.handle.expand_resources(resources).await
+    }
     async fn stop(&self) -> Result<()> {
         self.handle.stop().await?;
         self.processes.cancel_all().await;
