@@ -47,7 +47,7 @@ The guardian restarts the managed adapter runner with SIGTERM and waits for its 
 
 The managed Slack adapter does not send reboot announcements.
 
-The canonical local startup is plain `./examples/self-improving-agent/exo.sh` (Docker provider/backend, repo self-map mount, guardian config, control REPL — the default `--template canonical`). `./examples/self-improving-agent/exo.sh fresh` gives the same shape from a clean agent/conversation state.
+The canonical local startup is plain `./examples/self-improving-agent/exo.sh` (SmolVM provider/backend, repo self-map mount, guardian config, control REPL — the default `--template canonical`). `./examples/self-improving-agent/exo.sh fresh` gives the same shape from a clean agent/conversation state.
 
 ## 2. Durable Memory and Identity
 
@@ -118,7 +118,7 @@ Checkpointing tools:
 - `snapshot_sandbox` captures a filesystem checkpoint.
 - `rewind_sandbox` restarts the selected sandbox from a prior snapshot id.
 
-Tool results return the selected scope, sandbox id, owner conversation id, and snapshot id so later actions can target the same environment explicitly. Snapshot/rewind availability depends on the backend: Docker warm sandboxes support the flow; unsupported backends report clear errors. Rewind restores filesystem state only (see area 2 for what it does not roll back).
+Tool results return the selected scope, sandbox id, owner conversation id, and snapshot id so later actions can target the same environment explicitly. Snapshot/rewind availability depends on the backend: Docker and SmolVM warm sandboxes support the flow; unsupported backends report clear errors. Rewind does not roll back canonical conversation state (see area 2).
 
 Gap: there is no sandbox _cloning_ — starting a second sandbox from an existing snapshot while keeping the original running. That is the natural primitive for self-experimentation (try a change in a clone, compare, then adopt) and a prerequisite for cloning the whole agent (area 7).
 
