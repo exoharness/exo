@@ -1016,8 +1016,36 @@ send_startup_prompt() {
   fi
 }
 
+adapter_configured() {
+  # The CLI has no adapter command, so read the adapter store under the Exo
+  # home, which is where the agent's adapter tools write. A setup prompt
+  # creates its adapter for this thread under the --setup name. When the
+  # lookup finds nothing, for example because a provider profile moved the
+  # store, the prompt is sent as before.
+  local thread_id
+  thread_id="$(exo thread list "$AGENT" 2>/dev/null |
+    awk -v slug="$CONVERSATION" 'NR > 1 && $1 == slug { print $2 }')" || return 1
+  [[ -n "$thread_id" ]] || return 1
+  python3 - "${EXO_HOME:-$HOME/.exo}/adapters/adapters" "$thread_id" "$1" <<'PYTHON'
+import json, pathlib, sys
+store, thread_id, name = sys.argv[1:]
+for path in pathlib.Path(store).glob("*.json"):
+    try:
+        adapter = json.loads(path.read_text())
+    except (OSError, ValueError):
+        continue
+    if adapter.get("conversation_id") == thread_id and adapter.get("name") == name and adapter.get("enabled"):
+        sys.exit(0)
+sys.exit(1)
+PYTHON
+}
+
 send_adapter_setup_prompt() {
   local adapter="$1"
+  if adapter_configured "$adapter"; then
+    echo "Adapter $adapter is already configured; skipping its setup prompt."
+    return
+  fi
   local file prompt
   file="$(adapter_setup_prompt_file "$adapter")"
   prompt="$(<"$file")"
