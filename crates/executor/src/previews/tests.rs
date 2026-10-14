@@ -33,6 +33,14 @@ impl ManagedSandboxBackend for TcpBackend {
             TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?,
         )))
     }
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: exoharness::SnapshotKind,
+    ) -> Result<exoharness::SnapshotPayload> {
+        anyhow::bail!("test TCP backend does not support suspension")
+    }
+
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,

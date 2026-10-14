@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -203,6 +203,14 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         bail!("Sprites sandbox backend does not support external attachments")
     }
 
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> Result<SnapshotPayload> {
+        bail!("Sprites sandbox backend does not support suspension")
+    }
+
     async fn acquire_from_snapshot(
         &self,
         request: SandboxRequest,
@@ -318,7 +326,11 @@ impl ManagedSandboxHandle for SpritesSandboxHandle {
         bail!("Sprites sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == crate::SnapshotKind::Filesystem,
+            "sprites does not support the requested snapshot kind"
+        );
         save_checkpoint_via_backend(&self.backend, &self.sprite_name).await
     }
 }

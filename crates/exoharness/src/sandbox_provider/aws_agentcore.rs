@@ -128,6 +128,14 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         bail!("AWS AgentCore sandbox backend does not support external attachments")
     }
 
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> Result<SnapshotPayload> {
+        bail!("AWS AgentCore sandbox backend does not support suspension")
+    }
+
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
@@ -207,7 +215,7 @@ impl ManagedSandboxHandle for AwsAgentCoreSandboxHandle {
         bail!("AWS AgentCore sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         bail!("AgentCore sandbox snapshots are not implemented yet");
     }
 }

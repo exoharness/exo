@@ -601,6 +601,15 @@ impl ExoHarness for BasicExoHarness {
             if !prepare_sandbox_scopes_for_deletion(self, &scopes).await? {
                 continue;
             }
+            stream::iter(
+                scopes
+                    .iter()
+                    .map(|scope| delete_owned_snapshots(self, &scope.owner_dir))
+                    .collect::<Vec<_>>(),
+            )
+            .buffer_unordered(4)
+            .try_collect::<Vec<_>>()
+            .await?;
             #[cfg(feature = "basic-backend")]
             for conversation_id in agent_conversation_ids(self, &agent_dir).await? {
                 remove_thread_resources(self, *id, conversation_id).await?;
@@ -748,11 +757,15 @@ impl<T> SnapshotHandle for T
 where
     T: BasicSandboxScope + Send + Sync,
 {
-    async fn snapshot_sandbox(&self, id: SandboxId) -> Result<SnapshotId> {
+    async fn snapshot_sandbox(
+        &self,
+        id: SandboxId,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotId> {
         let scope = self.sandbox_handle();
         #[cfg(feature = "basic-backend")]
         let _lease = scope.harness.claim_local_scope(scope.owner).await?;
-        scope.snapshot_sandbox(id).await
+        scope.snapshot_sandbox(id, kind).await
     }
 
     async fn start_sandbox(&self, request: StartSandboxRequest) -> Result<()> {
@@ -1200,6 +1213,7 @@ impl AgentHandle for BasicAgentHandle {
             {
                 continue;
             }
+            delete_owned_snapshots(&self.harness, &conversation_dir).await?;
             if let Ok(mut record) =
                 load_conversation_record(&self.harness.inner.storage, &conversation_dir).await
             {
@@ -1741,10 +1755,10 @@ impl ConversationHandle for BasicConversationHandle {
             conversation_id: self.record.id,
             record: turn_record,
             event_batch_index: self.event_batch_index.clone(),
-            state: Mutex::new(BasicTurnState {
+            state: Arc::new(Mutex::new(BasicTurnState {
                 latest_event_id: Some(add_result.latest_event_id),
                 finished: false,
-            }),
+            })),
         }))
     }
 
@@ -1780,10 +1794,10 @@ impl ConversationHandle for BasicConversationHandle {
             conversation_id: self.record.id,
             record,
             event_batch_index: Arc::clone(&self.event_batch_index),
-            state: Mutex::new(BasicTurnState {
+            state: Arc::new(Mutex::new(BasicTurnState {
                 latest_event_id,
                 finished,
-            }),
+            })),
         }))
     }
 
@@ -2278,7 +2292,7 @@ struct BasicTurnHandle {
     conversation_id: ConversationId,
     record: TurnRecord,
     event_batch_index: Arc<Mutex<Option<EventBatchIndex>>>,
-    state: Mutex<BasicTurnState>,
+    state: Arc<Mutex<BasicTurnState>>,
 }
 
 struct BasicTurnState {

@@ -425,46 +425,44 @@ async fn settled_vm_count() -> usize {
     last
 }
 
-/// Snapshot round-trip through the backend API.
-///
-/// Gated on a REGISTRY image, unlike the other tests: `pack create --from-vm`
-/// re-pulls by manifest, and resolving that needs the sandbox to have network.
-///
-/// ```text
-/// docker run -d --rm -p 5055:5000 registry:2
-/// docker tag alpine:latest localhost:5055/alpine:latest && docker push localhost:5055/alpine:latest
-/// EXO_SMOLVM_REGISTRY_IMAGE=localhost:5055/alpine:latest cargo test -p exo \
-///   --test smolvm_sandbox_live snapshot -- --ignored --nocapture
-/// ```
+/// Snapshot, restore into fresh sandboxes, and repeatedly rewind a stopped source.
+/// Run with EXO_SMOLVM_TEST_IMAGE pointing at a local image archive or OCI image.
 #[tokio::test]
 #[ignore]
 async fn snapshot_round_trip_preserves_guest_state() {
-    let Ok(image) = env::var("EXO_SMOLVM_REGISTRY_IMAGE") else {
-        eprintln!("skipping snapshot test: EXO_SMOLVM_REGISTRY_IMAGE is not set");
+    let Some(image) = test_image() else {
         return;
     };
     let workspace = workspace_dir("snap");
     let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
     let ttl = Some(Duration::from_secs(600));
 
+    let source_request = request(
+        image.clone(),
+        &workspace,
+        SandboxNetworkPolicy::Unrestricted,
+        "snap-source",
+        ttl,
+    );
     let source = backend
-        .acquire(request(
-            image.clone(),
-            &workspace,
-            SandboxNetworkPolicy::Unrestricted,
-            "snap-source",
-            ttl,
-        ))
+        .acquire(source_request.clone())
         .await
         .expect("acquire source sandbox");
 
     let write = source
-        .exec(&command(&["sh", "-c", "echo packed-state > /root/marker"]))
+        .exec(&command(&[
+            "sh",
+            "-c",
+            "echo packed-state > /root/marker; echo repo-state > /workspace/marker",
+        ]))
         .await
         .expect("exec write");
     assert!(write.ok, "write failed: {}", write.stderr);
 
-    let payload = source.snapshot().await.expect("snapshot");
+    let payload = source
+        .snapshot(exoharness::SnapshotKind::Filesystem)
+        .await
+        .expect("snapshot");
     println!(
         "snapshot format={} manifest={} bytes",
         payload.format,
@@ -475,13 +473,13 @@ async fn snapshot_round_trip_preserves_guest_state() {
     let restored = backend
         .acquire_from_snapshot(
             request(
-                image,
-                &workspace,
+                image.clone(),
+                &workspace_dir("snap-restored"),
                 SandboxNetworkPolicy::Unrestricted,
                 "snap-restored",
                 ttl,
             ),
-            payload,
+            payload.clone(),
         )
         .await
         .expect("acquire_from_snapshot");
@@ -494,8 +492,73 @@ async fn snapshot_round_trip_preserves_guest_state() {
     assert!(read.ok, "read failed: {}", read.stderr);
     assert_eq!(read.stdout.trim(), "packed-state");
 
-    cleanup(&source).await;
+    assert_eq!(
+        restored
+            .exec(&command(&["cat", "/workspace/marker"]))
+            .await
+            .unwrap()
+            .stdout
+            .trim(),
+        "repo-state"
+    );
+    assert!(
+        restored
+            .exec(&command(&["sh", "-c", "echo edited > /workspace/marker"]))
+            .await
+            .unwrap()
+            .ok
+    );
+    let second = backend
+        .acquire_from_snapshot(
+            request(
+                image,
+                &workspace_dir("snap-second"),
+                SandboxNetworkPolicy::Unrestricted,
+                "snap-second",
+                ttl,
+            ),
+            payload.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        second
+            .exec(&command(&["cat", "/workspace/marker"]))
+            .await
+            .unwrap()
+            .stdout
+            .trim(),
+        "repo-state"
+    );
+    let mut current = source.clone();
+    for _ in 0..2 {
+        assert!(
+            current
+                .exec(&command(&[
+                    "sh",
+                    "-c",
+                    "echo changed > /root/marker; echo changed > /workspace/marker",
+                ]))
+                .await
+                .unwrap()
+                .ok
+        );
+        current.stop().await.unwrap();
+        current = backend
+            .acquire_from_snapshot(source_request.clone(), payload.clone())
+            .await
+            .expect("restore over the stopped source sandbox");
+        let markers = current
+            .exec(&command(&["cat", "/root/marker", "/workspace/marker"]))
+            .await
+            .unwrap();
+        assert!(markers.ok, "read failed: {}", markers.stderr);
+        assert_eq!(markers.stdout, "packed-state\nrepo-state\n");
+    }
+    cleanup(&current).await;
     cleanup(&restored).await;
+    cleanup(&second).await;
+    backend.delete_snapshot(payload).await.unwrap();
 }
 
 /// Count live `_boot-vm` processes by executable, not by a command-line pattern

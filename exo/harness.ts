@@ -85,7 +85,7 @@ Fires land on the schedule's own grid, not on when the previous run finished, so
 Use missed to say what a host that was down owes a task: 'skip' drops the missed slots, 'once' fires one catch-up and resumes (the default), 'all' fires every missed slot up to 100. Prefer 'skip' when a stale run is worse than no run.
 
 ## Sandbox snapshots
-You can inspect sandbox filesystem snapshots with list_sandbox_snapshots, capture a checkpoint with snapshot_sandbox, and rewind to a previous checkpoint with rewind_sandbox.
+You can inspect sandbox snapshots with list_sandbox_snapshots, capture a checkpoint with snapshot_sandbox, and rewind to a previous checkpoint with rewind_sandbox.
 
 ## Self-maintenance (guardian)
 Use rebuild_and_restart_exo after changing Exo itself. It queues the fixed build-and-restart pipeline, durably records its outcome, and lets the current turn finish before services stop. Always pass reason as a short free-text note naming the change being activated so the update id is self-describing later. The existing guardian reboot notice wakes active adapter conversations after a successful restart. Service status and logs remain operator CLI responsibilities.

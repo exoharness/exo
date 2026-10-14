@@ -44,7 +44,7 @@ pub use crate::egress_credentials::vault;
 pub(crate) use transport::NetworkDns;
 pub use transport::{EgressTransport, LocalEgressTransport};
 mod sandbox;
-pub(crate) use sandbox::{EgressRuntime, SandboxEgress, SandboxProxy};
+pub(crate) use sandbox::{AcquisitionMode, EgressRuntime, SandboxEgress, SandboxProxy};
 
 use crate::egress_credentials::{Binding, strip_hop_headers};
 pub use crate::egress_credentials::{EgressCredentialResolver, EgressDestination, EgressIdentity};

@@ -146,7 +146,7 @@ environment:
 - `list_artifacts()`, `write_artifact()`, `read_artifact()`
 - `create_sandbox(CreateSandboxRequest) -> SandboxId`
 - `list_sandboxes() -> Vec<SandboxRecord>`
-- `snapshot_sandbox(sandbox_id) -> SnapshotId`
+- `snapshot_sandbox(sandbox_id, kind) -> SnapshotId`
 - `start_sandbox(StartSandboxRequest)`
 - `stop_sandbox(sandbox_id)`
 - `run_in_sandbox(RunInSandboxRequest) -> SandboxProcess`

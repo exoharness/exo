@@ -392,7 +392,7 @@ async fn http_exoharness_supports_turn_scoped_sandbox_snapshot_and_start() {
         .expect("turn");
 
     let snapshot_id = turn
-        .snapshot_sandbox(sandbox_id.clone())
+        .snapshot_sandbox(sandbox_id.clone(), crate::SnapshotKind::Full)
         .await
         .expect("turn snapshot");
     turn.start_sandbox(StartSandboxRequest {
@@ -479,7 +479,7 @@ async fn http_exoharness_restores_a_snapshot_into_a_new_sandbox() {
         .await
         .expect("source sandbox");
     let snapshot_id = conversation
-        .snapshot_sandbox(source_id.clone())
+        .snapshot_sandbox(source_id.clone(), crate::SnapshotKind::Full)
         .await
         .expect("snapshot");
     let target_id = conversation
@@ -554,6 +554,14 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
         bail!("snapshot test backend does not support attachment")
     }
 
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> crate::Result<SnapshotPayload> {
+        bail!("snapshot test backend does not support suspension")
+    }
+
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
@@ -588,7 +596,8 @@ impl ManagedSandboxHandle for SnapshotTestSandboxHandle {
         bail!("snapshot test handle does not support detachment")
     }
 
-    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
+        assert_eq!(kind, crate::SnapshotKind::Full);
         Ok(SnapshotPayload {
             format: SnapshotFormat::DaytonaRef,
             bytes: Bytes::from_static(b"snapshot"),

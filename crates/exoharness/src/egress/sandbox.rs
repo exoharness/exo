@@ -151,6 +151,12 @@ struct CachedSandbox<H, P> {
     egress: Arc<SandboxEgress<P>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AcquisitionMode {
+    Acquire,
+    Restore,
+}
+
 // Shared acquisition logic for native sandbox egress.
 // This owns cached handles/proxies, not VM execution or the secret store.
 // A hosted backend can own its own allocation lifecycle instead of using this.
@@ -211,6 +217,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
     // both backends share cache checks and cleanup without a second VM wrapper.
     pub(crate) async fn acquire_with_proxy<T, TF, B, BF>(
         &self,
+        mode: AcquisitionMode,
         request: SandboxRequest,
         external_proxy: Option<&super::ExternalProxyConfig>,
         proxy: T,
@@ -240,6 +247,10 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                 && egress.is_open()
                 && handle.is_running().await? == Some(true)
             {
+                ensure!(
+                    mode == AcquisitionMode::Acquire,
+                    "snapshot restore target already has an allocation"
+                );
                 ensure!(
                     unchanged,
                     "stop the protected sandbox before changing its configuration"
@@ -293,8 +304,10 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                 },
             );
         }
+        let mut built = false;
         let result = async {
             let handle = Arc::new(build(Some(egress.clone())).await?);
+            built = true;
             let mut sandboxes = self.sandboxes();
             self.ensure_open()?;
             sandboxes
@@ -310,7 +323,9 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             if let Err(cleanup) = egress.proxy.shutdown().await {
                 tracing::warn!(sandbox_id = %request.sandbox_id, %cleanup, "egress cleanup after failed acquisition");
             }
-            if let Err(cleanup) = terminate.await {
+            if (mode == AcquisitionMode::Acquire || built)
+                && let Err(cleanup) = terminate.await
+            {
                 tracing::warn!(sandbox_id = %request.sandbox_id, %cleanup, "sandbox cleanup after failed acquisition");
             }
         }
@@ -336,6 +351,20 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         terminate.await
     }
 
+    #[cfg(feature = "firecracker")]
+    pub(crate) async fn suspend<T>(
+        &self,
+        id: &str,
+        suspend: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let _guard = self.lock(id).await;
+        let result = suspend.await?;
+        if let Err(error) = self.remove(id).await {
+            tracing::warn!(sandbox_id = %id, %error, "egress cleanup after suspension failed");
+        }
+        Ok(result)
+    }
+
     pub(crate) fn shutdown(&self) {
         self.closed.cancel();
         let sandboxes = std::mem::take(&mut *self.sandboxes());
@@ -349,6 +378,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
 impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
     pub(crate) async fn acquire<T, TF, B, BF>(
         &self,
+        mode: AcquisitionMode,
         request: SandboxRequest,
         external_proxy: Option<&super::ExternalProxyConfig>,
         transport: T,
@@ -363,6 +393,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
     {
         let policy = request.spec.policy.networking.clone();
         self.acquire_with_proxy(
+            mode,
             request,
             external_proxy,
             |state, cancel| async move {
@@ -414,7 +445,7 @@ mod tests {
         async fn detach(&self) -> Result<crate::SandboxAttachment> {
             unreachable!()
         }
-        async fn snapshot(&self) -> Result<crate::SnapshotPayload> {
+        async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<crate::SnapshotPayload> {
             unreachable!()
         }
     }
@@ -423,6 +454,7 @@ mod tests {
     struct Transport {
         closed: AtomicBool,
         shutdown_completed: AtomicBool,
+        fail_shutdown: AtomicBool,
     }
 
     #[async_trait]
@@ -444,6 +476,10 @@ mod tests {
             self.close();
             tokio::task::yield_now().await;
             self.shutdown_completed.store(true, Ordering::SeqCst);
+            anyhow::ensure!(
+                !self.fail_shutdown.load(Ordering::SeqCst),
+                "proxy shutdown failed"
+            );
             Ok(())
         }
         fn is_closed(&self) -> bool {
@@ -477,6 +513,119 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "firecracker")]
+    #[tokio::test]
+    async fn restore_rejects_a_live_cached_allocation_without_mutating_it() -> Result<()> {
+        let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+        let transport = Arc::new(Transport::default());
+        runtime
+            .acquire(
+                AcquisitionMode::Acquire,
+                request("one"),
+                None,
+                |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                |_| async { Ok(Handle(Some(true))) },
+                async { panic!("successful acquisition must not terminate") },
+            )
+            .await?;
+        let result = runtime
+            .acquire(
+                AcquisitionMode::Restore,
+                request("one"),
+                None,
+                |_| async { panic!("restore must not replace the existing proxy") },
+                |_| async { panic!("restore must not overwrite the existing VM") },
+                async { panic!("rejected restore must not terminate the existing VM") },
+            )
+            .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("already has an allocation")
+        );
+        assert!(!transport.is_closed());
+        assert_eq!(runtime.sandboxes().len(), 1);
+        runtime.shutdown();
+        Ok(())
+    }
+
+    #[cfg(feature = "firecracker")]
+    #[tokio::test]
+    async fn restore_cleanup_only_terminates_a_successfully_built_target() -> Result<()> {
+        for fail_build in [true, false] {
+            let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+            let transport = Arc::new(Transport::default());
+            let terminated = AtomicBool::new(false);
+            let result = runtime
+                .acquire(
+                    AcquisitionMode::Restore,
+                    request("one"),
+                    None,
+                    |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                    |_| async {
+                        ensure!(!fail_build, "target already allocated");
+                        runtime.shutdown();
+                        Ok(Handle(Some(true)))
+                    },
+                    async {
+                        assert!(
+                            !fail_build,
+                            "rejected restore must preserve the existing VM"
+                        );
+                        assert!(transport.shutdown_completed.load(Ordering::SeqCst));
+                        terminated.store(true, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await;
+            let error = result.err().unwrap().to_string();
+            assert_eq!(
+                error,
+                if fail_build {
+                    "target already allocated"
+                } else {
+                    "sandbox egress runtime is shut down"
+                }
+            );
+            assert_eq!(terminated.load(Ordering::SeqCst), !fail_build);
+            assert!(transport.shutdown_completed.load(Ordering::SeqCst));
+            assert!(runtime.sandboxes().is_empty());
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "firecracker")]
+    #[tokio::test]
+    async fn suspension_preserves_egress_on_failure_and_closes_it_after_success() -> Result<()> {
+        let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+        let transport = Arc::new(Transport::default());
+        runtime
+            .acquire(
+                AcquisitionMode::Acquire,
+                request("one"),
+                None,
+                |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                |_| async { Ok(Handle(Some(true))) },
+                async { panic!("successful acquisition must not terminate") },
+            )
+            .await?;
+        let failure = runtime
+            .suspend("one", async {
+                Err::<(), _>(anyhow::anyhow!("capture failed"))
+            })
+            .await;
+        assert!(failure.is_err());
+        assert!(!transport.is_closed());
+        assert_eq!(runtime.sandboxes().len(), 1);
+        transport.fail_shutdown.store(true, Ordering::SeqCst);
+        assert_eq!(runtime.suspend("one", async { Ok(42) }).await?, 42);
+        assert!(transport.shutdown_completed.load(Ordering::SeqCst));
+        assert!(runtime.sandboxes().is_empty());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn failed_acquisition_terminates_the_vm_and_preserves_the_original_error() -> Result<()> {
         for fail_termination in [false, true] {
@@ -485,6 +634,7 @@ mod tests {
             let running = AtomicBool::new(false);
             let result = runtime
                 .acquire(
+                    AcquisitionMode::Acquire,
                     request("one"),
                     None,
                     |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
@@ -512,6 +662,7 @@ mod tests {
             let replacement = Arc::new(Transport::default());
             runtime
                 .acquire(
+                    AcquisitionMode::Acquire,
                     request("one"),
                     None,
                     |_| async { Ok(replacement.clone() as Arc<dyn EgressTransport>) },
@@ -533,6 +684,7 @@ mod tests {
         let (started, ready) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
         let acquiring = runtime.acquire(
+            AcquisitionMode::Acquire,
             request("one"),
             None,
             |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
@@ -567,6 +719,7 @@ mod tests {
         let (started, ready) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
         let acquiring = runtime.acquire(
+            AcquisitionMode::Acquire,
             request("one"),
             None,
             |_| async {
@@ -596,6 +749,7 @@ mod tests {
         let (started, ready) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
         let acquiring = runtime.acquire(
+            AcquisitionMode::Acquire,
             request("one"),
             None,
             |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
@@ -633,6 +787,7 @@ mod tests {
             let old = Arc::new(Transport::default());
             let retained = runtime
                 .acquire(
+                    AcquisitionMode::Acquire,
                     request("one"),
                     None,
                     |_| async { Ok(old.clone() as Arc<dyn EgressTransport>) },
@@ -645,6 +800,7 @@ mod tests {
             let new = Arc::new(Transport::default());
             let replacement = runtime
                 .acquire(
+                    AcquisitionMode::Acquire,
                     changed,
                     None,
                     |_| async {

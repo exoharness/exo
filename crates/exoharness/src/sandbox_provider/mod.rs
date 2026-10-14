@@ -11,7 +11,11 @@ pub fn default_firecracker_image() -> String {
     DEFAULT_FIRECRACKER_IMAGE.to_string()
 }
 
+#[cfg(all(unix, any(feature = "basic-backend", feature = "firecracker")))]
+mod capture_store;
 mod docker;
+#[cfg(all(unix, any(feature = "basic-backend", feature = "firecracker")))]
+mod snapshot_lease;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod daytona;
@@ -91,7 +95,8 @@ pub use firecracker::{
     DEFAULT_FIRECRACKER_KERNEL, DEFAULT_FIRECRACKER_STATE_ROOT, DEFAULT_IMAGE_SIZE_GIB,
     DEFAULT_JAILER_UID_BASE, DEFAULT_MEMORY_MIB, DEFAULT_NETWORK_BYTES_PER_SECOND,
     DEFAULT_VCPU_COUNT, DEFAULT_WORKSPACE_SIZE_GIB, FirecrackerConfig,
-    FirecrackerNetworkDevicePolicy, FirecrackerRequest, FirecrackerSandboxBackend,
+    FirecrackerFilesystemCapture, FirecrackerNetworkDevicePolicy, FirecrackerRequest,
+    FirecrackerSandboxBackend,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
 pub use firecracker_bridge::run_firecracker_bridge;

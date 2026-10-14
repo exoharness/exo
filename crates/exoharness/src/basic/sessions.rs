@@ -336,6 +336,14 @@ mod tests {
         ) -> Result<Arc<dyn ManagedSandboxHandle>> {
             self.acquire(request).await
         }
+        async fn suspend(
+            &self,
+            _request: SandboxRequest,
+            _kind: crate::SnapshotKind,
+        ) -> Result<SnapshotPayload> {
+            anyhow::bail!("test recovery backend does not support suspension")
+        }
+
         async fn acquire_from_snapshot(
             &self,
             _request: SandboxRequest,

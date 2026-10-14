@@ -480,7 +480,10 @@ async fn firecracker_snapshot_restores_multiple_independent_targets() {
         .await
         .expect("write snapshot source state");
     assert!(write.ok, "{}{}", write.stdout, write.stderr);
-    let snapshot = source.snapshot().await.expect("snapshot source");
+    let snapshot = source
+        .snapshot(crate::SnapshotKind::Full)
+        .await
+        .expect("snapshot source");
 
     let mutate = source
         .exec(&SandboxCommand {
@@ -1160,7 +1163,9 @@ async fn rebuilding_a_turn_uses_the_committed_event_head_for_its_next_sandbox_ev
     // Appends do not rewrite record.json. A rebuilt turn must derive its head
     // from the committed event batch before recording another sandbox event.
     let rebuilt = thread.turn_handle(turn_record).await?;
-    rebuilt.snapshot_sandbox(sandbox_id).await?;
+    rebuilt
+        .snapshot_sandbox(sandbox_id, crate::SnapshotKind::Filesystem)
+        .await?;
     let refreshed = agent
         .get_thread(&thread.record().id)
         .await?
@@ -2659,6 +2664,14 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
         Ok(())
     }
 
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> crate::Result<SnapshotPayload> {
+        bail!("test provider-state backend does not support suspension")
+    }
+
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
@@ -2709,7 +2722,7 @@ impl ManagedSandboxHandle for TestProviderStateHandle {
         bail!("test provider-state handle does not support detachment")
     }
 
-    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
         bail!("test provider-state handle does not support snapshots")
     }
 }
@@ -2751,6 +2764,14 @@ impl ManagedSandboxBackend for TestSandboxBackend {
         _attachment: SandboxAttachment,
     ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
         bail!("test sandbox backend does not support attachment")
+    }
+
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> crate::Result<SnapshotPayload> {
+        bail!("test sandbox backend does not support suspension")
     }
 
     async fn acquire_from_snapshot(
@@ -2799,7 +2820,7 @@ impl ManagedSandboxHandle for TestSandboxHandle {
         bail!("test sandbox handle does not support detachment")
     }
 
-    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
         bail!("test sandbox handle does not support snapshots")
     }
 }
@@ -2898,7 +2919,7 @@ async fn restored_sandbox_image_persists_for_cross_process_reattach() {
         .await
         .expect("sandbox should be created");
     let snapshot_id = agent
-        .snapshot_sandbox(sandbox_id.clone())
+        .snapshot_sandbox(sandbox_id.clone(), crate::SnapshotKind::Filesystem)
         .await
         .expect("snapshot should succeed");
     agent
@@ -2976,7 +2997,7 @@ async fn restore_sandbox_creates_a_new_target_without_a_cold_acquire() {
         .await
         .expect("source sandbox should be created");
     let snapshot_id = agent
-        .snapshot_sandbox(source_id.clone())
+        .snapshot_sandbox(source_id.clone(), crate::SnapshotKind::Filesystem)
         .await
         .expect("snapshot should succeed");
     first_backend.acquired_images.lock().await.clear();
@@ -3064,6 +3085,14 @@ impl ManagedSandboxBackend for RestoreImageTestBackend {
         bail!("restore-image test backend does not support attachment")
     }
 
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> crate::Result<SnapshotPayload> {
+        bail!("restore-image test backend does not support suspension")
+    }
+
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
@@ -3107,7 +3136,7 @@ impl ManagedSandboxHandle for RestoreImageTestHandle {
         bail!("restore-image test handle does not support detachment")
     }
 
-    async fn snapshot(&self) -> crate::Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
         Ok(SnapshotPayload {
             format: SnapshotFormat::DockerImageTar,
             bytes: bytes::Bytes::from_static(b"restore-image-test"),

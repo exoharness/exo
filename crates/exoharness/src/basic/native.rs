@@ -604,6 +604,10 @@ impl BasicExoHarnessInner {
             })
             .unwrap_or_default();
         config.image_cache = Some(self.native.cache_root.join("smolvm/images"));
+        #[cfg(unix)]
+        {
+            config.snapshot_root = Some(self.native.cache_root.join("smolvm/filesystem-snapshots"));
+        }
         Ok(config)
     }
 

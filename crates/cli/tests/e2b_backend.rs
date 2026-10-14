@@ -317,7 +317,16 @@ async fn snapshot_returns_e2b_snapshot_payload() {
         .acquire(make_request(exoharness::Uuid7::now(), "sandbox-7"))
         .await
         .unwrap();
-    let payload = handle.snapshot().await.expect("snapshot ok");
+    assert!(
+        handle
+            .snapshot(exoharness::SnapshotKind::Filesystem)
+            .await
+            .is_err()
+    );
+    let payload = handle
+        .snapshot(exoharness::SnapshotKind::Full)
+        .await
+        .expect("snapshot ok");
 
     assert_eq!(payload.format, SnapshotFormat::E2bRef);
     let manifest: Value = serde_json::from_slice(&payload.bytes).unwrap();

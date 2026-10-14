@@ -25,9 +25,16 @@ bundle known to work:
 
 | Asset                                                  | Version or build                         | x86_64 SHA-256                                                     | aarch64 SHA-256                                                    |
 | ------------------------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| Firecracker release archive (includes matching jailer) | 1.16.1                                   | `382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6` | `8d0e69f6d6f9a1724551f607f18504052c16c1828ee3d4d7b6e6c73380871e0e` |
+| Firecracker release archive (includes matching jailer) | 1.16.2                                   | `32e3cdcd4081f91fe2b024a266f57dcb3b4e5fec5033e0cb22467ad7f7820bda` | `751365040ca3dde7616c5a1d97cc1304674fae469ce02993104eab22f5961950` |
 | Firecracker CI kernel                                  | 6.18.39, build `20260812-48f1b9fb52e9-0` | `3fde810177aaf9d9a465d00e915924a7a6e2bdd34869d7fcd33c6af73b45e12d` | `92b6c36b3ea25328f32f7b09509989a0f653aa692afa745fde5274c349b6405e` |
 | Exo guest initramfs                                    | same Exo revision as the host            | record after building                                              | record after building                                              |
+
+Filesystem capture requires Firecracker 1.16.2 or newer because
+[upstream #6100](https://github.com/firecracker-microvm/firecracker/pull/6100)
+fixes vsock connections hanging after bare pause/resume. Upgrading from
+1.16.1 also changes the RAM snapshot format; existing full snapshots must
+be recreated under the new runtime. Filesystem captures cold-boot and do
+not depend on the RAM snapshot format.
 
 The host verifies that Firecracker and jailer report the same version, and the
 versioned guest handshake rejects an incompatible host/guest protocol. It also

@@ -2556,7 +2556,7 @@ if os.environ['EXO_TEST_CODEX'] == 'true':
         raise AssertionError('prepared Codex exec-server never became ready')
 "#)).await?;
         ensure!(start.ok, "preparation failed: {}", start.stderr);
-        let snapshot = source.snapshot_template().await?;
+        let snapshot = source.snapshot_template(crate::SnapshotKind::Full).await?;
         backend.terminate(request.clone()).await?;
         let source_dir = root.path().join("repository");
         std::fs::create_dir(&source_dir)?;

@@ -50,28 +50,34 @@ pub(crate) fn create_volume(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn clone_volume(source: &Path, target: &Path) -> Result<()> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-    let source = CString::new(source.join("volume.sparseimage").as_os_str().as_bytes())?;
-    let target = CString::new(target.join("volume.sparseimage").as_os_str().as_bytes())?;
-    if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("resource copies require an APFS filesystem");
+pub(crate) fn clone_path(source: &Path, target: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let source = CString::new(source.as_os_str().as_bytes())?;
+        let target = CString::new(target.as_os_str().as_bytes())?;
+        if unsafe { libc::clonefile(source.as_ptr(), target.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("resource copies require an APFS filesystem");
+        }
     }
-    Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn clone_volume(source: &Path, target: &Path) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
     checked(
         Command::new("cp")
             .args(["-a", "--reflink=always", "--"])
-            .arg(source.join("workspace"))
-            .arg(target.join("workspace")),
+            .arg(source)
+            .arg(target),
     )
     .context("resource copies require a reflink-capable filesystem")?;
     Ok(())
+}
+
+pub(crate) fn clone_volume(source: &Path, target: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    let name = "volume.sparseimage";
+    #[cfg(not(target_os = "macos"))]
+    let name = "workspace";
+    clone_path(&source.join(name), &target.join(name))
 }
 
 #[cfg(target_os = "macos")]
@@ -85,7 +91,6 @@ pub(crate) fn mount_volume(directory: &Path) -> Result<PathBuf> {
     mount_with_access(directory, false)
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn mount_read_only(directory: &Path) -> Result<PathBuf> {
     mount_with_access(directory, true)
 }
