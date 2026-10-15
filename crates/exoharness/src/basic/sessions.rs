@@ -477,11 +477,19 @@ mod tests {
             provider: None,
         });
         tokio::pin!(restart);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(50), &mut restart)
-                .await
-                .is_err()
-        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while backend.acquisitions.load(Ordering::SeqCst) == 0 {
+                tokio::select! {
+                    result = &mut restart => anyhow::bail!(
+                        "sandbox restart finished before acquisition: {result:?}"
+                    ),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("waiting for the sandbox acquisition to begin")??;
         assert_eq!(backend.acquisitions.load(Ordering::SeqCst), 1);
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
