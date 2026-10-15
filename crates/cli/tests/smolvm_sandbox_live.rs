@@ -842,3 +842,165 @@ async fn smolvm_image_cache_is_shared_read_only_and_threads_are_private() -> any
     }
     result
 }
+
+#[tokio::test]
+#[ignore]
+async fn full_snapshot_round_trip_preserves_memory_state() {
+    let Some(image) = test_image() else {
+        return;
+    };
+    let _shared = vm_gate().await.read().await;
+    let workspace = workspace_dir("full-snap");
+    let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
+    let ttl = Some(Duration::from_secs(600));
+
+    let source = backend
+        .acquire(request(
+            image.clone(),
+            &workspace,
+            SandboxNetworkPolicy::Disabled,
+            "full-snap-source",
+            ttl,
+        ))
+        .await
+        .expect("acquire source sandbox");
+    let write = source
+        .exec(&command(&[
+            "sh",
+            "-c",
+            "mkdir -p /dev/shm && echo in-ram > /dev/shm/marker && echo on-disk > /root/marker",
+        ]))
+        .await
+        .expect("exec write");
+    assert!(write.ok, "write failed: {}", write.stderr);
+
+    let started = std::time::Instant::now();
+    let payload = source
+        .snapshot(exoharness::SnapshotKind::Full)
+        .await
+        .expect("full snapshot");
+    println!(
+        "full snapshot format={} took {:?}",
+        payload.format,
+        started.elapsed()
+    );
+    assert_eq!(payload.format.as_str(), "smolvm-branch-ref-v1");
+
+    let still = source
+        .exec(&command(&["cat", "/dev/shm/marker"]))
+        .await
+        .expect("exec after snapshot");
+    assert_eq!(still.stdout.trim(), "in-ram");
+
+    let started = std::time::Instant::now();
+    let restored = backend
+        .acquire_from_snapshot(
+            request(
+                image.clone(),
+                &workspace_dir("full-snap-restored"),
+                SandboxNetworkPolicy::Disabled,
+                "full-snap-restored",
+                ttl,
+            ),
+            payload.clone(),
+        )
+        .await
+        .expect("acquire_from_snapshot");
+    println!("full restore took {:?}", started.elapsed());
+    let ram = restored
+        .exec(&command(&["cat", "/dev/shm/marker"]))
+        .await
+        .expect("exec read ram");
+    assert!(ram.ok, "ram read failed: {}", ram.stderr);
+    assert_eq!(
+        ram.stdout.trim(),
+        "in-ram",
+        "RAM state did not survive the full snapshot"
+    );
+    let disk = restored
+        .exec(&command(&["cat", "/root/marker"]))
+        .await
+        .expect("exec read disk");
+    assert_eq!(disk.stdout.trim(), "on-disk");
+
+    cleanup(&restored).await;
+    backend
+        .delete_snapshot(payload)
+        .await
+        .expect("delete snapshot");
+    cleanup(&source).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn fork_sandbox_copies_running_state_without_stopping_the_source() {
+    let Some(image) = test_image() else {
+        return;
+    };
+    let _shared = vm_gate().await.read().await;
+    let workspace = workspace_dir("fork");
+    let backend = SmolvmSandboxBackend::with_mode(SmolvmExecutionMode::Warm);
+    let ttl = Some(Duration::from_secs(600));
+
+    let source_request = request(
+        image.clone(),
+        &workspace,
+        SandboxNetworkPolicy::Disabled,
+        "fork-source",
+        ttl,
+    );
+    let source = backend
+        .acquire(source_request.clone())
+        .await
+        .expect("acquire source sandbox");
+    let write = source
+        .exec(&command(&[
+            "sh",
+            "-c",
+            "mkdir -p /dev/shm && echo before-fork > /dev/shm/marker && echo before-fork > /root/marker",
+        ]))
+        .await
+        .expect("exec write");
+    assert!(write.ok, "write failed: {}", write.stderr);
+
+    let mut target_request = request(
+        image.clone(),
+        &workspace,
+        SandboxNetworkPolicy::Disabled,
+        "fork-child",
+        ttl,
+    );
+    target_request.spec = source_request.spec.clone();
+    let started = std::time::Instant::now();
+    let child = backend
+        .fork_sandbox(source_request.clone(), target_request)
+        .await
+        .expect("fork sandbox");
+    println!("fork took {:?}", started.elapsed());
+
+    let child_ram = child
+        .exec(&command(&["cat", "/dev/shm/marker"]))
+        .await
+        .expect("child exec");
+    assert!(child_ram.ok, "child read failed: {}", child_ram.stderr);
+    assert_eq!(child_ram.stdout.trim(), "before-fork");
+
+    let diverge = child
+        .exec(&command(&["sh", "-c", "echo child > /root/marker"]))
+        .await
+        .expect("child write");
+    assert!(diverge.ok, "child write failed: {}", diverge.stderr);
+    let parent_disk = source
+        .exec(&command(&["cat", "/root/marker"]))
+        .await
+        .expect("source exec after fork");
+    assert!(
+        parent_disk.ok,
+        "source still runs after fork: {}",
+        parent_disk.stderr
+    );
+    assert_eq!(parent_disk.stdout.trim(), "before-fork");
+
+    cleanup(&child).await;
+    cleanup(&source).await;
+}
