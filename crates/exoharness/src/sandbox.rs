@@ -153,6 +153,7 @@ impl SnapshotFormat {
     /// Reference to a `.smolmachine` pack on the local disk.
     pub const SmolvmMachinePack: Self = Self::from_static("smolvm-machine-pack");
     pub const SmolvmFilesystemRef: Self = Self::from_static("smolvm-filesystem-ref-v1");
+    pub const SmolvmBranchRef: Self = Self::from_static("smolvm-branch-ref-v1");
     /// Reference to an immutable bundle in a Firecracker host's private root.
     pub const FirecrackerHostRef: Self = Self::from_static("firecracker-host-ref");
     pub const FirecrackerFilesystemRef: Self = Self::from_static("firecracker-filesystem-ref-v1");
