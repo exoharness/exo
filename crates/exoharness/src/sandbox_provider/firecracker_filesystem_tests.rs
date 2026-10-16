@@ -129,7 +129,7 @@ fn imported_base_cache_hit_does_not_read_the_supplied_image() -> Result<()> {
     let cached = cache_base_image(&config, &source, &digest)?;
     fs::remove_file(&source)?;
     let imported = root.path().join("imported.ext4");
-    prepare_imported_base(&config, &source, &digest, &imported)?;
+    prepare_imported_base(&config, &source, &digest, &imported, true)?;
     assert_eq!(fs::metadata(&cached)?.ino(), fs::metadata(&imported)?.ino());
     Ok(())
 }
@@ -339,8 +339,14 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     let worker_b = FirecrackerSandboxBackend::new(config_b.clone()).await?;
     let mismatched = config_b.state_root.join("mismatched-base.ext4");
     let wrong_digest = "0".repeat(64);
-    let error = prepare_imported_base(&config_b, &files.base_image, &wrong_digest, &mismatched)
-        .unwrap_err();
+    let error = prepare_imported_base(
+        &config_b,
+        &files.base_image,
+        &wrong_digest,
+        &mismatched,
+        true,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("base image does not match"));
     assert!(!base_image_cache_path(&config_b, &wrong_digest).exists());
     fs::remove_file(mismatched)?;

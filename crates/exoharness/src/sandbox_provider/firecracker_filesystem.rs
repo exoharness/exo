@@ -16,16 +16,20 @@ fn validate_capture_runtime(version: &str) -> Result<()> {
     Ok(())
 }
 
+fn base_image_identity(image: &Path) -> Result<ImageIdentity> {
+    let metadata = fs::metadata(image)?;
+    Ok((
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+    ))
+}
+
 impl Shared {
     fn base_image_digest(&self, image: &Path) -> Result<String> {
-        let metadata = fs::metadata(image)?;
-        let identity = (
-            metadata.dev(),
-            metadata.ino(),
-            metadata.len(),
-            metadata.mtime(),
-            metadata.mtime_nsec(),
-        );
+        let identity = base_image_identity(image)?;
         if let Some(digest) = self
             .base_image_digests
             .lock()
@@ -278,6 +282,30 @@ impl FirecrackerSandboxBackend {
         base_image: PathBuf,
         disks: Vec<PathBuf>,
     ) -> Result<SnapshotPayload> {
+        self.import_filesystem_snapshot_inner(payload, base_image, disks, true)
+            .await
+    }
+
+    /// Imports files whose contents and identity have already been verified by the caller.
+    /// The caller must authenticate the snapshot metadata and verify every disk against it.
+    /// Files must remain stable until import completes, as with ordinary filesystem import.
+    pub async fn import_verified_filesystem_snapshot(
+        &self,
+        payload: SnapshotPayload,
+        base_image: PathBuf,
+        disks: Vec<PathBuf>,
+    ) -> Result<SnapshotPayload> {
+        self.import_filesystem_snapshot_inner(payload, base_image, disks, false)
+            .await
+    }
+
+    async fn import_filesystem_snapshot_inner(
+        &self,
+        payload: SnapshotPayload,
+        base_image: PathBuf,
+        disks: Vec<PathBuf>,
+        verify_base_digest: bool,
+    ) -> Result<SnapshotPayload> {
         let config = self.shared.config.clone();
         tokio::task::spawn_blocking(move || {
             let mut manifest = FilesystemManifest::from_payload(&payload)?;
@@ -292,6 +320,7 @@ impl FirecrackerSandboxBackend {
                 &base_image,
                 &manifest.base_image_sha256,
                 &temporary.path().join("base.ext4"),
+                verify_base_digest,
             )?;
             for ((name, source), size) in manifest
                 .layout
@@ -382,8 +411,15 @@ impl FirecrackerSandboxBackend {
         let config = self.shared.config.clone();
         let capture_for_image = Arc::clone(&capture);
         let digest = manifest.base_image_sha256.clone();
+        let shared = Arc::clone(&self.shared);
         let image = tokio::task::spawn_blocking(move || {
-            cache_base_image(&config, &capture_for_image.base_image, &digest)
+            let image = cache_base_image(&config, &capture_for_image.base_image, &digest)?;
+            shared
+                .base_image_digests
+                .lock()
+                .expect("image digest cache poisoned")
+                .insert(base_image_identity(&image)?, digest);
+            Ok::<_, anyhow::Error>(image)
         })
         .await??;
         resolved.sandbox.spec.image = image
@@ -641,14 +677,17 @@ fn prepare_imported_base(
     source: &Path,
     digest: &str,
     target: &Path,
+    verify_digest: bool,
 ) -> Result<()> {
     let cached = base_image_cache_path(config, digest);
     if !cached.try_exists()? {
         copy_sparse_reflink(source, target)?;
-        ensure!(
-            super::super::firecracker_image::sha256_hex_of_file(target)? == digest,
-            "filesystem import base image does not match"
-        );
+        if verify_digest {
+            ensure!(
+                super::super::firecracker_image::sha256_hex_of_file(target)? == digest,
+                "filesystem import base image does not match"
+            );
+        }
         fs::set_permissions(target, Permissions::from_mode(0o444))?;
         cache_base_image(config, target, digest)?;
         fs::remove_file(target)?;
