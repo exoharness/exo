@@ -21,6 +21,9 @@ Prerequisites:
 - `./target/debug/exo` exists after the build (message delivery shells out to it).
 - Default sandbox backend is apple-container on macOS; add `--sandbox-backend docker`
   if you prefer Docker.
+- Exoclaw agents default to `buildpack-deps:noble-scm`, which ships git/cargo so
+  phase 3's `git` commands work out of the box; if you override `--sandbox-image`,
+  pick one that has git.
 
 Useful diagnostics if a phase fails:
 

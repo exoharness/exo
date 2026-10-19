@@ -29,6 +29,12 @@ outside the sandbox. The agent can call it through `guardian_action` to build
 Exo, inspect service status and logs, and restart the scheduler or adapter
 runners while preserving `.exo` state.
 
+Note that the guardian bridge is Exoclaw-specific: an executor swapped in for
+Exoclaw inherits the substrate capabilities (event log, sandbox snapshot and
+rewind, secrets, mounts and shell) automatically, but must provide its own
+build/restart bridge. See
+[Self-update across executor swaps](./EXOREADME.md#self-update-across-executor-swaps-what-carries-over).
+
 ### Tools
 
 Tools are functions the model can call during a turn. Core tools expose shell

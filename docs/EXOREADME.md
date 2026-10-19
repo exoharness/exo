@@ -52,6 +52,41 @@ Because the exoharness substrate doesn't depend on the executor, an agent built 
 For the architectural model and terminology, see
 [spec/exoharness.md](./spec/exoharness.md).
 
+### Self-update across executor swaps: what carries over
+
+**Swap executors** means durable _state_ carries over: agents, conversations,
+event log, artifacts, secrets, and sandboxes all live in the exoharness
+substrate, so you can replace the policy layer without rebuilding any of it.
+It does **not** mean the self-update (RSI) tooling carried by an executor like
+Exoclaw comes along for free. Self-update capability splits into two
+categories:
+
+| Capability                                                                                    | Where it lives                                                                                                                                                                                                                              | Automatic when you swap executors?                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Durable event log (append-only history of turns, tool calls, errors, sandbox and host events) | exoharness substrate (`crates/exoharness/src/basic.rs`, `append_events*`)                                                                                                                                                                   | Yes — any executor on exoharness records into the same log.                                                                                                                                       |
+| Sandbox snapshot / rewind                                                                     | exoharness substrate (`snapshot_sandbox` / `rewind_sandbox`, dispatched in `crates/executor/src/harness_tool.rs`)                                                                                                                           | Yes — backend-provided; unsupported backends report clear errors.                                                                                                                                 |
+| Secrets / credentials                                                                         | exoharness substrate (`exo secret set`, secret backend selection in `crates/cli/src/main.rs`)                                                                                                                                               | Yes — stored outside the executor, survives executor swaps and restarts.                                                                                                                          |
+| Code visibility + editing                                                                     | Sandbox mounts plus the `shell` tool (`typescript/harness/built-in-tools.ts`)                                                                                                                                                               | Mostly — the mount and shell are substrate features, but mounting _the executor's own repo_ is a configuration choice each harness makes (Exoclaw does it via `scripts/exo.sh` / `EXOCLAW_REPO`). |
+| Self-rebuild + self-restart with state preserved                                              | Executor-specific: Exoclaw's `guardian_action` tool (`examples/exoclaw/guardian-tools.ts`) wrapping the host-side guardian script (`examples/exoclaw/scripts/exoclaw-service-guardian`), with drain markers and reboot notices under `.exo` | **No.** "Restart yourself cleanly" is inherently specific to the executor's own build and supervision; the generic substrate cannot automate it.                                                  |
+
+The last row is the one to plan for. A custom executor (a LangChain agent, a
+Claude Agent SDK app, etc.) gets the substrate rows automatically, but has no
+equivalent of the Exoclaw guardian bridge today. To add self-update to a custom
+executor, follow the same pattern:
+
+1. Write a host-side guardian-style script that builds and restarts _your_
+   executor's process while preserving the `.exo` state directory, using
+   deferred restart markers so the in-flight turn can finish first (see the
+   drain/marker flow in `examples/exoclaw/docs/SELF-CONTROL.md`, area 1).
+2. Wrap it with a strict allowlist tool registered via `registerHostTool`
+   (`examples/exoclaw/host-tools.ts` is the standard bridge; the schema,
+   validation, and deferred handoff in `examples/exoclaw/guardian-tools.ts` are
+   the reference implementation).
+
+Everything else Exoclaw does — event-log introspection, snapshot-before-risky-
+change, git as the second audit log — rides on substrate capabilities your
+executor inherits by running on exoharness.
+
 ## Status
 
 This repository is early software. The Rust crates, CLI, TypeScript harness

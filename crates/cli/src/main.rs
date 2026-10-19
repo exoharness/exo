@@ -117,6 +117,10 @@ enum HarnessSelection {
     TypeScriptModule(PathBuf),
 }
 
+/// Published image with git + a full build toolchain used as the exoclaw
+/// default sandbox; unlike the preset images it auto-pulls on first run.
+const DEFAULT_EXOCLAW_SANDBOX_IMAGE: &str = "docker.io/library/buildpack-deps:noble-scm";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeScriptHarnessPreset {
     Codex,
@@ -147,6 +151,12 @@ impl HarnessSelection {
     fn default_sandbox_image(&self) -> Option<&'static str> {
         match self {
             Self::TypeScriptPreset(preset) => preset.sandbox_image(),
+            // Exoclaw agents run git/cargo workflows out of the box (e.g. the
+            // fork test plan's `git branch --show-current`), so the default
+            // sandbox must ship a source-control toolchain instead of falling
+            // back to bare ubuntu:24.04. buildpack-deps:noble-scm is published
+            // on Docker Hub, so first-run still auto-pulls.
+            Self::Kind(HarnessKind::Exoclaw) => Some(DEFAULT_EXOCLAW_SANDBOX_IMAGE),
             Self::Kind(_) | Self::TypeScriptModule(_) => None,
         }
     }
@@ -3031,5 +3041,22 @@ mod create_tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn exoclaw_harness_defaults_to_git_bearing_sandbox_image() {
+        use std::str::FromStr;
+        let selection = super::HarnessSelection::from_str("exoclaw").expect("exoclaw parses");
+        assert_eq!(
+            selection.default_sandbox_image(),
+            Some(super::DEFAULT_EXOCLAW_SANDBOX_IMAGE)
+        );
+    }
+
+    #[test]
+    fn basic_harness_keeps_platform_default_sandbox_image() {
+        use std::str::FromStr;
+        let selection = super::HarnessSelection::from_str("basic").expect("basic parses");
+        assert_eq!(selection.default_sandbox_image(), None);
     }
 }
