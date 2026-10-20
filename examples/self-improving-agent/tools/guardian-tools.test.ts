@@ -1,12 +1,28 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { HarnessToolRegistry, type TurnContext } from "@exo/harness";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   guardianStateDir,
   parseRebuildReason,
   rebuildAndRestartExoTool,
   registerGuardianTools,
+  writeFailedOutcome,
 } from "./guardian-tools";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  while (temporaryDirectories.length > 0) {
+    rmSync(temporaryDirectories.pop() as string, {
+      recursive: true,
+      force: true,
+    });
+  }
+});
 
 describe("guardian tools", () => {
   it("uses the active Exo root for guardian state", () => {
@@ -54,5 +70,46 @@ describe("guardian tools", () => {
     expect(() => parseRebuildReason({ reason: 12 })).toThrow(
       "rebuild_and_restart_exo reason must be a string or null",
     );
+  });
+
+  it("records a terminal failed outcome over a queued update", () => {
+    const directory = mkdtempSync(join(tmpdir(), "guardian-outcome-"));
+    temporaryDirectories.push(directory);
+    const outcomePath = join(directory, "update.json");
+    writeFileSync(
+      outcomePath,
+      `${JSON.stringify({ updateId: "u-1", status: "queued" })}\n`,
+      "utf8",
+    );
+
+    writeFailedOutcome(outcomePath, {
+      error: "failed to spawn deferred activation helper (ENOENT)",
+    });
+
+    const record = JSON.parse(readFileSync(outcomePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(record.updateId).toBe("u-1");
+    expect(record.status).toBe("failed");
+    expect(record.error).toBe(
+      "failed to spawn deferred activation helper (ENOENT)",
+    );
+    expect(typeof record.failedAt).toBe("string");
+  });
+
+  it("records a terminal failed outcome even without a queued record", () => {
+    const directory = mkdtempSync(join(tmpdir(), "guardian-outcome-"));
+    temporaryDirectories.push(directory);
+    const outcomePath = join(directory, "missing.json");
+
+    writeFailedOutcome(outcomePath, { error: "helper missing" });
+
+    const record = JSON.parse(readFileSync(outcomePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(record.status).toBe("failed");
+    expect(record.error).toBe("helper missing");
   });
 });

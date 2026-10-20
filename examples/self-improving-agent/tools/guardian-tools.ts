@@ -1,9 +1,12 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  appendFileSync,
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
+  readFileSync,
   renameSync,
   writeFileSync,
 } from "node:fs";
@@ -104,6 +107,20 @@ function queueRebuildAndRestart(
     conversationId: conversation.record.id,
     conversationSlug: conversation.record.slug,
   });
+  const missingScript = [DEFERRED_SCRIPT, GUARDIAN_SCRIPT].find(
+    (script) => !existsSync(script),
+  );
+  if (missingScript) {
+    // Fail closed: record a terminal outcome instead of leaving the update
+    // queued forever when the deferred runner cannot be launched.
+    writeFailedOutcome(outcomePath, {
+      error: `deferred activation helper missing: ${missingScript}`,
+    });
+    throw new Error(
+      `rebuild_and_restart_exo cannot start the deferred activation helper (missing: ${missingScript}); ` +
+        `update ${updateId} recorded as failed in ${outcomePath}`,
+    );
+  }
   const result = runGuardianDeferredWithOutcome(
     ["restart-all", "--build"],
     updateId,
@@ -157,6 +174,19 @@ function runGuardianDeferredWithOutcome(
       stdio: ["ignore", logFd, logFd],
     },
   );
+  // A spawn failure (for example ENOENT on a missing helper script) is
+  // otherwise silent: the deferred runner never executes, nothing surfaces,
+  // and the durable update record stays "queued" forever. Give the attempt a
+  // terminal, surfaced state instead.
+  child.on("error", (error: NodeJS.ErrnoException) => {
+    const message = `failed to spawn deferred activation helper (${error.code ?? "unknown"}): ${error.message}`;
+    try {
+      appendFileSync(DEFERRED_LOG_PATH, `${message}\n`);
+    } catch {
+      // The outcome file below is the durable record; the log is best-effort.
+    }
+    writeFailedOutcome(outcomePath, { error: message });
+  });
   child.unref();
   closeSync(logFd);
   return {
@@ -164,6 +194,24 @@ function runGuardianDeferredWithOutcome(
     logPath: DEFERRED_LOG_PATH,
     pid: child.pid ?? null,
   };
+}
+
+export function writeFailedOutcome(
+  outcomePath: string,
+  extra: JsonObject,
+): void {
+  let record: JsonObject = {};
+  try {
+    record = JSON.parse(readFileSync(outcomePath, "utf8")) as JsonObject;
+  } catch {
+    // No queued record (or unreadable); still write a terminal one.
+  }
+  writeJsonAtomically(outcomePath, {
+    ...record,
+    status: "failed",
+    failedAt: new Date().toISOString(),
+    ...extra,
+  });
 }
 
 function writeJsonAtomically(path: string, value: JsonObject): void {
