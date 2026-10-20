@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use executor::runtime_host::RuntimeHost;
 use exoharness::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxAttachment, SandboxCommand,
-    SandboxCommandOutput, SandboxProcessParts, SandboxRequest, SnapshotFormat, SnapshotPayload,
+    SandboxCommandOutput, SandboxProcessParts, SandboxRequest, SnapshotFormat, SnapshotKind,
+    SnapshotPayload,
 };
 use futures::future::BoxFuture;
 use futures::io::AsyncWrite;
@@ -163,6 +164,13 @@ impl ManagedSandboxBackend for CloudflareBackend {
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         bail!("Cloudflare sandbox attachment is not supported")
     }
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: SnapshotKind,
+    ) -> Result<SnapshotPayload> {
+        bail!("Cloudflare sandbox suspension is not supported")
+    }
     async fn acquire_from_snapshot(
         &self,
         request: SandboxRequest,
@@ -305,7 +313,11 @@ impl ManagedSandboxHandle for CloudflareHandle {
     async fn detach(&self) -> Result<SandboxAttachment> {
         bail!("Cloudflare sandbox detach is not supported")
     }
-    async fn snapshot(&self) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: SnapshotKind) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == SnapshotKind::Filesystem,
+            "Cloudflare does not support the requested snapshot kind"
+        );
         let snapshot: Snapshot = self
             .host
             .call(HostRequest::Sandbox {
