@@ -1021,6 +1021,39 @@ async function writeThreadArtifact(agent_id, conversation_id, request) {
   ).artifact;
 }
 
+test("Cloudflare snapshots reject full capture and keep filesystem capture usable", async () => {
+  const { agent, thread } = await create();
+  const scope = { type: "thread", agent_id: agent.id, thread_id: thread.id };
+  const { sandbox_id } = await rpc({
+    type: "create_sandbox",
+    scope,
+    request: { provider: "cloudflare", image: "", idle_seconds: 60 },
+  });
+  const request = {
+    type: "snapshot_sandbox",
+    scope: { type: "resource", scope },
+    sandbox_id,
+  };
+  const rejected = await api("request", "POST", {
+    kind: "request",
+    id: 1,
+    request: { ...request, snapshot_kind: "full" },
+  });
+  assert.equal(rejected.ok, false);
+  assert.match(
+    rejected.error,
+    /Cloudflare does not support the requested snapshot kind/,
+  );
+  const { snapshot_id } = await rpc({
+    ...request,
+    snapshot_kind: "filesystem",
+  });
+  assert.equal(typeof snapshot_id, "string");
+  assert(snapshot_id.length > 0);
+  const sandbox = await sandboxFor(agent, thread);
+  assert.equal((await sandbox.info()).running, true);
+});
+
 test("sandbox process RPC preserves binary stdin, drains output and cancels processes", async () => {
   const { agent, thread } = await create();
   const scope = { type: "thread", agent_id: agent.id, thread_id: thread.id };
