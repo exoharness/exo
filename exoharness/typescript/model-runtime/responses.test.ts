@@ -3,14 +3,20 @@ import type { Response } from "openai/resources/responses/responses";
 
 import {
   AnthropicRuntime,
+  buildChatNonStreamingBody,
+  buildChatStreamingBody,
+  buildNonStreamingBody,
+  buildStreamingBody,
   ChatCompletionsRuntime,
   isAnthropicModel,
   isOpenRouterModel,
   modelRequiresResponsesApi,
+  promptCacheKeyFromRequest,
   responseToLinguaEvents,
   responseToolCalls,
   runtimeFromModelConfig,
   ResponsesRuntime,
+  type NativeResponsesRequest,
 } from "./responses";
 
 describe("model runtime cancellation", () => {
@@ -113,6 +119,48 @@ describe("model runtime dispatch", () => {
         baseUrl: "https://openrouter.ai/api/v1",
       }),
     ).toBeInstanceOf(ChatCompletionsRuntime);
+  });
+});
+
+describe("prompt cache key", () => {
+  const baseRequest = (
+    metadata?: Record<string, string>,
+  ): NativeResponsesRequest => ({
+    model: "gpt-5.4",
+    input: "hello",
+    ...(metadata ? { metadata } : {}),
+  });
+
+  it("derives a stable key from the conversation metadata", () => {
+    const request = baseRequest({ conversation_id: "conv_1", turn_id: "t_1" });
+    expect(promptCacheKeyFromRequest(request)).toBe("conv_1");
+    expect(buildNonStreamingBody(request).prompt_cache_key).toBe("conv_1");
+    expect(buildStreamingBody(request).prompt_cache_key).toBe("conv_1");
+    expect(buildChatNonStreamingBody(request).prompt_cache_key).toBe("conv_1");
+    expect(buildChatStreamingBody(request).prompt_cache_key).toBe("conv_1");
+  });
+
+  it("is stable across turns of the same session", () => {
+    const turn1 = baseRequest({ conversation_id: "conv_1", turn_id: "t_1" });
+    const turn2 = baseRequest({ conversation_id: "conv_1", turn_id: "t_2" });
+    expect(buildNonStreamingBody(turn1).prompt_cache_key).toBe(
+      buildNonStreamingBody(turn2).prompt_cache_key,
+    );
+    expect(buildChatStreamingBody(turn1).prompt_cache_key).toBe(
+      buildChatStreamingBody(turn2).prompt_cache_key,
+    );
+  });
+
+  it("falls back to session_id and omits the key when metadata is absent", () => {
+    expect(promptCacheKeyFromRequest(baseRequest({ session_id: "s_1" }))).toBe(
+      "s_1",
+    );
+    expect(buildNonStreamingBody(baseRequest()).prompt_cache_key).toBe(
+      undefined,
+    );
+    expect(buildChatNonStreamingBody(baseRequest()).prompt_cache_key).toBe(
+      undefined,
+    );
   });
 });
 
