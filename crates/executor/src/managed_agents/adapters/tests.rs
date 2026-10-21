@@ -653,10 +653,12 @@ async fn invalid_definition_does_not_hide_other_agents_and_cache_tracks_updates(
     agent
         .write_artifact(exoharness::WriteArtifactRequest {
             path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-            contents: first
-                .source()
-                .replace("use_sender_vault: true", "use_sender_vault: false")
-                .into_bytes(),
+            contents: AgentDefinition::parse(
+                first
+                    .source()
+                    .replace("use_sender_vault: true", "use_sender_vault: false"),
+            )?
+            .to_json()?,
         })
         .await?;
     let updated = all.definitions.load(agent.as_ref()).await?.unwrap();
@@ -680,8 +682,10 @@ async fn invalid_definition_does_not_hide_other_agents_and_cache_tracks_updates(
     agent
         .write_artifact(exoharness::WriteArtifactRequest {
             path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-            contents: b"---\nharness: basic\nmodel:\n  name: test\nadapters: []\n---\nWork\n"
-                .to_vec(),
+            contents: AgentDefinition::parse(
+                "---\nharness: basic\nmodel:\n  name: test\nadapters: []\n---\nWork\n".into(),
+            )?
+            .to_json()?,
         })
         .await?;
     f.service.reconcile().await?;
@@ -851,13 +855,13 @@ async fn removing_sender_access_closes_the_existing_stream_even_if_inbox_save_fa
     agent
         .write_artifact(exoharness::WriteArtifactRequest {
             path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-            contents: definition
-                .source()
-                .replace(
-                    "use_sender_vault: true",
-                    "use_sender_vault: true\n    allowed_users: []",
-                )
-                .into_bytes(),
+            contents: {
+                let mut updated = definition.clone();
+                let exo_managed_agents::adapters::AdapterDefinition::Slack(adapter) =
+                    &mut updated.frontmatter.adapters[0];
+                adapter.allowed_users = Some(vec![]);
+                updated.to_json()?
+            },
         })
         .await?;
     *f.storage.fail.lock().unwrap() = Some(AdapterStore::inbox(&f.deployment.id, &message.id));
@@ -1071,7 +1075,7 @@ async fn configured_execution_vaults_are_available_and_revocable() -> Result<()>
     agent
         .write_artifact(exoharness::WriteArtifactRequest {
             path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-            contents: source.as_bytes().to_vec(),
+            contents: AgentDefinition::parse(source.clone())?.to_json()?,
         })
         .await?;
     f.deployment.definition = AgentDefinition::parse(source)?
@@ -1112,7 +1116,7 @@ async fn configured_execution_vaults_are_available_and_revocable() -> Result<()>
     agent
         .write_artifact(exoharness::WriteArtifactRequest {
             path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-            contents: original.source().as_bytes().to_vec(),
+            contents: original.to_json()?,
         })
         .await?;
     assert!(state.get_vault(&shared.record().id).await?.is_none());

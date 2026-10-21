@@ -429,6 +429,21 @@ pub async fn create_agent(
     Ok(agent.record().clone())
 }
 
+pub async fn create_managed_agent(
+    service: &Service<'_>,
+    body: exo_managed_agents::http::protocol::CreateManagedAgentBody,
+) -> Result<exoharness::AgentRecord> {
+    service.require_full_provider()?;
+    let definition = body.definition;
+    definition.validate().map_err(bad_request)?;
+    let agent = service
+        .runtime
+        .create_managed_agent(&definition, &body.name, &body.slug)
+        .await
+        .map_err(bad_request)?;
+    Ok(agent.record().clone())
+}
+
 pub async fn get_agent(
     service: &Service<'_>,
     path: &AgentPath,
@@ -506,17 +521,24 @@ pub async fn write_artifact(
     path: &AgentPath,
     body: exoharness::WriteArtifactRequest,
 ) -> Result<exoharness::ArtifactVersion> {
-    let agent = service.agent(path.agent_id).await?;
     let request = body;
     if request.path != exo_managed_agents::AGENT_DEFINITION_PATH {
         return Err(bad_request(
             "only the managed-agent definition can be written through this provider",
         ));
     }
-    let definition = exo_managed_agents::AgentDefinition::parse(
-        String::from_utf8(request.contents.clone()).map_err(bad_request)?,
-    )
-    .map_err(bad_request)?;
+    let definition =
+        exo_managed_agents::AgentDefinition::from_json(&request.contents).map_err(bad_request)?;
+    write_agent_definition(service, path, definition).await
+}
+
+pub async fn write_agent_definition(
+    service: &Service<'_>,
+    path: &AgentPath,
+    definition: exo_managed_agents::AgentDefinition,
+) -> Result<exoharness::ArtifactVersion> {
+    definition.validate().map_err(bad_request)?;
+    let agent = service.agent(path.agent_id).await?;
     let _guard = service.definition_updates.lock().await;
     service
         .runtime

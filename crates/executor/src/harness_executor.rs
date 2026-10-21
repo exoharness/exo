@@ -1052,7 +1052,7 @@ impl Runtime {
         let version = agent
             .write_artifact(exoharness::WriteArtifactRequest {
                 path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-                contents: definition.source().as_bytes().to_vec(),
+                contents: definition.to_json()?,
             })
             .await?;
         if let Err(error) = self.provider.configure_agent(agent, definition).await {
@@ -1060,7 +1060,8 @@ impl Runtime {
                 .write_artifact(exoharness::WriteArtifactRequest {
                     path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
                     contents: previous
-                        .map(|definition| definition.source().as_bytes().to_vec())
+                        .map(|definition| definition.to_json())
+                        .transpose()?
                         .unwrap_or_default(),
                 })
                 .await

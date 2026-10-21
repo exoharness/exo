@@ -306,7 +306,10 @@ async fn local_and_http_file_runs_sync_saved_agents_and_preserve_history() -> Re
         let saved = exo_managed_agents::load_definition(agent.as_ref())
             .await?
             .context("saved definition")?;
-        assert_eq!(saved.source(), updated);
+        assert_eq!(
+            saved.to_json()?,
+            exo_managed_agents::AgentDefinition::parse(updated.clone())?.to_json()?
+        );
         assert!(
             executor::load_agent_config(agent.as_ref())
                 .await?
@@ -339,8 +342,8 @@ async fn local_and_http_file_runs_sync_saved_agents_and_preserve_history() -> Re
             exo_managed_agents::load_definition(agent.as_ref())
                 .await?
                 .context("unchanged definition")?
-                .source(),
-            updated
+                .to_json()?,
+            exo_managed_agents::AgentDefinition::parse(updated.clone())?.to_json()?
         );
         std::fs::write(&f.agent_file, &updated)?;
         let resumed = f
@@ -853,7 +856,10 @@ async fn local_and_http_providers_configure_named_harnesses() -> Result<()> {
             let definition = exo_managed_agents::load_definition(agent.as_ref())
                 .await?
                 .unwrap();
-            assert_eq!(definition.source(), source);
+            assert_eq!(
+                definition.to_json()?,
+                exo_managed_agents::AgentDefinition::parse(source.clone())?.to_json()?
+            );
             let config = executor::load_agent_config(agent.as_ref()).await?;
             assert_eq!(
                 config.harness,
@@ -983,8 +989,8 @@ export default defineHarness({{
         exo_managed_agents::load_definition(agent.as_ref())
             .await?
             .unwrap()
-            .source(),
-        source
+            .to_json()?,
+        exo_managed_agents::AgentDefinition::parse(source.clone())?.to_json()?
     );
     let first = f
         .cli(&[
@@ -1095,9 +1101,10 @@ export default defineHarness({{
     agent
         .write_artifact(exoharness::WriteArtifactRequest {
             path: exo_managed_agents::AGENT_DEFINITION_PATH.into(),
-            contents: source
-                .replace(&url, &format!("{}/unexpected", mcp.uri()))
-                .into_bytes(),
+            contents: exo_managed_agents::AgentDefinition::parse(
+                source.replace(&url, &format!("{}/unexpected", mcp.uri())),
+            )?
+            .to_json()?,
         })
         .await?;
     let changed = f
