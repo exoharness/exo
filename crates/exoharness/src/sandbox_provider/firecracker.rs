@@ -1675,10 +1675,6 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         {
             return self.acquire_filesystem_snapshot(request, payload).await;
         }
-        request
-            .spec
-            .policy
-            .validate_basic("Firecracker snapshot restore")?;
         self.acquire_managed(
             request,
             Some(FirecrackerSnapshotManifest::from_payload(payload)?),

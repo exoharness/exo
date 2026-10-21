@@ -876,6 +876,75 @@ fn test_shared(
 }
 
 #[tokio::test]
+async fn template_restore_with_restricted_egress_still_validates_mounts() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: directory.path().into(),
+        ..Default::default()
+    };
+    let backend = FirecrackerSandboxBackend {
+        external_proxy: None,
+        shared: test_shared(config, HashMap::new())?,
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    let ca = rcgen::generate_simple_self_signed(vec!["proxy.test".into()])?;
+    let backend = backend.with_external_proxy(crate::egress::ExternalProxyConfig {
+        url: url::Url::parse("http://127.0.0.1:9401")?,
+        username: "template-test".into(),
+        password: "template-test-password".into(),
+        ca_pem: ca.cert.pem(),
+        environment: HashMap::new(),
+    })?;
+    let request = SandboxRequest {
+        sandbox_id: "restricted-template".into(),
+        scope: crate::ResourceScope::Global,
+        provider_state: None,
+        lifecycle: crate::SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(60)),
+        },
+        spec: SandboxSpec {
+            image: "/unused.ext4".into(),
+            resources: None,
+            mounts: vec![crate::SandboxMount {
+                host_path: directory.path().join("repo"),
+                guest_path: "/repo".into(),
+                access: crate::SandboxMountAccess::ReadWrite,
+                internal: false,
+            }],
+            durable_file_systems: vec![],
+            tcp_ports: vec![],
+            default_workdir: "/workspace".into(),
+            policy: crate::EgressPolicy {
+                networking: SandboxNetworkPolicy::Limited {
+                    allowed_hosts: vec!["github.com".into()],
+                },
+                allowed_tcp_ports: Some(vec![443]),
+                credentials: vec![],
+            },
+        },
+    };
+    let payload = FirecrackerSnapshotManifest {
+        format_version: SNAPSHOT_FORMAT_VERSION,
+        template: true,
+        template_key: "a".repeat(64),
+        spec_hash: template_spec_hash(&request.spec),
+        source_network_slot: 1,
+        runtime: test_runtime(),
+    }
+    .into_payload()?;
+    let error = backend
+        .acquire_from_snapshot(request, payload)
+        .await
+        .err()
+        .context("host bind mounts must not restore")?;
+    assert_eq!(
+        error.to_string(),
+        "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()> {
     let directory = tempfile::tempdir()?;
     for name in ["manifests", "leases"] {
