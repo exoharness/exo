@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { runContracts } from "./contract-test.mjs";
 
 const mode = process.argv[2];
@@ -34,14 +33,11 @@ async function rpc(request) {
   assert.equal(result.ok, true, result.error);
   return result.response;
 }
-async function createAgent(source, slug, name, model) {
-  const agent = await api("agent", "POST", {
+async function createAgent(definition, slug, name, model) {
+  const agent = await api("agent/managed", "POST", {
     slug: `${slug}-${Date.now()}`,
     name,
-  });
-  await api(`agent/${agent.id}/artifact`, "POST", {
-    path: "managed-agents/agent.md",
-    contents: [...new TextEncoder().encode(source)],
+    definition,
   });
   const { thread } = await api(`agent/${agent.id}/thread`, "POST", { model });
   const path = `agent/${agent.id}/thread/${thread.id}`;
@@ -92,12 +88,15 @@ async function stopSandboxes(agent, thread, restore = false) {
 }
 
 async function basic() {
-  const source = await readFile(
-    new URL("../../examples/managed-agents/assistant.md", import.meta.url),
-    "utf8",
-  );
+  const definition = {
+    frontmatter: {
+      harness: "basic",
+      model: { name: "gpt-6.1-sol", credential: "openai" },
+    },
+    instructions: "Help the user with their task.",
+  };
   const { agent, thread, path } = await createAgent(
-    source,
+    definition,
     "worker-basic",
     "Worker Basic Test",
     "gpt-6.1-sol",
@@ -137,12 +136,18 @@ async function basic() {
   }
 }
 async function codex() {
-  const source = await readFile(
-    new URL("../../examples/managed-agents/coder.md", import.meta.url),
-    "utf8",
-  );
+  const definition = {
+    frontmatter: {
+      name: "coder",
+      harness: "codex",
+      model: { name: "gpt-6.1-sol", credential: "openai" },
+      permission_policy: { type: "always_allow" },
+    },
+    instructions:
+      "You are a coding agent. Work in /workspace. Implement the requested changes and run tests. Keep the final answer concise.",
+  };
   const { agent, thread, path } = await createAgent(
-    source,
+    definition,
     "cloudflare-codex",
     "Cloudflare Codex Test",
     process.env.EXO_CODEX_MODEL ?? "gpt-6.1-sol",

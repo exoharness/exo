@@ -327,20 +327,24 @@ const policy = (origin) => ({
   },
   injection_location: { header: true },
 });
-const definition = (ask) =>
-  `---\nname: Test Agent\nharness: basic\nmodel:\n  name: test-model\n  base_url: https://model.example/v1\n  credential: OPENAI_API_KEY\npermission_policy: {type: ${ask ? "always_ask" : "always_allow"}}\n---\nUse shell to print Linux, then finish.`;
+const definition = (ask, harness = "basic") => ({
+  frontmatter: {
+    name: "Test Agent",
+    harness,
+    model: {
+      name: "test-model",
+      base_url: "https://model.example/v1",
+      credential: "OPENAI_API_KEY",
+    },
+    permission_policy: { type: ask ? "always_ask" : "always_allow" },
+  },
+  instructions: "Use shell to print Linux, then finish.",
+});
 async function create(ask = false, harness = "basic") {
-  const agent = await api("agent", "POST", {
+  const agent = await api("agent/managed", "POST", {
     slug: `agent-${crypto.randomUUID()}`,
     name: "Test Agent",
-  });
-  await api(`agent/${agent.id}/artifact`, "POST", {
-    path: "managed-agents/agent.md",
-    contents: [
-      ...new TextEncoder().encode(
-        definition(ask).replace("harness: basic", `harness: ${harness}`),
-      ),
-    ],
+    definition: definition(ask, harness),
   });
   const { thread } = await api(`agent/${agent.id}/thread`, "POST", {});
   return { agent, thread, path: `agent/${agent.id}/thread/${thread.id}` };
@@ -506,10 +510,7 @@ test("Access validates platform context and forwards authenticated HTTP and SSE"
         name: "Access agent",
       });
       assert.equal((await accessApi("agent")).agents[0].id, agent.id);
-      await accessApi(`agent/${agent.id}/artifact`, "POST", {
-        path: "managed-agents/agent.md",
-        contents: [...new TextEncoder().encode(definition(false))],
-      });
+      await accessApi(`agent/${agent.id}/definition`, "PUT", definition(false));
       const { thread } = await accessApi(
         `agent/${agent.id}/thread`,
         "POST",
@@ -907,14 +908,11 @@ test("Codex reuses its RPC process across turns and resumes after backend shutdo
   assert.equal(await sandbox.processCount(), 1);
   await sandbox.stop();
   for (const harness of ["basic", "codex"]) {
-    await api("agent/" + agent.id + "/artifact", "POST", {
-      path: "managed-agents/agent.md",
-      contents: [
-        ...new TextEncoder().encode(
-          definition(false).replace("harness: basic", "harness: " + harness),
-        ),
-      ],
-    });
+    await api(
+      `agent/${agent.id}/definition`,
+      "PUT",
+      definition(false, harness),
+    );
     const switched = await sendTurn(path);
     const switchedEvents = await waitTurn(path, switched.turn.id);
     assertNoErrors(switchedEvents);
@@ -1353,14 +1351,17 @@ test("MCP uses vault OAuth refresh, shared filtering and basic tool execution", 
     slug: `mcp-${crypto.randomUUID()}`,
     name: "MCP test",
   });
-  const source = definition(false).replace(
-    "permission_policy:",
-    "mcp_servers:\n  - type: url\n    name: fixture\n    url: https://mcp.example/mcp\n    allowed_tools: [echo]\n    permission_policy: {type: always_allow}\npermission_policy:",
-  );
-  await api(`agent/${agent.id}/artifact`, "POST", {
-    path: "managed-agents/agent.md",
-    contents: [...new TextEncoder().encode(source)],
-  });
+  const source = definition(false);
+  source.frontmatter.mcp_servers = [
+    {
+      type: "url",
+      name: "fixture",
+      url: "https://mcp.example/mcp",
+      allowed_tools: ["echo"],
+      permission_policy: { type: "always_allow" },
+    },
+  ];
+  await api(`agent/${agent.id}/definition`, "PUT", source);
   const before = { calls: mcpCalls, refreshes: oauthRefreshes };
   const { thread } = await api(`agent/${agent.id}/thread`, "POST", {
     vaults: [vault.id],
@@ -1399,16 +1400,26 @@ test("Codex receives MCP configuration and Git resources through shared sandbox 
     slug: `codex-resources-${crypto.randomUUID()}`,
     name: "Codex resources",
   });
-  const source = definition(false)
-    .replace("harness: basic", "harness: codex")
-    .replace(
-      "permission_policy:",
-      "resources:\n  - name: repo\n    type: git\n    url: https://github.com/example/project.git\n    credential: git\n    mount_path: /workspace\nmcp_servers:\n  - type: url\n    name: fixture\n    url: https://mcp.example/mcp\n    blocked_tools: [blocked]\n    permission_policy: {type: always_allow}\npermission_policy:",
-    );
-  await api(`agent/${agent.id}/artifact`, "POST", {
-    path: "managed-agents/agent.md",
-    contents: [...new TextEncoder().encode(source)],
-  });
+  const source = definition(false, "codex");
+  source.frontmatter.resources = [
+    {
+      name: "repo",
+      type: "git",
+      url: "https://github.com/example/project.git",
+      credential: "git",
+      mount_path: "/workspace",
+    },
+  ];
+  source.frontmatter.mcp_servers = [
+    {
+      type: "url",
+      name: "fixture",
+      url: "https://mcp.example/mcp",
+      blocked_tools: ["blocked"],
+      permission_policy: { type: "always_allow" },
+    },
+  ];
+  await api(`agent/${agent.id}/definition`, "PUT", source);
   const { thread } = await api(`agent/${agent.id}/thread`, "POST", {
     vaults: [vault.id],
   });
@@ -1442,17 +1453,9 @@ test("Codex receives MCP configuration and Git resources through shared sandbox 
   assert.deepEqual(fixture.enabled_tools, ["echo"]);
   assert.match(environment[fixture.bearer_token_env_var], /^exo_egress_/);
 
-  await api(`agent/${agent.id}/artifact`, "POST", {
-    path: "managed-agents/agent.md",
-    contents: [
-      ...new TextEncoder().encode(
-        source.replace(
-          "github.com/example/project.git",
-          "github.com/example/disk-full.git",
-        ),
-      ),
-    ],
-  });
+  source.frontmatter.resources[0].url =
+    "https://github.com/example/disk-full.git";
+  await api(`agent/${agent.id}/definition`, "PUT", source);
   const failed = await api(`agent/${agent.id}/thread`, "POST", {
     vaults: [vault.id],
   });

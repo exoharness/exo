@@ -154,6 +154,7 @@ async fn route(
     ("DELETE", ["environment", name]) => reply!(delete_environment, name),
     ("GET", ["agent"]) => reply!(list_agents, query(r)?),
     ("POST", ["agent"]) => reply!(create_agent, body(r)?),
+    ("POST", ["agent", "managed"]) => reply!(create_managed_agent, body(r)?),
     );
     let mut vault = api::VaultPath {
         agent_id: None,
@@ -205,6 +206,7 @@ async fn route(
         routes!(method, tail;
         ("GET", []) => reply!(get_agent, &agent),
         ("DELETE", []) => reply!(delete_agent, &agent),
+        ("PUT", ["definition"]) => reply!(write_agent_definition, &agent, body(r)?),
         ("GET", ["artifact"]) => reply!(list_artifacts, &agent),
         ("GET", ["artifact", "read"]) => reply!(read_artifact, &agent, query(r)?),
         ("POST", ["artifact"]) => reply!(write_artifact, &agent, body(r)?),

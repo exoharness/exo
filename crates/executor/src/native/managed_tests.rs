@@ -632,7 +632,7 @@ async fn vault_selection_survives_resume_and_rejects_unsafe_config_changes() -> 
     );
     agent.write_artifact(WriteArtifactRequest {
         path: managed::AGENT_DEFINITION_PATH.into(),
-        contents: SOURCE.replace("model:\n", "mcp_servers:\n  - type: url\n    name: changed\n    url: http://127.0.0.1:1/mcp\nmodel:\n").into_bytes(),
+        contents: managed::AgentDefinition::parse(SOURCE.replace("model:\n", "mcp_servers:\n  - type: url\n    name: changed\n    url: http://127.0.0.1:1/mcp\nmodel:\n"))?.to_json()?,
     }).await?;
     let error = runtime
         .send(

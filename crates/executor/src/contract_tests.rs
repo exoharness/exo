@@ -54,7 +54,12 @@ pub async fn test_provider(runtime: &Runtime, agent_id: AgentId, release: impl F
         1
     );
     assert_eq!(
-        history.last().context("terminal event")?.id,
+        history
+            .iter()
+            .find(|event| event.turn_id == Some(turn.id)
+                && matches!(event.data, EventData::TurnEnded))
+            .context("terminal event")?
+            .id,
         completed.latest_event_id
     );
 

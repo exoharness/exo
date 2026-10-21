@@ -82,7 +82,7 @@ async fn provider_mcp_definitions_resolve_in_the_host_context() -> Result<()> {
     )
     .await?;
     let saved = load_definition(agent.as_ref()).await?.unwrap();
-    assert_eq!(saved.source, source);
+    assert_eq!(saved.to_json()?, definition.to_json()?);
     for url in ["http://127.0.0.1:8000/mcp", "https://tickets.example/mcp"] {
         let servers = saved.resolve_mcp_servers(&TestMcpResolver(url)).await?;
         assert_eq!(servers.len(), 1);
@@ -158,7 +158,7 @@ async fn saved_mcp_definitions_preserve_filters_and_reject_embedded_credentials(
     )
     .await?;
     let saved = load_definition(agent.as_ref()).await?.unwrap();
-    assert_eq!(saved.source, source);
+    assert_eq!(saved.to_json()?, definition.to_json()?);
     let servers = saved.resolve_mcp_servers(&()).await?;
     let server = &servers[0];
     assert_eq!(server.name, "tickets");
@@ -194,7 +194,7 @@ fn parses_frontmatter_and_preserves_the_original_document() -> Result<()> {
             definition.instructions,
             "Investigate tickets.\n\n---\nCite each ticket."
         );
-        assert_eq!(definition.source, source);
+        assert_eq!(definition.source(), source);
     }
     for source in [
         SOURCE.replace("model:\n", "config:\n"),
@@ -249,19 +249,19 @@ async fn saves_definitions_and_resumes_only_threads_owned_by_the_agent() -> Resu
         );
     }
     assert_eq!(
-        load_definition(agent.as_ref()).await?.unwrap().source,
-        SOURCE
+        load_definition(agent.as_ref()).await?.unwrap().instructions,
+        AgentDefinition::parse(SOURCE.into())?.instructions
     );
     let updated = SOURCE.replace("Investigate tickets.", "Investigate escalations.");
     agent
         .write_artifact(WriteArtifactRequest {
             path: AGENT_DEFINITION_PATH.to_string(),
-            contents: updated.as_bytes().to_vec(),
+            contents: AgentDefinition::parse(updated.clone())?.to_json()?,
         })
         .await?;
     assert_eq!(
-        load_definition(agent.as_ref()).await?.unwrap().source,
-        updated
+        load_definition(agent.as_ref()).await?.unwrap().instructions,
+        AgentDefinition::parse(updated)?.instructions
     );
     let opened = open_thread(
         &backend,
@@ -421,5 +421,28 @@ fn model_type_errors_and_yaml_syntax_errors_have_source_diagnostics() -> Result<
         "{error}"
     );
     assert!(error.contains("4 |   name: @invalid"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn structured_definitions_validate_and_export_markdown_without_transporting_source() -> Result<()> {
+    let definition = AgentDefinition::parse(SOURCE.replace("model:\n", "resources:\n  - type: git\n    name: code\n    url: https://github.com/exoharness/exo\n    checkout: main\nmcp_servers:\n  - type: url\n    name: tickets\n    url: https://tickets.example/mcp\n    permission_policy: {type: always_ask}\nmodel:\n"))?;
+    let bytes = definition.to_json()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert!(value.get("source").is_none());
+    assert!(value.get("path").is_none());
+    let decoded = AgentDefinition::from_json(&bytes)?;
+    assert!(decoded.path().is_none());
+    assert_eq!(decoded.to_json()?, bytes);
+    assert_eq!(
+        AgentDefinition::parse(decoded.source().into())?.to_json()?,
+        bytes
+    );
+    let mut invalid = value;
+    invalid["instructions"] = "".into();
+    assert!(AgentDefinition::from_json(&serde_json::to_vec(&invalid)?).is_err());
+    invalid["instructions"] = "Instructions".into();
+    invalid["frontmatter"]["unexpected"] = true.into();
+    assert!(AgentDefinition::from_json(&serde_json::to_vec(&invalid)?).is_err());
     Ok(())
 }
