@@ -32,6 +32,7 @@ fn harness_name(config: &AgentConfig) -> &str {
             "claude-code-harness" => "claude-code",
             "cursor-sdk-harness" => "cursor",
             "pi-harness" => "pi",
+            "opencode-harness" => "opencode",
             name => name,
         },
     }

@@ -30,6 +30,7 @@
     "@cursor/sdk": "^1.0.12",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@mozilla/readability": "^0.6.0",
+    "@opencode-ai/sdk": "^1.17.11",
     "braintrust": "3.7.0",
     "linkedom": "^0.18.12",
     "openai": "6.33.0",

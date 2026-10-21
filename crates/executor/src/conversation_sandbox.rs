@@ -510,6 +510,12 @@ mod tests {
                 "GEMINI_API_KEY",
                 "generativelanguage.googleapis.com",
             ),
+            (
+                "opencode",
+                "anthropic/claude-sonnet-4-6",
+                "ANTHROPIC_API_KEY",
+                "api.anthropic.com",
+            ),
         ] {
             let definition = exo_managed_agents::AgentDefinition::parse(format!(
                 "---\nharness: {harness_name}\nmodel:\n  name: {model}\n  credential: {harness_name}\n---\nHelp."

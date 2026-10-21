@@ -14,6 +14,8 @@ pub enum TypeScriptHarnessPreset {
     ClaudeCode,
     Cursor,
     Pi,
+    #[serde(rename = "opencode")]
+    OpenCode,
 }
 
 impl TypeScriptHarnessPreset {
@@ -23,6 +25,7 @@ impl TypeScriptHarnessPreset {
             Self::ClaudeCode => "claude-code",
             Self::Cursor => "cursor",
             Self::Pi => "pi",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -32,6 +35,7 @@ impl TypeScriptHarnessPreset {
             Self::ClaudeCode => Path::new("exoharness/examples/typescript/claude-code-harness.ts"),
             Self::Cursor => Path::new("exoharness/examples/typescript/cursor-sdk-harness.ts"),
             Self::Pi => Path::new("exoharness/examples/typescript/pi-harness.ts"),
+            Self::OpenCode => Path::new("exoharness/examples/typescript/opencode-harness.ts"),
         }
     }
 
@@ -47,6 +51,7 @@ impl TypeScriptHarnessPreset {
             Self::Pi => Some(
                 "ghcr.io/exoharness/pi-devbox@sha256:15a8b71b99a0b0583b651e48f24fbfe2e10af02add9aa7fa7bccd2f74af429a5",
             ),
+            Self::OpenCode => Some("exo-opencode-sandbox:latest"),
         }
     }
 }
@@ -57,6 +62,7 @@ pub(crate) fn is_preset_sandbox_image(image: &str) -> bool {
         TypeScriptHarnessPreset::ClaudeCode,
         TypeScriptHarnessPreset::Cursor,
         TypeScriptHarnessPreset::Pi,
+        TypeScriptHarnessPreset::OpenCode,
     ]
     .into_iter()
     .filter_map(TypeScriptHarnessPreset::sandbox_image)
@@ -79,6 +85,20 @@ pub(crate) fn sandbox_model_credential_variable(
     Ok(match module {
         Some("codex-harness.ts") => Some("OPENAI_API_KEY"),
         Some("claude-code-harness.ts") => Some("ANTHROPIC_API_KEY"),
+        Some("opencode-harness.ts") => Some(
+            match config
+                .model
+                .split_once('/')
+                .map(|(provider, _)| provider)
+                .unwrap_or("anthropic")
+            {
+                "openai" => "OPENAI_API_KEY",
+                "anthropic" => "ANTHROPIC_API_KEY",
+                provider => {
+                    bail!("opencode API-key credentials are not configured for provider {provider}")
+                }
+            },
+        ),
         Some("pi-harness.ts") => Some(
             match config
                 .model
@@ -142,6 +162,7 @@ fn resolve_harness(
         "claude-code" => Some(TypeScriptHarnessPreset::ClaudeCode),
         "cursor" | "cursor-sdk" => Some(TypeScriptHarnessPreset::Cursor),
         "pi" => Some(TypeScriptHarnessPreset::Pi),
+        "opencode" | "opencode-sdk" => Some(TypeScriptHarnessPreset::OpenCode),
         _ => None,
     };
     let (kind, module) = match harness {
@@ -206,7 +227,16 @@ pub(crate) async fn resolve_thread_harness(
 ) -> Result<ConversationHarnessConfig> {
     if !matches!(
         harness,
-        "basic" | "native" | "rlm" | "codex" | "claude-code" | "cursor" | "cursor-sdk" | "pi"
+        "basic"
+            | "native"
+            | "rlm"
+            | "codex"
+            | "claude-code"
+            | "cursor"
+            | "cursor-sdk"
+            | "pi"
+            | "opencode"
+            | "opencode-sdk"
     ) && let Some(caller) = thread.caller()
     {
         caller.policy.check_operator(&caller.principal).await?;

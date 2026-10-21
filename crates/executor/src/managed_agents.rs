@@ -44,7 +44,14 @@ impl AgentBackend for LocalProvider {
             let frontmatter = &definition.frontmatter;
             if !matches!(
                 frontmatter.harness.as_str(),
-                "basic" | "rlm" | "codex" | "claude-code" | "cursor" | "cursor-sdk" | "pi"
+                "basic"
+                    | "rlm"
+                    | "codex"
+                    | "claude-code"
+                    | "cursor"
+                    | "cursor-sdk"
+                    | "pi"
+                    | "opencode"
             ) || !frontmatter.tools.is_empty()
                 || frontmatter.tool_creation
                 || !frontmatter.adapters.is_empty()

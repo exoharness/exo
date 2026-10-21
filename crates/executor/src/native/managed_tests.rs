@@ -33,6 +33,29 @@ fn sandbox_provider_keeps_the_harness_preset_image() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn opencode_preset_resolves_module_slug_image_and_credential() -> Result<()> {
+    let definition = AgentDefinition::parse(SOURCE.replace("harness: basic", "harness: opencode"))?;
+    let config = agent_config(&definition, SandboxProvider::Docker, None, None)?;
+    let typescript = config.typescript.as_ref().context("typescript module")?;
+    assert!(
+        typescript
+            .module_path
+            .ends_with("exoharness/examples/typescript/opencode-harness.ts")
+    );
+    assert_eq!(TypeScriptHarnessPreset::OpenCode.agent_slug(), "opencode");
+    let image = TypeScriptHarnessPreset::OpenCode
+        .sandbox_image()
+        .context("opencode sandbox image")?;
+    assert_eq!(image, "exo-opencode-sandbox:latest");
+    assert!(crate::managed_agents::config::is_preset_sandbox_image(
+        image
+    ));
+    let variable = crate::managed_agents::config::sandbox_model_credential_variable(&config)?;
+    assert_eq!(variable, Some("ANTHROPIC_API_KEY"));
+    Ok(())
+}
+
 async fn state(config: &BasicExoHarnessConfig) -> Result<Arc<dyn ExoHarness>> {
     let state = Arc::new(BasicExoHarness::in_memory(config.clone()).await?);
 

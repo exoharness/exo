@@ -106,7 +106,7 @@ struct ExecutionArgs {
     /// JSON, YAML, or TOML policy for outbound connections and credentials.
     #[arg(long)]
     egress_policy: Option<PathBuf>,
-    /// Harness: basic, rlm, exo, typescript, codex, claude-code, cursor, pi, or a TypeScript module path.
+    /// Harness: basic, rlm, exo, typescript, codex, claude-code, cursor, pi, opencode, or a TypeScript module path.
     #[arg(long, value_name = "HARNESS")]
     harness: Option<HarnessSelection>,
     #[arg(long, env = "BRAINTRUST_API_KEY", hide = true)]
@@ -334,11 +334,14 @@ impl FromStr for HarnessSelection {
             "pi" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Pi)),
             "claude-code" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::ClaudeCode)),
             "cursor" | "cursor-sdk" => Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::Cursor)),
+            "opencode" | "opencode-sdk" => {
+                Ok(Self::TypeScriptPreset(TypeScriptHarnessPreset::OpenCode))
+            }
             value if looks_like_typescript_module_path(value) => {
                 Ok(Self::TypeScriptModule(PathBuf::from(value)))
             }
             _ => Err(format!(
-                "unknown harness `{raw}`; expected basic, rlm, typescript, exo, codex, claude-code, cursor, or a TypeScript module path"
+                "unknown harness `{raw}`; expected basic, rlm, typescript, exo, codex, claude-code, cursor, pi, opencode, or a TypeScript module path"
             )),
         }
     }
@@ -2160,6 +2163,7 @@ fn format_harness_selection(selection: &HarnessSelection) -> String {
             TypeScriptHarnessPreset::Codex => "codex".to_string(),
             TypeScriptHarnessPreset::ClaudeCode => "claude-code".to_string(),
             TypeScriptHarnessPreset::Cursor => "cursor".to_string(),
+            TypeScriptHarnessPreset::OpenCode => "opencode".to_string(),
         },
         HarnessSelection::TypeScriptModule(path) => path.display().to_string(),
     }
