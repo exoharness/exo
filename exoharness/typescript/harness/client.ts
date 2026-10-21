@@ -435,6 +435,7 @@ export type GuestToHostMessage =
   | { kind: "error"; message: string; stack?: string | null };
 
 export type RawTypeScriptStreamEvent =
+  | { type: "status"; message: string }
   | { type: "first_chunk"; ttft_ms: number }
   | { type: "text_delta"; text: string }
   | {
@@ -1170,6 +1171,11 @@ export function createTurnContext(
     },
 
     stream: {
+      async status(message): Promise<void> {
+        if (streaming) {
+          await client.emitStream({ type: "status", message });
+        }
+      },
       async firstChunk(ttftMs): Promise<void> {
         if (!streaming) {
           return;

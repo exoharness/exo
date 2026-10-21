@@ -144,9 +144,8 @@ their copies. With a remote provider, local paths refer to files on the provider
 
 ### Adapters
 
-::: info Planned
-Inline adapter configuration is being implemented. Today deployments are supplied in a separate adapters file and frontmatter
-contains their names.
+::: info Under construction
+Slack is implemented for local servers. The other adapters and hosted deployment are planned.
 :::
 
 Adapters connect an agent to chat providers like Slack, WhatsApp, and Discord. Configure them in the agent's frontmatter:
@@ -158,18 +157,17 @@ adapters:
     allowed_channels: [C123456]
 ```
 
-Each adapter reads its credentials from the vault named by `vault`, which is required. `name` is optional and defaults to
-the adapter's type; set it to tell apart two adapters of the same type. Use a vault dedicated to the
-adapter and don't attach it to threads, so the agent itself can't use the bot's credentials. A Slack adapter expects
-secrets named `bot-token` and `signing-secret`:
+`name` is optional and defaults to the adapter's type; set it to tell apart two adapters of the same type.
+Slack and Discord require an explicit credential vault. WhatsApp and Signal use linked-device profiles; IRC can connect
+without a credential. Adapter credentials are kept separate from the vaults attached to agent threads.
 
-```bash
-exo vault create support-slack
-exo vault secret create support-slack bot-token --token-env SLACK_BOT_TOKEN
-exo vault secret create support-slack signing-secret --token-env SLACK_SIGNING_SECRET
-```
-
-Adapters run in `--serve` mode.
+Local adapters run in `--serve` mode; hosted providers manage them on the server. Each chat conversation maps to a persistent Exo thread, and the agent's response is delivered
+back automatically. Slack supports Socket Mode (the default, with no public endpoint) or HTTP event delivery.
+Braintrust and Cloudflare providers require HTTP. Allowed Slack users can use shared credentials from `global`;
+shared identity/vault ownership adds private credentials across adapters, with optional workspace/user-ID pins.
+Set `use_sender_vault: true` to use the submitter's associated vault for each Slack turn; it defaults to `false`, using
+only `global`. History and files stay shared within the conversation, including data fetched using personal credentials.
+See [Adapters](adapters/) for configuration and setup instructions for each type.
 
 ## Saved agents
 
@@ -492,18 +490,16 @@ to run your agents; moving existing agents and threads between providers require
 
 ## Planned additions
 
-<!-- Keep this checklist aligned with the implementation backlog in /TODO.md. -->
-
 - [ ] Simplify the HTTP API. When `exo run FILE --serve` serves a single agent, expose agent-less routes:
   `POST /exo/turn` creates a thread and submits its first input, and `/exo/thread/THREAD/...` addresses existing
   threads. Add `POST /exo/agent/AGENT/turn` for the same new-thread flow on multi-agent or hosted servers. Return
   thread and turn IDs in the existing receipt, preserving retry semantics. Accept a plain string `input` as shorthand for a user message, so
   `curl localhost:4766/exo/turn --json '{"input": "..."}'` works. For multi-agent servers, accept agent and thread slugs
   wherever IDs are accepted. Keep the `/exo` base path until a prefix change is decided.
-- [ ] Configure adapters directly in agent frontmatter, resolve their vault credentials, and provision their workers; remove
-  the separate `--adapters-file` configuration. Make `name` optional, defaulting to `type`. Require each adapter's `vault` (no fallback to `global`) and read fixed
-  secret names from it, eg. `bot-token` and `signing-secret` for Slack. Frontmatter currently accepts adapter names, with deployments supplied by
-  the separate file; worker supervision already exists.
+- [ ] Port Discord, WhatsApp, Signal, and IRC onto the managed adapter path. Slack now supports inline definitions,
+  Socket Mode and HTTP, persistent conversation mappings, final replies, approvals, receipt reactions, and restart recovery.
+- [ ] Implement hosted adapter deployment and HTTP provisioning for Braintrust and Cloudflare; require `transport: http` there.
+  See [Adapters](adapters/) for setup and the planned providers.
 - [ ] Support tool declarations in agent frontmatter and inherit them during execution. `tools` currently accepts module
   paths, and client tool declarations must be supplied as `frontend_tools` on each HTTP turn request.
 - [ ] Move TypeScript tool module registration and path resolution into environments, bind implementations by declared tool

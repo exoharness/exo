@@ -31,8 +31,8 @@ use crate::{
     LocalProvider, Runtime,
     harness_executor::{ExecutorStreamMode, HarnessExecutor, RecoveryRuntimeResolver},
     harness_executor::{RUNTIME_TURN_COMPLETED, TurnWork},
-    harness_tool::ensure_shell_sandbox,
     http_service::{RuntimeHttpService, server},
+    shell_tool::ensure_shell_sandbox,
 };
 
 struct RecoveryPolicy(Uuid7);
@@ -1012,7 +1012,7 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
         .await?;
     let agent_id = agent.record().id;
     let thread_id = thread.record().id;
-    let (turn, mut stream) = runtime
+    let (turn, stream) = runtime
         .start_turn(
             Arc::clone(&agent),
             Arc::clone(&thread),
@@ -1061,7 +1061,7 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
         EventData::ToolResult { tool_call_id, .. } if tool_call_id == "write-call"
     )));
     runtime.shutdown().await?;
-    assert!(matches!(stream.next().await, Some(Err(_))));
+    assert!(stream.any(|event| async move { event.is_err() }).await);
     drop(thread);
     drop(agent);
     drop(runtime);
@@ -1289,7 +1289,7 @@ async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<
         .await?;
     let agent_id = agent.record().id;
     let thread_id = thread.record().id;
-    let (turn, mut stream) = runtime
+    let (turn, stream) = runtime
         .start_turn(
             Arc::clone(&agent),
             Arc::clone(&thread),
@@ -1304,7 +1304,7 @@ async fn interrupted_rlm_turn_is_failed_without_replaying_its_input() -> Result<
         .await?;
     tokio::time::timeout(Duration::from_secs(3), blocked_model.entered.notified()).await?;
     runtime.shutdown().await?;
-    assert!(matches!(stream.next().await, Some(Err(_))));
+    assert!(stream.any(|event| async move { event.is_err() }).await);
     drop(thread);
     drop(agent);
     drop(runtime);
@@ -1382,7 +1382,7 @@ async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
     let thread_id = thread.record().id;
     let mut config = runtime.get_agent_config(agent.as_ref()).await?;
     config.model = "saved-override".into();
-    let (_, mut turn_stream) = runtime
+    let (_, turn_stream) = runtime
         .start_turn(
             Arc::clone(&agent),
             Arc::clone(&thread),
@@ -1397,7 +1397,7 @@ async fn graceful_shutdown_leaves_active_turn_for_restart() -> Result<()> {
         .await?;
     tokio::time::timeout(Duration::from_secs(3), blocked_model.entered.notified()).await?;
     runtime.shutdown().await?;
-    assert!(matches!(turn_stream.next().await, Some(Err(_))));
+    assert!(turn_stream.any(|event| async move { event.is_err() }).await);
     let events = thread.get_events(None).await?.events;
     let turn_id = events
         .iter()
@@ -1640,20 +1640,23 @@ async fn recovered_turn_uses_its_original_caller() -> Result<()> {
         let scoped_runtimes = Arc::clone(&scoped_runtimes);
         let queue = queue.clone();
         Arc::new(move |principal| {
-            let scoped_state = state.with_caller(Caller {
-                principal,
-                policy: Arc::clone(&policy),
-            })?;
-            let scoped = Arc::new(Runtime::new(
-                LocalProvider::new(scoped_state, Arc::new(recorder.clone()))
-                    .with_turn_coordinator(queue.clone()),
-                None,
-            ));
-            scoped_runtimes
-                .lock()
-                .expect("scoped runtimes poisoned")
-                .push(Arc::clone(&scoped));
-            Ok(scoped)
+            let result = (|| {
+                let scoped_state = state.with_caller(Caller {
+                    principal,
+                    policy: Arc::clone(&policy),
+                })?;
+                let scoped = Arc::new(Runtime::new(
+                    LocalProvider::new(scoped_state, Arc::new(recorder.clone()))
+                        .with_turn_coordinator(queue.clone()),
+                    None,
+                ));
+                scoped_runtimes
+                    .lock()
+                    .expect("scoped runtimes poisoned")
+                    .push(Arc::clone(&scoped));
+                Ok(scoped)
+            })();
+            Box::pin(async move { result })
         })
     };
     runtime.set_recovery_resolver(resolver.clone())?;
@@ -2855,11 +2858,7 @@ async fn updating_sandbox_image_recreates_shell_sandbox_without_shell_program() 
 
     conversation_config.shell_program = Some("/missing-shell".into());
     conversation_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
-    let native_tools = crate::ExoToolRuntime::with_roots(
-        tempdir.path().join("scheduler"),
-        tempdir.path().join("adapters"),
-        tempdir.path().join("workers"),
-    );
+    let native_tools = crate::ExoToolRuntime::with_scheduler_root(tempdir.path().join("scheduler"));
     crate::ToolRuntime::prepare_conversation(
         &native_tools,
         agent.as_ref(),

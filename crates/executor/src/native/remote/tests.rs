@@ -64,6 +64,148 @@ struct Fixture {
     browser: reqwest::Client,
     server: actix_web::dev::ServerHandle,
 }
+
+#[tokio::test]
+async fn vault_binding_preserves_owner_and_login_identity_and_one_personal_alias() -> Result<()> {
+    use exo_managed_agents::identity::IdentityCommand;
+    let f = Fixture::new(false).await?;
+    let identities = super::IdentityRegistry::authenticated(f.auth.clone(), f.harness.clone());
+    let owner_vault = f.harness.create_vault("alice").await?;
+    identities
+        .execute(IdentityCommand::BindVault {
+            vault: "alice".into(),
+            email: "ALICE@example.com".into(),
+        })
+        .await?;
+    let owner = f
+        .auth
+        .store
+        .enroll(
+            super::oidc::Identity {
+                issuer: "test".into(),
+                subject: "alice".into(),
+                email: "Alice@Example.com".into(),
+            },
+            &f.auth.config,
+            f.harness.as_ref(),
+        )
+        .await?;
+    assert_eq!(owner.id, f.auth.owner().await);
+    assert_eq!(owner.vault, owner_vault.record().id);
+    f.auth
+        .caller(owner.id.clone(), false)
+        .policy
+        .check_operator(&owner.id)
+        .await?;
+    let bob = f
+        .auth
+        .store
+        .enroll(
+            super::oidc::Identity {
+                issuer: "test".into(),
+                subject: "bob".into(),
+                email: "Bob@example.com".into(),
+            },
+            &f.auth.config,
+            f.harness.as_ref(),
+        )
+        .await?;
+    f.harness.create_vault("bob-work").await?;
+    identities
+        .execute(IdentityCommand::BindVault {
+            vault: "bob-work".into(),
+            email: "BOB@EXAMPLE.COM".into(),
+        })
+        .await?;
+    let again = f
+        .auth
+        .store
+        .enroll(
+            super::oidc::Identity {
+                issuer: "test".into(),
+                subject: "bob".into(),
+                email: "bob@EXAMPLE.com".into(),
+            },
+            &f.auth.config,
+            f.harness.as_ref(),
+        )
+        .await?;
+    assert_eq!(again.id, bob.id);
+    assert_ne!(again.vault, bob.vault);
+    let runtime = f
+        .runtime
+        .with_caller(f.auth.caller(bob.id.clone(), false))?;
+    let extra = runtime
+        .exoharness_handle()
+        .create_vault("bob-extra")
+        .await?;
+    assert!(
+        identities
+            .execute(IdentityCommand::BindVault {
+                vault: extra.record().id.to_string(),
+                email: "alice@example.com".into(),
+            })
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("owned by another user")
+    );
+    assert_eq!(
+        f.auth
+            .store
+            .state
+            .lock()
+            .await
+            .vault_owners
+            .get(&extra.record().id),
+        Some(&bob.id)
+    );
+    let vaults = runtime.exoharness_handle().list_vaults().await?;
+    assert_eq!(
+        vaults
+            .iter()
+            .filter(|vault| vault.record().name == "personal")
+            .count(),
+        1
+    );
+    assert_eq!(
+        vaults
+            .iter()
+            .find(|vault| vault.record().name == "personal")
+            .unwrap()
+            .record()
+            .id,
+        again.vault
+    );
+    assert_eq!(f.auth.store.state.lock().await.principals.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_vault_binding_is_rejected_without_corrupting_saved_auth_state() -> Result<()> {
+    use exo_managed_agents::identity::IdentityCommand;
+    let mut f = Fixture::new(false).await?;
+    f.harness.create_vault("team").await?;
+    let mut config = f.auth.config.clone();
+    config.shared_vaults = vec!["team".into()];
+    f.restart(config.clone(), false).await?;
+    let identities = super::IdentityRegistry::authenticated(f.auth.clone(), f.harness.clone());
+    assert!(
+        identities
+            .execute(IdentityCommand::BindVault {
+                vault: "team".into(),
+                email: "alice@example.com".into(),
+            })
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("shared")
+    );
+    assert!(f.auth.store.state.lock().await.principals.is_empty());
+    f.restart(config, false).await?;
+    assert!(f.auth.store.state.lock().await.principals.is_empty());
+    Ok(())
+}
 impl Fixture {
     async fn new(multiplayer: bool) -> Result<Self> {
         let oidc = MockServer::start().await;
@@ -841,6 +983,9 @@ async fn caller_shutdown_keeps_thread_ownership_until_server_shutdown() -> Resul
         let state = state.clone();
         async move { state.release_local_sessions().await }
     });
+    let preview = server
+        .start_preview_server(&root, "localhost", None)
+        .await?;
     let caller = server.with_caller(f.auth.caller(principal, false))?;
     let agent =
         exoharness::test_support::new_test_agent(caller.exoharness_handle().as_ref(), "shutdown")
@@ -851,6 +996,12 @@ async fn caller_shutdown_keeps_thread_ownership_until_server_shutdown() -> Resul
         .await?;
     caller.shutdown().await?;
     assert!(thread.list_sandboxes().await?[0].running);
+    // Releasing one cached caller must leave the shared listener available.
+    f.browser
+        .get(format!("http://127.0.0.1:{}", preview.port))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await?;
 
     let contender = BasicExoHarness::new(config)
         .await?
@@ -1287,7 +1438,7 @@ async fn host_configuration_requires_the_operator() -> Result<()> {
     for extra in [
         "tools: [module.ts]",
         "tool_creation: true",
-        "adapters: [inbox]",
+        "adapters:\n  - type: slack\n    vault: support-slack",
     ] {
         let definition = exo_managed_agents::AgentDefinition::parse(format!(
             "---\nharness: basic\nmodel:\n  name: test\n{extra}\n---\nWork"

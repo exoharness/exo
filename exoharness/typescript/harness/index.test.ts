@@ -12,7 +12,6 @@ import {
   registerBuiltInTools,
   registerAgentTools,
   registerAgentToolsFromDirectoryIfExists,
-  registerAdapterTools,
   registerLibraryTools,
   registerLibraryToolModulePath,
   registerTools,
@@ -471,31 +470,6 @@ describe("shell built-in tool", () => {
     expect(registry.definitions()).toEqual(
       buildShellToolDefinitions(context.conversationConfig),
     );
-  });
-
-  it("registers and dispatches enable_adapter", async () => {
-    const requests: Array<{ functionName: string; arguments: JsonObject }> = [];
-    const context = fakeTurnContext({
-      executeTool: async (request) => {
-        requests.push(request);
-        return { ok: true };
-      },
-    });
-    const registry = createToolRegistry(context);
-    registerAdapterTools(registry, ["enable_adapter"]);
-
-    expect(registry.definitions().map((definition) => definition.name)).toEqual(
-      ["enable_adapter"],
-    );
-    await registry
-      .get("enable_adapter")
-      ?.handler.execute({ adapterId: "adapter-1" }, { context });
-    expect(requests).toEqual([
-      {
-        functionName: "enable_adapter",
-        arguments: { adapterId: "adapter-1" },
-      },
-    ]);
   });
 });
 
@@ -1470,6 +1444,9 @@ function fakeTurnContext(
       return [];
     },
     stream: {
+      async status(message: string) {
+        streamEvents.push({ type: "status_streamed", message });
+      },
       async firstChunk(ttftMs: number) {
         streamEvents.push({ type: "first_chunk_streamed", ttftMs });
       },

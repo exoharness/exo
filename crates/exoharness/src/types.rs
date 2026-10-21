@@ -45,6 +45,13 @@ impl ResourceScope {
 
 #[async_trait]
 pub trait ExoHarness: VaultContext {
+    /// Host-owned services may persist provider metadata outside agent artifacts.
+    /// Caller-scoped harnesses must not expose the provider's underlying storage.
+    #[cfg(feature = "store")]
+    fn provider_storage(&self) -> Result<Arc<dyn crate::Storage>> {
+        anyhow::bail!("this provider does not expose host storage")
+    }
+
     fn with_caller(&self, _caller: crate::access::Caller) -> Result<Arc<dyn ExoHarness>> {
         anyhow::bail!("this provider does not support caller-scoped execution")
     }
@@ -211,6 +218,29 @@ pub trait AgentHandle: SandboxHandle + VaultContext {
     async fn write_artifact(&self, request: WriteArtifactRequest) -> Result<ArtifactVersion>;
     async fn read_artifact(&self, request: ReadArtifactRequest) -> Result<Option<Artifact>>;
     async fn list_artifacts(&self) -> Result<Vec<ArtifactVersion>>;
+
+    /// Provider-specific checks for `exo agent doctor`, beyond the definition
+    /// and vault checks every provider gets.
+    async fn diagnose(&self) -> Result<Vec<DiagnosticCheck>> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticStatus {
+    Ok,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticCheck {
+    pub name: String,
+    pub status: DiagnosticStatus,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
 }
 
 #[async_trait]
@@ -798,6 +828,13 @@ pub struct SandboxRecord {
     pub tcp_ports: Vec<u16>,
     /// The harness's recorded running state, not a service health check.
     pub running: bool,
+    pub default_workdir: String,
+    pub file_system_mounts: Vec<FileSystemMount>,
+    pub durable_file_systems: Vec<DurableFileSystem>,
+    pub resources: Option<SandboxResourceShape>,
+    pub policy: EgressPolicy,
+    pub idle_seconds: u64,
+    pub attachment: Option<SandboxAttachment>,
 }
 
 pub(crate) fn canonical_egress_host(host: &str) -> Result<String> {

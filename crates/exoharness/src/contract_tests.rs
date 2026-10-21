@@ -47,6 +47,7 @@ pub async fn turn_admission_contract<Work: Clone + Send + Sync>(
         options: TurnOptions {
             idempotency_key: Some(key.into()),
             attention,
+            ..Default::default()
         },
     };
     let original = submission("alice", "request-1", TurnAttention::Wake);

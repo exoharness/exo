@@ -1,3 +1,4 @@
+use crate::resources::git_progress;
 use std::{
     collections::HashMap,
     ffi::OsStr,
@@ -262,12 +263,12 @@ impl ResourceStore {
                 ..
             } = &definition.source
             {
-                let variable = definition.git_credential_variable();
                 settings.extend([
                     (format!("credential.{url}.helper"), String::new()),
-                    (format!("credential.{url}.helper"), format!(
-                        "!f() {{ if [ \"$1\" = get ] && [ -n \"${{{variable}:-}}\" ]; then printf 'username=x-access-token\\npassword=%s\\n' \"${variable}\"; fi; }}; f"
-                    )),
+                    (
+                        format!("credential.{url}.helper"),
+                        definition.git_credential_helper(),
+                    ),
                     (format!("credential.{url}.useHttpPath"), "true".into()),
                 ]);
             }
@@ -406,61 +407,100 @@ impl ResourceStore {
         Ok(())
     }
 
-    fn resolve_checkout(
+    fn fetch_checkout(
         &self,
         workspace: &Path,
         checkout: Option<&str>,
         credential: Option<&GitCredential>,
     ) -> Result<(Option<String>, String)> {
-        let branch = match checkout {
-            Some(reference) => {
-                let remote_ref = format!("refs/remotes/origin/{reference}");
-                let branches = self.git(
-                    workspace,
-                    [
-                        "for-each-ref",
-                        "--format=%(refname)",
-                        "refs/remotes/origin/",
-                    ],
-                    None,
-                )?;
-                branches
-                    .lines()
-                    .any(|branch| branch == remote_ref)
-                    .then(|| reference.to_owned())
-            }
-            None => {
-                let refs = self.git(
-                    workspace,
-                    ["ls-remote", "--symref", "origin", "HEAD"],
-                    credential,
-                )?;
-                Some(
-                    refs.lines()
-                        .find_map(|line| {
-                            line.strip_prefix("ref: refs/heads/")?
-                                .strip_suffix("\tHEAD")
-                        })
-                        .context("Git remote has no default branch")?
-                        .to_owned(),
-                )
-            }
-        };
-        let reference = match (&branch, checkout) {
-            (Some(name), _) => format!("refs/remotes/origin/{name}"),
-            (_, Some(reference))
-                if matches!(reference.len(), 40 | 64)
-                    && reference.bytes().all(|c| c.is_ascii_hexdigit()) =>
+        let (branch, source, target) = match checkout {
+            Some(revision)
+                if matches!(revision.len(), 40 | 64)
+                    && revision.bytes().all(|c| c.is_ascii_hexdigit()) =>
             {
-                reference.to_owned()
+                (None, revision.to_owned(), "refs/exo/checkout".to_owned())
             }
-            (_, Some(tag)) => format!("refs/tags/{tag}"),
-            _ => unreachable!(),
+            reference => {
+                let refs = match reference {
+                    Some(name) => self.git(
+                        workspace,
+                        [
+                            "ls-remote",
+                            "origin",
+                            &format!("refs/heads/{name}"),
+                            &format!("refs/tags/{name}"),
+                        ],
+                        credential,
+                    )?,
+                    None => self.git(
+                        workspace,
+                        ["ls-remote", "--symref", "origin", "HEAD"],
+                        credential,
+                    )?,
+                };
+                let branch = match reference {
+                    Some(name) => refs
+                        .lines()
+                        .any(|line| line.ends_with(&format!("\trefs/heads/{name}")))
+                        .then(|| name.to_owned()),
+                    None => Some(
+                        refs.lines()
+                            .find_map(|line| {
+                                line.strip_prefix("ref: refs/heads/")?
+                                    .strip_suffix("\tHEAD")
+                            })
+                            .context("Git remote has no default branch")?
+                            .to_owned(),
+                    ),
+                };
+                let advertised = match reference {
+                    None => "HEAD".to_owned(),
+                    Some(name) if branch.is_some() => format!("refs/heads/{name}"),
+                    Some(name) => format!("refs/tags/{name}"),
+                };
+                let revision = refs
+                    .lines()
+                    .find_map(|line| {
+                        let (revision, name) = line.split_once('\t')?;
+                        (name == advertised && !revision.starts_with("ref: ")).then_some(revision)
+                    })
+                    .context("Git remote does not contain the requested checkout")?;
+                ensure!(
+                    matches!(revision.len(), 40 | 64)
+                        && revision.bytes().all(|c| c.is_ascii_hexdigit()),
+                    "invalid Git revision"
+                );
+                let target = match &branch {
+                    Some(name) => format!("refs/remotes/origin/{name}"),
+                    None => advertised,
+                };
+                (branch, revision.to_owned(), target)
+            }
         };
+        let refspec = format!("+{source}:{target}");
+        self.git(
+            workspace,
+            [
+                "fetch",
+                "--progress",
+                "--force",
+                "--depth=1",
+                "--no-tags",
+                "--no-recurse-submodules",
+                "origin",
+                &refspec,
+            ],
+            credential,
+        )?;
+        let fetch = match &branch {
+            Some(name) => format!("+refs/heads/{name}:{target}"),
+            None => refspec,
+        };
+        self.git(workspace, ["config", "remote.origin.fetch", &fetch], None)?;
         let revision = self
             .git(
                 workspace,
-                ["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+                ["rev-parse", "--verify", "FETCH_HEAD^{commit}"],
                 None,
             )?
             .trim()
@@ -487,6 +527,7 @@ impl ResourceStore {
             .trim_end_matches('/')
             .trim_end_matches(".git");
         let key = digest(&serde_json::to_vec(&(
+            "shallow-v1",
             url,
             checkout,
             credential.map(|c| &c.identity),
@@ -508,24 +549,8 @@ impl ResourceStore {
                 self.git(&workspace, ["remote", "add", "origin", url], None)?;
             }
             tracing::info!(target: "exoharness::progress", "Fetching Git resource {}", repository);
-            git_with_cancellation(
-                &workspace,
-                [
-                    "fetch",
-                    "--progress",
-                    "--prune",
-                    "--no-recurse-submodules",
-                    "origin",
-                    "+refs/heads/*:refs/remotes/origin/*",
-                    "+refs/tags/*:refs/tags/*",
-                ],
-                credential,
-                self.cancel.as_ref(),
-                Some(repository),
-            )?;
             let (branch, revision) =
-                self.resolve_checkout(&workspace, checkout.as_deref(), credential)?;
-            tracing::info!(target: "exoharness::progress", "Checking out Git resource {}", repository);
+                self.fetch_checkout(&workspace, checkout.as_deref(), credential)?;
             if let Some(name) = branch {
                 git_with_cancellation(
                     &workspace,
@@ -730,6 +755,7 @@ fn git_command(cwd: &Path, credential: Option<&GitCredential>) -> (Command, Opti
     command
         .env("LC_ALL", "C")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
         .env("GIT_HTTP_LOW_SPEED_TIME", "30")
@@ -741,6 +767,12 @@ fn git_command(cwd: &Path, credential: Option<&GitCredential>) -> (Command, Opti
             "core.fsmonitor=false",
             "-c",
             "http.followRedirects=false",
+            "-c",
+            "filter.lfs.required=false",
+            "-c",
+            "filter.lfs.smudge=",
+            "-c",
+            "filter.lfs.process=",
             "-c",
             "protocol.allow=never",
             "-c",
@@ -809,22 +841,6 @@ where
         bail!("preparing Git resource: {}", message.trim());
     }
     Ok(String::from_utf8(output.stdout)?)
-}
-
-fn git_progress(line: &[u8]) -> Option<(&'static str, u8)> {
-    let line = std::str::from_utf8(line).ok()?.trim();
-    let line = line.strip_prefix("remote: ").unwrap_or(line);
-    let (phase, progress) = line.split_once(':')?;
-    let phase = match phase {
-        "Counting objects" => "Counting objects for",
-        "Compressing objects" => "Compressing objects for",
-        "Receiving objects" => "Downloading",
-        "Resolving deltas" => "Resolving deltas for",
-        "Updating files" => "Checking out",
-        _ => return None,
-    };
-    let percent = progress.split_once('%')?.0.trim().parse::<u8>().ok()?;
-    (percent <= 100).then_some((phase, percent))
 }
 
 fn command_output(

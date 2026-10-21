@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "exo-managed-agents",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-04",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/codex-sandbox/version"],
+      "fallthrough": true,
+    },
+  ],
+  "containers": [
+    // For Codex, add its digest-specific image after copying the Exo image
+    // into your Cloudflare registry. See README.md#codex for the manual steps.
+    { "class_name": "ExoSandbox", "scheduling_policy": "durable_object" },
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "PROVIDERS", "class_name": "ExoProvider" },
+      { "name": "THREADS", "class_name": "ExoThread" },
+      { "name": "SANDBOXES", "class_name": "ExoSandbox" },
+    ],
+  },
+  "exports": {
+    "ExoProvider": { "type": "durable-object", "storage": "sqlite" },
+    "ExoThread": { "type": "durable-object", "storage": "sqlite" },
+    "ExoSandbox": { "type": "durable-object", "storage": "sqlite" },
+  },
+  "r2_buckets": [
+    { "binding": "ARTIFACTS", "bucket_name": "exo-managed-agents" },
+  ],
+  "vars": { "ACCOUNT_ID": "default" },
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
+}

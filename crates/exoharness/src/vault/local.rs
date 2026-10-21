@@ -4,7 +4,6 @@ mod hosted;
 mod legacy;
 #[cfg(feature = "basic-backend")]
 mod native;
-#[cfg(feature = "basic-backend")]
 mod oauth;
 #[cfg(all(test, feature = "basic-backend"))]
 mod tests;
@@ -27,6 +26,8 @@ pub(crate) struct BasicVaultStore {
 struct Inner {
     storage: Storage,
     cipher: SecretCipher,
+    #[cfg(not(feature = "basic-backend"))]
+    hosted: hosted::RefreshState,
     #[cfg(feature = "basic-backend")]
     native: native::RefreshState,
 }
@@ -62,7 +63,12 @@ struct StoredSecret<M = SecretMetadata> {
 
 impl BasicVaultStore {
     #[cfg(not(feature = "basic-backend"))]
-    pub(crate) fn hosted(store: crate::storage::BasicObjectStore, cipher: SecretCipher) -> Self {
+    pub(crate) fn hosted(
+        store: crate::storage::BasicObjectStore,
+        cipher: SecretCipher,
+        host: Arc<dyn crate::runtime_host::RuntimeHost>,
+        http: Option<Arc<dyn OAuthHttpClient>>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 storage: Storage::Host {
@@ -70,6 +76,7 @@ impl BasicVaultStore {
                     lock: tokio::sync::Mutex::new(()),
                 },
                 cipher,
+                hosted: hosted::RefreshState::new(host, http),
             }),
         }
     }
@@ -469,5 +476,116 @@ impl BasicVaultHandle {
                 })
             })
             .await
+    }
+}
+
+impl BasicVaultHandle {
+    async fn persist_refreshed(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+        resolved: ResolvedSecret,
+        secret: Secret,
+    ) -> Result<ResolvedSecret> {
+        let resolved = if secret == resolved.secret {
+            let current = self.read_for_destination(id, target).await?;
+            if current.revision != resolved.revision {
+                return Ok(current);
+            }
+            current
+        } else {
+            let vault_id = self.record.id;
+            let id = *id;
+            self.store
+                .access(true, move |catalog, cipher| {
+                    let stored = vault(catalog, vault_id)?
+                        .secrets
+                        .iter_mut()
+                        .find(|s| s.metadata.id == id)
+                        .context("secret is unavailable")?;
+                    if stored.metadata.revision != resolved.revision {
+                        bail!("credential changed during refresh; retry the operation");
+                    }
+                    let mut metadata = stored.metadata.clone();
+                    metadata.revision = metadata
+                        .revision
+                        .checked_add(1)
+                        .context("secret revision overflow")?;
+                    let encrypted = encrypt(cipher, vault_id, &metadata, &secret)?;
+                    stored.metadata = metadata;
+                    stored.secret = encrypted;
+                    Ok(ResolvedSecret {
+                        revision: stored.metadata.revision,
+                        secret,
+                    })
+                })
+                .await?
+        };
+        Ok(resolved)
+    }
+}
+
+// Both hosts finish and persist a token rotation after its requester disconnects.
+// Only scheduling, refresh locking, and native GitHub CLI access differ.
+impl BasicVaultHandle {
+    pub(super) async fn resolve_credentials(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+    ) -> Result<ResolvedSecret> {
+        let resolved = self.read_for_destination(id, target).await?;
+        if !self.platform_needs_refresh(id, &resolved)? {
+            return Ok(resolved);
+        }
+        self.refresh_task(id, target, resolved.revision, false)
+            .await
+    }
+    pub(super) async fn refresh_task(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+        revision: u64,
+        force: bool,
+    ) -> Result<ResolvedSecret> {
+        let vault = self.clone();
+        let id = *id;
+        let target = target.clone();
+        let (done, completion) = futures::channel::oneshot::channel();
+        self.refresh_host()?.spawn(Box::pin(async move {
+            let result = vault.refresh(&id, &target, revision, force).await;
+            if done.send(result).is_err() {
+                tracing::debug!("OAuth caller stopped before refresh finished");
+            }
+        }));
+        completion
+            .await
+            .context("host stopped before credential refresh finished")?
+    }
+    async fn refresh(
+        &self,
+        id: &SecretId,
+        target: &CredentialDestination,
+        revision: u64,
+        force: bool,
+    ) -> Result<ResolvedSecret> {
+        let _guard = self.refresh_guard(id).await?;
+        let resolved = self.read_for_destination(id, target).await?;
+        if resolved.revision != revision
+            || (!force && !self.platform_needs_refresh(id, &resolved)?)
+        {
+            return Ok(resolved);
+        }
+        let secret = match &resolved.secret {
+            #[cfg(feature = "basic-backend")]
+            Secret::GithubCli { account, .. } => Secret::GithubCli {
+                value: github_cli_token(account).await?,
+                account: account.clone(),
+            },
+            _ => oauth::refresh(resolved.secret.clone(), self.refresh_http()?).await?,
+        };
+        let resolved = self.persist_refreshed(id, target, resolved, secret).await?;
+        #[cfg(feature = "basic-backend")]
+        self.record_refresh(id, &resolved)?;
+        Ok(resolved)
     }
 }

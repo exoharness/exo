@@ -28,6 +28,9 @@ pub struct TurnOptions {
     pub idempotency_key: Option<String>,
     #[serde(default)]
     pub attention: TurnAttention,
+    /// Retain receipts without the usual 24-hour expiry for durable controller-owned work.
+    #[serde(default)]
+    pub retain_receipt: bool,
 }
 
 /// Caller-supplied work. Execution and control state belong to the coordinator.

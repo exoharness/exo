@@ -1,4 +1,7 @@
+#[cfg(feature = "native")]
+pub mod adapters;
 pub(crate) mod config;
+pub mod http;
 pub mod service;
 #[cfg(feature = "native")]
 pub use crate::native::config::agent_config;
@@ -178,13 +181,9 @@ impl AgentBackend for LocalProvider {
             config.sandbox_scope = Some(crate::SandboxScope::Conversation);
         }
         if !config.resources.is_empty() {
-            anyhow::ensure!(
-                matches!(
-                    config.effective_sandbox_provider(&agent_config).as_str(),
-                    "apple_container" | "docker" | "local_process" | "firecracker" | "smolvm"
-                ),
-                "filesystem resources require Apple Container, Docker, Firecracker, SmolVM or local-process sandboxes"
-            );
+            if !config.uses_host_resource_mounts(&agent_config) {
+                exoharness::resources::validate_sandbox_resources(&config.resources)?;
+            }
             for resource in &config.resources {
                 for mount_path in config
                     .mounts
@@ -215,7 +214,7 @@ impl AgentBackend for LocalProvider {
             )
             .await?;
         }
-        if !config.resources.is_empty() {
+        if !config.resources.is_empty() && config.uses_host_resource_mounts(&agent_config) {
             let thread = agent
                 .get_thread(&thread.record().id)
                 .await?

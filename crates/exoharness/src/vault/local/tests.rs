@@ -684,7 +684,7 @@ printf 'read\n' >> "$root/calls"
     assert_eq!(calls()?, 1);
     std::fs::write(directory.join("token"), "rotated")?;
     // A fresh cache hit must not wait on the store-wide refresh lock.
-    let guard = vault.refresh_guard().await?;
+    let guard = vault.refresh_guard(&id).await?;
     let cached =
         tokio::time::timeout(Duration::from_secs(1), vault.resolve_secret(&id, &target)).await??;
     drop(guard);

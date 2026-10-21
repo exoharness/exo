@@ -1,8 +1,8 @@
 use super::transport::dns_response;
 use super::*;
-use crate::EgressCredentialBinding;
 use crate::egress_credentials::PLACEHOLDER_PREFIX;
 use crate::{CredentialInjectionLocation, CredentialNetworkPolicy};
+use crate::{EgressCredentialBinding, SandboxNetworkPolicy};
 use anyhow::bail;
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::RecordType;
@@ -486,6 +486,39 @@ fn client(proxy: &EgressProxy) -> Result<reqwest::Client> {
 }
 
 #[tokio::test]
+async fn proxy_enforces_request_body_limit() -> Result<()> {
+    let limit = std::env::var("EXO_EGRESS_MAX_REQUEST_BODY_BYTES")
+        .map_or(Ok(128_usize * 1024 * 1024), |value| value.parse())?;
+    let upstream = Upstream::start().await?;
+    let resolver = TestResolver::new();
+    *resolver.value.write().await = Some("canary-v2".into());
+    let (proxy, client) = bound_proxy(&upstream, "large-upload", resolver).await?;
+    for (size, expected) in [
+        (limit, StatusCode::OK),
+        (limit + 1, StatusCode::BAD_GATEWAY),
+    ] {
+        let chunk = Bytes::from(vec![b'x'; 1024 * 1024]);
+        let chunks = futures::stream::iter((0..size.div_ceil(chunk.len())).map(move |index| {
+            Ok::<_, std::io::Error>(chunk.slice(..(size - index * chunk.len()).min(chunk.len())))
+        }));
+        let response = client
+            .post("https://api.test/refresh")
+            .bearer_auth(&proxy.environment()["TEST_API_KEY"])
+            .body(reqwest::Body::wrap_stream(chunks))
+            .send()
+            .await?;
+        assert_eq!(response.status(), expected);
+        let body = response.bytes().await?;
+        if expected == StatusCode::OK {
+            assert_eq!(body.len(), size);
+            assert!(body.iter().all(|byte| *byte == b'x'));
+        }
+    }
+    proxy.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn proxy_requires_a_bound_source_and_closes_on_shutdown() -> Result<()> {
     let upstream = Upstream::start().await?;
     let resolver = TestResolver::new();
@@ -964,7 +997,7 @@ fn credential_networking_is_independent_of_environment_networking() -> Result<()
         Some(TestResolver::new()),
         Arc::new(PublicUpstreamResolver),
     )?;
-    assert!(state.unrestricted);
+    assert!(state.network.unrestricted());
     assert!(state.hosts.contains("api.test"));
     assert!(!state.hosts.contains("public.test"));
     assert!(!state.bindings[0].permits_header(&EgressDestination {

@@ -465,6 +465,9 @@ async fn send_stream_emits_chunks_and_persists_final_response() {
     let mut chunk_text = String::new();
     while let Some(event) = stream.next().await {
         match event.expect("stream event should succeed") {
+            ExecutionStreamEvent::Status { .. }
+            | ExecutionStreamEvent::Messages { .. }
+            | ExecutionStreamEvent::Checkpoint { .. } => {}
             ExecutionStreamEvent::Suspended(_) => panic!("unexpected turn suspension"),
             ExecutionStreamEvent::FirstChunk { .. } => {}
             ExecutionStreamEvent::Chunk(chunk) => {

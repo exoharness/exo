@@ -1,39 +1,18 @@
 use crate::execution_tracing::TurnExecutionTrace;
 use crate::harness_executor::{ExecutorStreamMode, HarnessExecutor};
+use crate::managed_mcp::{PreparedMcp, connect_mcp};
 use crate::native::config;
-use crate::native::managed_mcp::{PreparedMcp, connect_mcp};
 use crate::{
     AgentConfig, AgentHarnessKind, BasicExecutor, BasicToolRuntime, ConversationConfig,
-    ExoToolRuntime, McpToolRuntime, RouterModelClient, SendRequest, TypeScriptHarnessConfig,
+    ExoToolRuntime, McpToolRuntime, RouterModelClient, SendRequest,
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use exoharness::{
     AgentHandle, BasicExoHarnessConfig, ExoHarness, ThreadHandle, ThreadId, TurnHandle,
 };
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::OnceCell;
-
-type ThreadExecutors = HashMap<ThreadId, Arc<OnceCell<ThreadExecutor>>>;
-
-fn remove_idle_executor(
-    threads: &mut ThreadExecutors,
-    thread: ThreadId,
-) -> Result<Option<Arc<OnceCell<ThreadExecutor>>>> {
-    if let Some(cell) = threads.get(&thread) {
-        // Calls retain the cell through their awaits. Check ownership while
-        // holding the cache lock so acquisition cannot race removal.
-        ensure!(
-            Arc::strong_count(cell) == 1,
-            "thread is busy; wait for its current turn or setup to finish before reconfiguring it"
-        );
-    }
-    Ok(threads.remove(&thread))
-}
 
 pub(crate) struct ManagedExecutor {
     state: Arc<dyn ExoHarness>,
@@ -41,17 +20,16 @@ pub(crate) struct ManagedExecutor {
     env: HashMap<String, String>,
     pricing: Arc<cost::PricingTable>,
     workspace: PathBuf,
-    threads: Mutex<ThreadExecutors>,
+    threads: crate::executor_cache::ExecutorCache<ThreadExecutor>,
 }
 
 struct ThreadExecutor {
     executor: Arc<dyn HarnessExecutor>,
     mcp: PreparedMcp,
-    harness: AgentHarnessKind,
-    typescript: Option<TypeScriptHarnessConfig>,
 }
 
-impl ThreadExecutor {
+#[async_trait]
+impl crate::executor_cache::CachedExecutor for ThreadExecutor {
     async fn shutdown(&self) -> Result<()> {
         let stopped = self.executor.shutdown().await;
         let closed = self.mcp.tools.close().await;
@@ -73,7 +51,7 @@ impl ManagedExecutor {
             env,
             pricing,
             workspace: config::installation()?,
-            threads: Mutex::default(),
+            threads: Default::default(),
         })
     }
 
@@ -83,18 +61,13 @@ impl ManagedExecutor {
         thread: &dyn ThreadHandle,
         config: &AgentConfig,
         thread_config: &ConversationConfig,
-    ) -> Result<Arc<OnceCell<ThreadExecutor>>> {
-        loop {
-            let cell = self
-                .threads
-                .lock()
-                .expect("managed executors poisoned")
-                .entry(thread.record().id)
-                .or_default()
-                .clone();
-            cell.get_or_try_init(|| async {
-                let mcp = connect_mcp(agent, thread, &self.config).await?;
-                mcp.configure_thread(config, thread, thread_config).await?;
+    ) -> Result<Arc<OnceCell<crate::executor_cache::Entry<ThreadExecutor>>>> {
+        let cell = self
+            .threads
+            .get_or_try_init(thread.record().id, config, || async {
+                let mcp = connect_mcp(agent, thread, &exo_mcp::NativeMcpConnector).await?;
+                validate_thread(&mcp, &self.config, config, thread_config)?;
+                mcp.configure_thread(thread).await?;
                 let tools = Arc::new(McpToolRuntime::new(BasicToolRuntime, mcp.tools.clone()));
                 let model = Arc::new(RouterModelClient::new(self.env.clone()));
                 let executor: Arc<dyn HarnessExecutor> = match config.harness {
@@ -127,48 +100,20 @@ impl ManagedExecutor {
                         ))
                     }
                 };
-                Ok::<_, anyhow::Error>(ThreadExecutor {
-                    executor,
-                    mcp,
-                    harness: config.harness,
-                    typescript: config.typescript.clone(),
-                })
+                Ok::<_, anyhow::Error>(ThreadExecutor { executor, mcp })
             })
             .await?;
-            let prepared = cell.get().context("managed executor was not initialized")?;
-            if prepared.harness != config.harness || prepared.typescript != config.typescript {
-                drop(cell);
-                self.reset_thread(thread.record().id).await?;
-                continue;
-            }
-            let definition = exo_managed_agents::load_definition(agent).await?;
-            let servers = match definition {
-                Some(definition) => definition.resolve_mcp_servers(&()).await?,
-                None => vec![],
-            };
-            ensure!(
-                prepared.mcp.servers == servers,
-                "MCP configuration changed; start a new thread"
-            );
-            prepared.mcp.validate_thread(config, thread_config)?;
-            return Ok(cell);
-        }
+        let prepared = cell.get().context("managed executor was not initialized")?;
+        prepared.mcp.validate_configuration(agent).await?;
+        validate_thread(&prepared.mcp, &self.config, config, thread_config)?;
+        Ok(cell)
     }
 }
 
 #[async_trait]
 impl HarnessExecutor for ManagedExecutor {
     async fn reset_thread(&self, thread: ThreadId) -> Result<()> {
-        let executor = remove_idle_executor(
-            &mut self.threads.lock().expect("managed executors poisoned"),
-            thread,
-        )?;
-        if let Some(cell) = executor
-            && let Some(prepared) = cell.get()
-        {
-            prepared.shutdown().await?;
-        }
-        Ok(())
+        self.threads.reset(thread).await
     }
 
     fn with_state(&self, state: Arc<dyn ExoHarness>) -> Result<Arc<dyn HarnessExecutor>> {
@@ -317,12 +262,7 @@ impl HarnessExecutor for ManagedExecutor {
     }
 
     async fn cancel_turn(&self, thread: &dyn ThreadHandle, config: &AgentConfig) -> Result<()> {
-        let cell = self
-            .threads
-            .lock()
-            .expect("managed executors poisoned")
-            .get(&thread.record().id)
-            .cloned();
+        let cell = self.threads.get(thread.record().id);
         if let Some(cell) = cell
             && let Some(prepared) = cell.get()
         {
@@ -332,36 +272,35 @@ impl HarnessExecutor for ManagedExecutor {
     }
 
     async fn shutdown(&self) -> Result<()> {
-        let threads =
-            std::mem::take(&mut *self.threads.lock().expect("managed executors poisoned"));
-        let results = futures::future::join_all(threads.into_values().map(|cell| async move {
-            if let Some(prepared) = cell.get() {
-                prepared.shutdown().await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        }))
-        .await;
-        for result in results {
-            result?;
-        }
-        Ok(())
+        self.threads.shutdown().await
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resetting_a_busy_thread_preserves_its_executor() -> Result<()> {
-        let thread = exoharness::Uuid7::now();
-        let mut threads = ThreadExecutors::from([(thread, Arc::new(OnceCell::new()))]);
-        let active = threads[&thread].clone();
-        assert!(remove_idle_executor(&mut threads, thread).is_err());
-        assert!(Arc::ptr_eq(&active, &threads[&thread]));
-        drop(active);
-        assert!(remove_idle_executor(&mut threads, thread)?.is_some());
-        assert!(threads.is_empty());
-        Ok(())
+fn validate_thread(
+    mcp: &crate::managed_mcp::PreparedMcp,
+    store: &exoharness::BasicExoHarnessConfig,
+    agent_config: &AgentConfig,
+    config: &ConversationConfig,
+) -> Result<()> {
+    let provider = config
+        .sandbox_provider
+        .as_ref()
+        .unwrap_or(&agent_config.sandbox.provider);
+    if *provider != exoharness::SandboxProvider::LocalProcess {
+        for mount in agent_config
+            .sandbox
+            .mounts
+            .iter()
+            .chain(config.mounts.iter())
+        {
+            store.validate_secret_mount(std::path::Path::new(&mount.host_path))?;
+        }
+    } else if let Some(selection) = &mcp.selection
+        && (selection.vaults.len() > 1 || selection.bindings.iter().any(|b| b.secret.is_some()))
+    {
+        anyhow::bail!(
+            "vault-backed chat requires an isolated sandbox; local-process can read host credentials"
+        );
     }
+    Ok(())
 }

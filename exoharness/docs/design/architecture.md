@@ -3,22 +3,20 @@
 This document describes the full Exoharness API from the perspective of the
 subcomponents that use it. It covers the core Rust object model, the JSONL
 protocol used to expose that model across process boundaries, the TypeScript
-harness API, and the way higher-level systems such as the executor, scheduler,
-adapters, CLI, and Exo compose those pieces.
+harness API, and the way the executor, managed adapters, and CLI compose those pieces.
 
 ## Mental Model
 
 Exoharness is the durable runtime substrate for agents. It owns agents,
 conversations, sessions, turns, events, artifacts, sandboxes, bindings, and
 secrets. The executor layer sits on top and decides how a turn is run: a basic
-LLM loop, an RLM loop, or a TypeScript harness. Product-specific systems such as
-Exo then add tools, prompts, schedulers, and adapters on top of that
-executor layer.
+LLM loop, an RLM loop, or a TypeScript harness. Managed agent definitions select instructions, tools, resources, and harness
+defaults; adapters submit inputs and deliver the resulting execution stream.
 
 The main boundary looks like this:
 
 ```text
-CLI / Exo scripts / scheduler / adapter runner
+CLI / HTTP API / managed adapters
   -> executor Harness facade
     -> exoharness object model
     -> executor turn runtime
@@ -69,7 +67,6 @@ and artifacts so the event log preserves turn ownership.
   authors.
 - `exoharness/typescript/harness/runner.ts`: TypeScript guest process that converts the
   public TypeScript API into host protocol messages.
-- `exo/harness.ts`: Exo's TypeScript harness module.
 
 ## Core Rust API
 
@@ -250,7 +247,7 @@ existing session, including one opened with `start_session()`. If input messages
 are included, they are appended as a `messages` event in the same turn.
 
 The executor-level `send()` API starts a turn, executes the configured harness,
-and finishes the turn. External systems such as adapters and scheduler wakeups
+and finishes the turn. External systems such as adapters
 usually call `send()` with a fresh session and then close the session after the
 wakeup completes.
 
@@ -302,9 +299,6 @@ and wait handles.
 The executor adds policy on top:
 
 - `ensure_conversation_sandbox()` creates or reuses the conversation sandbox.
-- `ensure_agent_sandbox()` lets Exo share one persistent sandbox across an
-  agent by using agent-level sandbox metadata.
-- The scheduler supports `agent`, `conversation`, and `task_fresh` modes.
 
 From TypeScript, `context.startSandboxProcess({ command, env })` starts a
 sandbox process and returns a `SandboxProcess` with `ReadableStream<string>`
@@ -596,7 +590,7 @@ the basic TypeScript harness use shared turn-loop helpers to:
 
 1. Materialize prompt messages from configured instructions and conversation
    events.
-2. Register built-in, library, adapter, scheduler, and agent-created tools.
+2. Register built-in, library, and agent-created tools.
 3. Call the model.
 4. Project model text and tool calls into Exoharness events.
 5. Execute tools and continue until the model finishes or the configured tool
@@ -605,96 +599,28 @@ the basic TypeScript harness use shared turn-loop helpers to:
 The Rust model runtime uses Lingua's universal message and tool abstractions and
 routes requests through `braintrust_llm_router`.
 
-## Exo Integration
+## Self-improving agent example
 
-`exo/harness.ts` is a TypeScript harness module. It composes the
-generic TypeScript harness API with Exo-specific instructions and tools.
+The [self-improving agent](../../../examples/self-improving-agent/README.md)
+composes the TypeScript turn loop with its own tools, prompts, scheduler, and
+guardian scripts. It currently uses the native executor's `ExoToolRuntime` and
+scheduler support. Its implementation lives under `examples/self-improving-agent/`.
 
-On each turn it:
+## Managed Adapters
 
-1. Calls `runResponsesHarnessTurn()`.
-2. Adds generic basic harness instructions.
-3. Adds `exo/prompts/me.md`.
-4. Adds an optional local profile prompt from `.exo/exo-profile.md` or
-   `EXO_LOCAL_PROMPT_FILE`.
-5. Registers built-in tools.
-6. Registers scheduler tools.
-7. Registers adapter tools.
-8. Registers configured library tool modules.
-9. Registers agent-created tools if enabled.
-
-Exo-specific tools are still executed by the Rust tool runtime. The
-TypeScript side mostly provides model-visible schemas and forwards scoped
-arguments such as current agent id and conversation id.
-
-## Scheduler Integration
-
-The scheduler is not part of the core Exoharness crate. It is an executor-level
-service that uses Exoharness primitives.
-
-The scheduler tool API is model-facing TypeScript:
-
-- `schedule_sandbox_task`
-- `list_scheduled_tasks`
-- `cancel_scheduled_task`
-- `delete_scheduled_task`
-
-Those tool handlers call `context.executeTool()` with current agent and
-conversation ids. The Rust `ExoToolRuntime` persists scheduled task records
-outside the core conversation event log.
-
-When a task is due, the scheduler runtime:
-
-1. Resolves the agent through the `Harness` facade.
-2. Resolves the conversation through the `HarnessAgent`.
-3. Loads agent and conversation config.
-4. Resolves a sandbox according to task mode.
-5. Runs setup and command processes through `ConversationHandle::run_in_sandbox`.
-6. Writes a run artifact through `ConversationHandle::write_artifact`.
-7. Wakes the conversation with a prompt describing the result.
-
-The wakeup uses `HarnessConversation::send()`, so the task result becomes a
-normal agent turn. A per-conversation wakeup lock serializes these external
-wakeups so two scheduler/adapter triggers do not run the same conversation at
-once.
-
-## Adapter Integration
-
-Adapters are also executor-level services, not core Exoharness concepts. They
-bridge external networks such as IRC, WhatsApp, and Signal into conversations.
-
-Adapter runtime flow:
-
-1. The adapter runner loads enabled adapter records from `AdapterStore`.
-2. It resolves the configured agent and conversation through the `Harness`
-   facade.
-3. It starts the adapter worker process.
-4. Worker inbound messages are recorded in the adapter store.
-5. Matching inbound messages wake the conversation with a user prompt.
-6. The agent can intentionally respond by calling `send_adapter_message`.
-7. Outbound messages are queued in `AdapterStore`.
-8. The worker loop drains outbound messages and sends them externally.
-
-Inbound and outbound adapter state is intentionally stored in `AdapterStore`
-rather than as conversation artifacts. Adapter events can arrive while an agent
-turn is running, and storing them outside the conversation log avoids unrelated
-history churn.
-
-Like the scheduler, adapter wakeups use the per-conversation wakeup lock before
-calling `HarnessConversation::send()`.
+Managed adapters live in `crates/executor/src/managed_agents/adapters/`. Slack
+supports Socket Mode and HTTP callbacks. The adapter maps a Slack conversation to
+an Exo thread, submits each input to the normal turn queue, and renders its execution
+stream. Durable inbox, outbox, and approval records preserve admission and delivery
+across restarts. See [Managed adapters](../../../docs/managed-adapters.md) for
+identity, admission, recovery, and delivery details.
 
 ## CLI Integration
 
-The CLI mostly talks to the executor `Harness` facade. It uses the facade to
-create agents, configure agent harness kind, create conversations, send turns,
-stream turns, inspect events/messages, and manage bindings/secrets. It should
-not need to know whether the underlying storage is `BasicExoHarness` or another
-future implementation.
-
-Exo-specific startup logic lives under `exo`. The root CLI
-still provides generic agent and conversation operations; Exo scripts and
-runner binaries compose those generic operations with Exo scheduler and
-adapter services.
+The CLI talks to the executor runtime to create agents, open threads, submit and
+stream turns, inspect events, and manage environments and vaults. `exo run AGENT`
+opens a chat; `exo run AGENT --serve` serves that agent's API and adapters, while
+`exo run --serve` serves the provider's agents.
 
 ## Storage Implementation
 
@@ -726,7 +652,7 @@ Use these rules when adding new subcomponents:
   `send()` API rather than appending assistant messages directly.
 - If multiple external sources can wake the same conversation, serialize those
   wakeups.
-- Do not write conversation artifacts from adapter or scheduler plumbing while a
+- Do not write conversation artifacts from adapter plumbing while a
   wakeup turn is active.
 - Keep durable subsystem queues in their subsystem stores when the data is not
   part of the agent-visible conversation history.
@@ -740,10 +666,8 @@ or expose consistently, such as conversations, events, artifacts, and sandboxes.
 Prefer executor- or product-level extensions when the feature is specific to a
 runtime or application:
 
-- Scheduler tasks live in executor/Exo code because they are a particular
-  use of sandboxes and wakeups.
-- Adapters live in executor/Exo code because IRC, WhatsApp, and Signal are
-  external integration services.
+- Managed adapters live in executor code because they connect external
+  applications to the runtime's turn and delivery lifecycle.
 - Tool definitions live in TypeScript and executor tool runtimes because they
   are model-facing behavior, not storage primitives.
 
@@ -811,30 +735,16 @@ harness module
     -> TypeScript SandboxProcess exposes streams and wait()
 ```
 
-### Scheduled Task Wakes A Conversation
+### Adapter Message Starts A Turn
 
 ```text
-scheduler runner
-  -> run_due_tasks()
-    -> resolve HarnessAgent and HarnessConversation
-    -> run command in sandbox through ConversationHandle
-    -> write result artifact through ConversationHandle
-    -> send_conversation_wakeup()
-      -> per-conversation lock
-      -> HarnessConversation::send()
-      -> HarnessConversation::close_session()
-```
-
-### Adapter Message Wakes A Conversation
-
-```text
-adapter worker
-  -> WorkerEvent::Message
-    -> AdapterStore records inbound event
-    -> send_conversation_wakeup()
-      -> per-conversation lock
-      -> HarnessConversation::send()
-      -> HarnessConversation::close_session()
+Slack Socket Mode / HTTP callback
+  -> admission and durable inbox receipt
+    -> resolve the conversation's Exo thread and sender's execution context
+      -> Runtime::start_turn()
+        -> normal per-thread turn queue and selected harness
+      -> render the execution stream into the durable outbox
+        -> deliver progress, approvals, and the final answer to Slack
 ```
 
 ## Current Caveats

@@ -99,7 +99,7 @@ allows you to create per-user vaults and attach them to arbitrary threads, where
 ## Earlier Exo
 
 The [archive](https://exoharness.ai/docs/archive/) covers previous iterations of Exo, which included a separate harness built on top of Exo
-as an [experiment in self-evolution](https://github.com/exoharness/exo/tree/main/exo).
+as an [experiment in self-evolution](https://github.com/exoharness/exo/tree/main/examples/self-improving-agent).
 
 ## License
 

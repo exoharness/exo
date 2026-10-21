@@ -138,8 +138,13 @@ impl Fixture {
             &url,
             "--no-browser",
         ];
+        self.login_with_args(&args, denied).await
+    }
+
+    async fn login_with_args(&self, args: &[&str], denied: bool) -> Result<()> {
+        let url = format!("{}/mcp/", self.server.uri());
         let mut child = self
-            .command(&args)
+            .command(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
@@ -265,6 +270,175 @@ fn token(access: &str, refresh: Option<&str>) -> ResponseTemplate {
 }
 
 #[tokio::test]
+async fn from_agent_logs_in_only_missing_private_servers_and_limits_the_grant() -> Result<()> {
+    let f = Fixture::new().await?;
+    let base = f.server.uri();
+    let public = MockServer::start().await;
+    let public_base = public.uri();
+    let covered = CredentialDestination::url(&format!("{base}/covered"))?;
+    let existing = f
+        .vault
+        .put_secret(PutSecretRequest {
+            name: "existing-login".into(),
+            policy: Some(covered.into()),
+            secret: Secret::Key {
+                value: "existing-token".into(),
+            },
+        })
+        .await?;
+    Mock::given(path("/public")).and(method("POST")).respond_with(|request: &wiremock::Request| {
+        #[derive(Deserialize)]
+        struct Rpc { id: Option<u64>, method: String }
+        let rpc: Rpc = request.body_json().unwrap();
+        if rpc.method == "notifications/initialized" {
+            return ResponseTemplate::new(202);
+        }
+        assert_eq!(rpc.method, "initialize");
+        ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": rpc.id, "result": {
+            "protocolVersion": "2025-11-25", "capabilities": {}, "serverInfo": {"name": "public", "version": "1"}
+        }}))
+    }).mount(&public).await;
+    let file = f.temp.path().join("my agent.md");
+    std::fs::write(
+        &file,
+        format!(
+            "---\nharness: basic\nmodel: {{name: test}}\nmcp_servers:\n  - {{type: url, name: public, url: {public_base}/public}}\n  - {{type: url, name: covered, url: {base}/covered}}\n  - {{type: url, name: notion, url: {base}/mcp/}}\n---\nInvestigate tickets.\n"
+        ),
+    )?;
+    let args = [
+        "vault",
+        "secret",
+        "create",
+        "--from-agent",
+        file.to_str().unwrap(),
+        "--no-browser",
+        "--scope",
+        "workspace:read",
+    ];
+    f.login_with_args(&args, false).await?;
+    let records = f.vault.list_secrets().await?;
+    assert_eq!(records.len(), 2);
+    let notion = records
+        .iter()
+        .find(|record| record.name == "notion")
+        .unwrap();
+    assert_eq!(notion.policy, Some(f.target()?.into()));
+    assert_eq!(
+        records
+            .iter()
+            .find(|record| record.id == existing)
+            .unwrap()
+            .revision,
+        1
+    );
+    assert!(matches!(
+        f.vault.get_secret(&notion.id).await?,
+        Some(Secret::Oauth { .. })
+    ));
+    let repeated = f.cli(&args).await?;
+    assert!(repeated.contains("public: no login required"), "{repeated}");
+    assert!(
+        repeated.contains("covered: credential already available"),
+        "{repeated}"
+    );
+    assert!(
+        repeated.contains("notion: credential already available"),
+        "{repeated}"
+    );
+    assert_eq!(f.vault.list_secrets().await?, records);
+    Ok(())
+}
+
+#[tokio::test]
+async fn from_agent_cannot_import_one_token_for_multiple_servers_or_replace_an_unrelated_secret()
+-> Result<()> {
+    let f = Fixture::new().await?;
+    let base = f.server.uri();
+    let file = f.temp.path().join("agent.md");
+    std::fs::write(
+        &file,
+        format!(
+            "---\nharness: basic\nmodel: {{name: test}}\nmcp_servers:\n  - {{type: url, name: notion, url: {base}/mcp/}}\n  - {{type: url, name: other, url: {base}/other}}\n---\nInvestigate tickets.\n"
+        ),
+    )?;
+    let args = [
+        "vault",
+        "secret",
+        "create",
+        "--from-agent",
+        file.to_str().unwrap(),
+        "--token-env",
+        "TEST_TOKEN",
+    ];
+    let output = f
+        .command(&args)
+        .env("TEST_TOKEN", "private-token")
+        .output()
+        .await?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("--token-env requires one MCP server"));
+    assert!(f.vault.list_secrets().await?.is_empty());
+    let selected = [
+        "vault",
+        "secret",
+        "create",
+        "global",
+        "notion",
+        "--from-agent",
+        file.to_str().unwrap(),
+        "--token-env",
+        "TEST_TOKEN",
+    ];
+    let output = f
+        .command(&selected)
+        .env("TEST_TOKEN", "private-token")
+        .output()
+        .await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let id = f.secret_id().await?;
+    assert_eq!(
+        f.vault.list_secrets().await?[0].policy,
+        Some(f.target()?.into())
+    );
+    assert_eq!(
+        f.vault.get_secret(&id).await?,
+        Some(Secret::Key {
+            value: "private-token".into()
+        })
+    );
+    let unrelated_policy = CredentialDestination::url(&format!("{base}/other"))?;
+    f.vault
+        .update_secret(
+            &id,
+            exoharness::UpdateSecretRequest {
+                secret: None,
+                policy: Some(unrelated_policy.into()),
+            },
+        )
+        .await?;
+    let before = f.vault.list_secrets().await?;
+    let output = f
+        .command(&selected)
+        .env("TEST_TOKEN", "replacement-token")
+        .output()
+        .await?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("already exists"));
+    assert_eq!(f.vault.list_secrets().await?, before);
+    assert_eq!(
+        f.vault.get_secret(&id).await?,
+        Some(Secret::Key {
+            value: "private-token".into()
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn vault_cli_oauth_survives_restart_refreshes_live_mcp_and_revokes() -> Result<()> {
     let f = Fixture::new().await?;
     f.login(false, false).await?;
@@ -351,27 +525,53 @@ async fn vault_refresh_is_coordinated_across_reopened_stores_and_rejects_wrong_d
 
 #[tokio::test]
 async fn oauth_discovery_accepts_401_without_authenticate_header() -> Result<()> {
-    let f = Fixture::new().await?;
-    Mock::given(path("/mcp/"))
-        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"errors": ["Unauthorized"]})))
-        .with_priority(1)
-        .mount(&f.server)
-        .await;
-    let base = f.server.uri();
-    Mock::given(path("/.well-known/oauth-protected-resource/mcp"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "resource": format!("{base}/mcp/"),
-            "authorization_servers": [base],
-            "scopes_supported": ["workspace:read"]
-        })))
-        .mount(&f.server)
-        .await;
-    f.login(false, false).await?;
-    let id = f.secret_id().await?;
-    assert!(matches!(
-        f.vault.get_secret(&id).await?,
-        Some(Secret::Oauth { .. })
-    ));
+    for from_agent in [false, true] {
+        let f = Fixture::new().await?;
+        Mock::given(path("/mcp/"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_json(json!({"errors": ["Unauthorized"]})),
+            )
+            .with_priority(1)
+            .mount(&f.server)
+            .await;
+        let base = f.server.uri();
+        Mock::given(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource": format!("{base}/mcp/"),
+                "authorization_servers": [base],
+                "scopes_supported": ["workspace:read"]
+            })))
+            .mount(&f.server)
+            .await;
+        if from_agent {
+            let file = f.temp.path().join("agent.md");
+            std::fs::write(
+                &file,
+                format!(
+                    "---\nharness: basic\nmodel: {{name: test}}\nmcp_servers:\n  - {{type: url, name: notion, url: {base}/mcp/}}\n---\nInvestigate tickets.\n"
+                ),
+            )?;
+            f.login_with_args(
+                &[
+                    "vault",
+                    "secret",
+                    "create",
+                    "--from-agent",
+                    file.to_str().unwrap(),
+                    "--no-browser",
+                ],
+                false,
+            )
+            .await?;
+        } else {
+            f.login(false, false).await?;
+        }
+        let id = f.secret_id().await?;
+        assert!(matches!(
+            f.vault.get_secret(&id).await?,
+            Some(Secret::Oauth { .. })
+        ));
+    }
     Ok(())
 }
 

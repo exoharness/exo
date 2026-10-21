@@ -105,6 +105,19 @@ impl RuntimeClient {
             .await
     }
 
+    pub async fn manage_identity(
+        &self,
+        command: &crate::identity::IdentityCommand,
+    ) -> Result<crate::identity::IdentityConfiguration> {
+        self.http
+            .json(
+                self.http
+                    .request(Method::POST, "identity/manage")?
+                    .json(command),
+            )
+            .await
+    }
+
     pub async fn create_agent(
         &self,
         request: &exoharness::NewAgentRequest,
@@ -124,6 +137,31 @@ impl RuntimeClient {
         self.http
             .json(self.http.request(Method::DELETE, &format!("agent/{id}"))?)
             .await
+    }
+
+    pub async fn diagnose_agent(&self, id: AgentId) -> Result<Vec<exoharness::DiagnosticCheck>> {
+        #[derive(serde::Deserialize)]
+        struct Report {
+            checks: Vec<exoharness::DiagnosticCheck>,
+        }
+        match self
+            .http
+            .json::<Report>(
+                self.http
+                    .request(Method::GET, &format!("agent/{id}/doctor"))?,
+            )
+            .await
+        {
+            Ok(report) => Ok(report.checks),
+            Err(error)
+                if error
+                    .downcast_ref::<exoharness::HttpResponseError>()
+                    .is_some_and(|error| error.status == reqwest::StatusCode::NOT_FOUND) =>
+            {
+                Ok(Vec::new())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub async fn list_agent_artifacts(

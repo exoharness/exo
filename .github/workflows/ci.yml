@@ -15,6 +15,30 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      worker: ${{ steps.paths.outputs.worker }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch || "$BASE" == 0000000000000000000000000000000000000000 ]]; then
+            echo 'worker=true' >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$BASE" "$HEAD" -- \
+            crates/executor crates/exoharness crates/managed-agents crates/mcp crates/cost \
+            crates/worker-runtime exoharness/typescript exoharness/cloudflare \
+            Cargo.toml Cargo.lock package.json pnpm-lock.yaml pnpm-workspace.yaml \
+            tsconfig.json .github/workflows/ci.yml; then
+            echo 'worker=false' >> "$GITHUB_OUTPUT"
+          else
+            echo 'worker=true' >> "$GITHUB_OUTPUT"
+          fi
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -109,6 +133,47 @@ jobs:
       - run: cargo check --locked -p exoharness --no-default-features --features store
       - run: cargo check --locked -p exoharness --no-default-features --features store --target wasm32-unknown-unknown
       - run: cargo check --locked -p executor --no-default-features --target wasm32-unknown-unknown
+
+  cloudflare-worker:
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.15.0
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
+        with:
+          shared-key: cloudflare-worker
+          cache-directories: exoharness/cloudflare/.local/tools
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+      - name: Install matching wasm-bindgen CLI
+        run: |
+          version=0.2.115
+          cargo install wasm-bindgen-cli --version "$version" --locked \
+            --root exoharness/cloudflare/.local/tools --target-dir target/wasm-bindgen-cli
+      - name: Build Worker
+        id: build
+        run: pnpm --dir exoharness/cloudflare build
+      - name: Typecheck Worker
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: pnpm --dir exoharness/cloudflare typecheck
+      - name: Test Worker, including Rust contracts
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: exoharness/cloudflare
+        run: node --test test/*.mjs
 
   # Both supported VM backends run the same real CLI + mocked model test.
   # Hosted macOS ARM runners lack nested virtualization; macOS still runs the

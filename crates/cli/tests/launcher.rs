@@ -39,9 +39,17 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
     fs::create_dir(&bin)?;
     fs::create_dir(&agent_cli)?;
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    fs::copy(repo.join("exo.sh"), launch.join("exo.sh"))?;
-    fs::create_dir(launch.join("exo"))?;
-    fs::copy(repo.join("exo/SELF.md"), launch.join("exo/SELF.md"))?;
+    let example_path = Path::new("examples/self-improving-agent");
+    let example = launch.join(example_path);
+    fs::create_dir_all(&example)?;
+    fs::copy(
+        repo.join(example_path).join("exo.sh"),
+        example.join("exo.sh"),
+    )?;
+    fs::copy(
+        repo.join(example_path).join("SELF.md"),
+        example.join("SELF.md"),
+    )?;
     let wrapper = bin.join("exo-test");
     executable(
         &wrapper,
@@ -85,7 +93,7 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
         // Exercise the system Bash, including macOS's Bash 3.2.
         let mut command = Command::new("/bin/bash");
         command
-            .arg(launch.join("exo.sh"))
+            .arg(example.join("exo.sh"))
             .args([
                 "setup-agent",
                 "--template",
@@ -103,7 +111,7 @@ fn launcher_creates_and_updates_a_thread_environment_with_the_current_cli() -> R
             ])
             .arg(&env_file)
             .arg("--module")
-            .arg(repo.join("exo/harness.ts"))
+            .arg(repo.join(example_path).join("harness.ts"))
             .args(["--self-repo-mount", "/workspace/exo source"])
             .current_dir(&launch)
             .env("EXO_BIN", &wrapper)

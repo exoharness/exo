@@ -687,12 +687,32 @@ impl ChatRepl {
         let mut assistant_line = AssistantLine::default();
         let mut ttft = None;
         let mut completed_turn = None;
+        let mut streamed_message = String::new();
         let mut pending_tool_calls: HashMap<String, (String, Option<String>)> = HashMap::new();
         while let Some(event) = progress
             .wait(async { stream.next().await.transpose() })
             .await?
         {
             match event {
+                ExecutionStreamEvent::Messages { messages } => {
+                    for message in messages {
+                        if let Message::Assistant { content, .. } = message {
+                            let text = render_assistant_content(&content, Verbosity::Minimal);
+                            let tail = text.strip_prefix(&streamed_message).unwrap_or(&text);
+                            if !tail.is_empty() {
+                                assistant_line.write_text(&mut stdout, tail)?;
+                            }
+                            if !text.is_empty() {
+                                assistant_line.finish(&mut stdout)?;
+                                streamed_message.clear();
+                            }
+                        }
+                    }
+                }
+                ExecutionStreamEvent::Checkpoint { event_id } => self.watch_after = Some(event_id),
+                ExecutionStreamEvent::Status { message } => {
+                    progress.set_status(Some(message));
+                }
                 ExecutionStreamEvent::ApprovalRequested { turn, approval } => {
                     progress.set_status(None);
                     assistant_line.finish(&mut stdout)?;
@@ -711,6 +731,7 @@ impl ChatRepl {
                     ttft.get_or_insert_with(|| started.elapsed());
                     progress.set_status(None);
                     assistant_line.write_text(&mut stdout, &text)?;
+                    streamed_message.push_str(&text);
                 }
                 ExecutionStreamEvent::ToolCall {
                     tool_call_id,
@@ -768,17 +789,6 @@ impl ChatRepl {
 
         if assistant_line.active {
             assistant_line.finish(&mut stdout)?;
-        } else if let Some(last_message) =
-            executor::materialize_conversation_messages(&*self.conversation)
-                .await?
-                .last()
-                .cloned()
-            && let Message::Assistant { content, .. } = last_message
-        {
-            let rendered = render_assistant_content(&content, self.verbosity);
-            if !rendered.is_empty() {
-                println!("{} {ASSISTANT_LABEL}: {}", compact_timestamp(), rendered);
-            }
         }
         progress.set_status(Some("Finishing turn".to_string()));
         match progress

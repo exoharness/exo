@@ -176,7 +176,9 @@ async fn open_configured_thread(
     args: &ThreadArgs,
 ) -> Result<(Arc<dyn AgentHandle>, Arc<dyn ConversationHandle>)> {
     let runtime = configured_runtime(runtime, definition, args)?;
-    super::open_thread(&runtime, definition, args, false).await
+    let (agent, thread) = super::open_thread(&runtime, definition, args, false).await?;
+    super::check_model_credentials(&runtime, agent.as_ref(), thread.as_ref()).await?;
+    Ok((agent, thread))
 }
 
 fn thread_args(agent: &str) -> ThreadArgs {
@@ -193,6 +195,74 @@ fn thread_args(agent: &str) -> ThreadArgs {
         mounts: Vec::new(),
         verbosity: Verbosity::Minimal,
     }
+}
+
+#[tokio::test]
+async fn opening_remote_thread_does_not_read_local_executor_config() -> Result<()> {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    let agent = exoharness::AgentRecord {
+        id: exoharness::Uuid7::now(),
+        slug: "remote-agent".into(),
+        name: "Remote agent".into(),
+        vaults: vec![],
+    };
+    let thread = exoharness::ThreadRecord {
+        id: exoharness::Uuid7::now(),
+        slug: "remote-thread".into(),
+        name: "Remote thread".into(),
+        environment: None,
+        latest_event_id: None,
+        vaults: vec![],
+    };
+    for (verb, route, body) in [
+        (
+            "GET",
+            "/exo/agent".into(),
+            serde_json::json!({"agents": [agent]}),
+        ),
+        (
+            "POST",
+            format!("/exo/agent/{}/thread", agent.id),
+            serde_json::json!({"agent": agent, "thread": thread, "harness": "codex"}),
+        ),
+        (
+            "GET",
+            format!("/exo/agent/{}/thread/{}/previews", agent.id, thread.id),
+            serde_json::json!(null),
+        ),
+        (
+            "GET",
+            format!("/exo/agent/{}/thread/{}/vault", agent.id, thread.id),
+            serde_json::json!([]),
+        ),
+    ] {
+        Mock::given(method(verb))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let runtime = Runtime::new(
+        executor::HttpProvider::new(managed::http::RuntimeClient::new(&format!(
+            "{}/exo",
+            server.uri()
+        ))?),
+        None,
+    );
+    let mut args = thread_args(&agent.slug);
+    args.provider = None;
+    let (opened_agent, opened_thread) = super::open_thread(&runtime, None, &args, false).await?;
+    assert_eq!(opened_agent.record().id, agent.id);
+    assert_eq!(opened_thread.record().id, thread.id);
+    assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    runtime.shutdown().await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -428,6 +498,7 @@ async fn mcp_authentication_errors_are_concise_unless_verbose() -> Result<()> {
         let mut report = crate::CliError {
             error,
             verbose: true,
+            mcp_setup_command: None,
         };
         assert!(format!("{report:?}").contains("Caused by:"));
         report.verbose = false;

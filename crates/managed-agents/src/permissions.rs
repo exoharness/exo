@@ -34,7 +34,6 @@ pub struct PermissionPolicies {
 }
 
 impl PermissionPolicies {
-    #[cfg(feature = "client")]
     pub fn for_mcp_tool(&self, tool: &exo_mcp::McpTool) -> PermissionPolicy {
         let server = self.mcp_servers.get(&tool.server_name);
         self.tool_policies
@@ -105,7 +104,6 @@ mod tests {
         assert!(serde_json::from_str::<PermissionPolicy>(r#"{"type":"auto"}"#).is_err());
     }
 
-    #[cfg(feature = "client")]
     #[test]
     fn policies_use_specific_tool_then_server_defaults() {
         let definition = crate::AgentDefinition::parse("---\nharness: basic\nmodel:\n  name: gpt-5-mini\npermission_policy: {type: always_ask}\ntool_policies:\n  shell: {type: always_allow}\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n    permission_policy: {type: always_allow}\n    tool_policies:\n      write: {type: always_ask}\n---\nUse tools.\n".into()).unwrap();
@@ -136,7 +134,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "client")]
     #[test]
     fn builtin_tools_default_to_allow_and_mcp_tools_default_to_ask() {
         let definition = crate::AgentDefinition::parse("---\nharness: basic\nmodel:\n  name: gpt-5-mini\nmcp_servers:\n  - type: url\n    name: notes\n    url: https://example.com/mcp\n---\nUse tools.\n".into()).unwrap();

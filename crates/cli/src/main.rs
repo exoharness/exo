@@ -2,6 +2,7 @@ mod env;
 #[cfg(test)]
 mod env_tests;
 mod environment;
+mod identity;
 mod managed_agents;
 #[cfg(test)]
 mod mount_tests;
@@ -501,6 +502,7 @@ impl Cli {
         match &self.command {
             Commands::Environment { runtime, .. }
             | Commands::Vault { runtime, .. }
+            | Commands::Identity { runtime, .. }
             | Commands::Run { runtime, .. }
             | Commands::Agent { runtime, .. }
             | Commands::Conversation { runtime, .. }
@@ -533,6 +535,13 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Associate private vaults with users and trust identity sources.
+    Identity {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        #[command(subcommand)]
+        command: identity::IdentityCommands,
+    },
     /// Configure reusable agent environments and their backends.
     Environment {
         #[command(flatten)]
@@ -622,6 +631,10 @@ enum AgentCommands {
         agent: String,
     },
     Delete {
+        agent: String,
+    },
+    /// Check an agent's definition, adapters, and provider setup, and suggest fixes.
+    Doctor {
         agent: String,
     },
 }
@@ -909,6 +922,7 @@ enum ConversationMountCommands {
 struct CliError {
     error: anyhow::Error,
     verbose: bool,
+    mcp_setup_command: Option<String>,
 }
 
 impl std::fmt::Debug for CliError {
@@ -916,6 +930,15 @@ impl std::fmt::Debug for CliError {
         if !self.verbose
             && let Some(auth) = self.error.downcast_ref::<exo_mcp::McpAuthenticationError>()
         {
+            if !auth.credential_supplied
+                && let Some(command) = &self.mcp_setup_command
+            {
+                return write!(
+                    f,
+                    "connecting MCP server {}. No credential was selected. Run `{command}`, then start a new thread.",
+                    auth.server_name
+                );
+            }
             let help = if auth.credential_supplied {
                 "The server rejected the token. Check its validity and permissions."
             } else {
@@ -932,17 +955,68 @@ impl std::fmt::Debug for CliError {
     }
 }
 
+fn mcp_setup_command(cli: &Cli) -> Option<String> {
+    let Commands::Run { thread, .. } = &cli.command else {
+        return None;
+    };
+    let file = thread.agent_file()?.to_str()?;
+    let mut args = vec!["exo"];
+    if let Some(provider) = cli.provider_profile.as_deref() {
+        args.extend(["--provider", provider]);
+    }
+    let default_root = std::env::var_os("EXO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".exo")));
+    if default_root.as_deref() != Some(cli.root.as_path()) {
+        args.extend(["--root", cli.root.to_str()?]);
+    }
+    if let Some(directory) = &cli.config_dir {
+        args.extend(["--config-dir", directory.to_str()?]);
+    }
+    args.extend(["vault", "secret", "create"]);
+    let runtime = cli.runtime();
+    if let Some(backend) = runtime.secret_backend {
+        args.extend([
+            "--secret-backend",
+            match backend {
+                SecretBackendArg::AppleKeychain => "apple-keychain",
+                SecretBackendArg::File => "file",
+            },
+        ]);
+    }
+    if let Some(path) = &runtime.master_key_path {
+        args.extend(["--master-key-path", path.to_str()?]);
+    }
+    if let Some(path) = &runtime.env_file {
+        args.extend(["--env-file", path.to_str()?]);
+    }
+    if let Some(vault) = thread.vault.last() {
+        args.push(vault);
+    }
+    args.extend(["--from-agent", file]);
+    shlex::try_join(args).ok()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CliError> {
     let cli = Cli::parse();
+    let mcp_setup_command = mcp_setup_command(&cli);
     let verbose = matches!(&cli.command,
         Commands::Run { thread, .. }
         if thread.verbosity == Verbosity::Full
     );
     if matches!(&cli.command, Commands::Run { serve: false, .. }) {
-        turn_display::init_progress(verbose).map_err(|error| CliError { error, verbose })?;
+        turn_display::init_progress(verbose).map_err(|error| CliError {
+            error,
+            verbose,
+            mcp_setup_command: mcp_setup_command.clone(),
+        })?;
     }
-    run(cli).await.map_err(|error| CliError { error, verbose })
+    run(cli).await.map_err(|error| CliError {
+        error,
+        verbose,
+        mcp_setup_command,
+    })
 }
 
 async fn run(mut cli: Cli) -> Result<()> {
@@ -1022,6 +1096,7 @@ async fn run_selected(
             } | Commands::Agent {
                 command: AgentCommands::List
                     | AgentCommands::Get { .. }
+                    | AgentCommands::Doctor { .. }
                     | AgentCommands::Mount {
                         command: AgentMountCommands::List { .. }
                     },
@@ -1042,7 +1117,7 @@ async fn run_selected(
             eprintln!(
                 "provider: {}; account: {}",
                 name.escape_debug(),
-                account.escape_debug()
+                providers::format_account(&account)
             );
             if !selection.context.is_empty() {
                 eprintln!("context: {}", serde_json::to_string(&selection.context)?);
@@ -1075,7 +1150,7 @@ async fn run_selected(
     let state_root = local.then(|| cli.state_root()).transpose()?;
     let harness = providers::runtime(
         &cli,
-        http_client,
+        http_client.clone(),
         definition.as_ref(),
         &env,
         state_root.as_deref(),
@@ -1091,6 +1166,8 @@ async fn run_selected(
         Commands::Provider { .. } => {
             unreachable!("management commands return before harness startup")
         }
+        Commands::Identity { command, .. } => identity::run(&harness, http_client.as_ref(), state_root.as_deref(), command.into_request()).await?,
+        Commands::Vault { command: vaults::VaultCommands::Bind { vault, email }, .. } => identity::run(&harness, http_client.as_ref(), state_root.as_deref(), exo_managed_agents::identity::IdentityCommand::BindVault { vault, email }).await?,
         Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars, local).await?,
         Commands::Run { thread, serve: true, service, .. } => {
             let agent = if thread.agent.is_some() {
@@ -1111,6 +1188,9 @@ async fn run_selected(
             let mut progress = turn_display::TurnProgress::new();
             progress.set_status(Some("Preparing session".into()));
             if local {
+                managed_agents::check_model_credentials(
+                    harness.as_ref(), agent.as_ref(), conversation.as_ref(),
+                ).await?;
                 progress.wait(harness.start_inline_previews(agent.as_ref(), conversation.clone())).await?;
             }
             if let Some(previews) = progress.wait(harness.preview_urls(agent.as_ref(), conversation.clone())).await? {
@@ -1329,6 +1409,32 @@ async fn run_selected(
                     "braintrust: {}",
                     format_braintrust_tracing_config(config.braintrust.as_ref())
                 );
+            }
+            AgentCommands::Doctor { agent } => {
+                let agent = must_get_agent(harness.as_ref(), &agent).await?;
+                let mut checks = diagnose_agent(harness.as_ref(), agent.as_ref()).await;
+                checks.extend(agent.diagnose().await?);
+                let mut failed = false;
+                for check in &checks {
+                    let mark = match check.status {
+                        exoharness::DiagnosticStatus::Ok => "ok",
+                        exoharness::DiagnosticStatus::Warning => "warning",
+                        exoharness::DiagnosticStatus::Error => {
+                            failed = true;
+                            "error"
+                        }
+                    };
+                    println!("{mark}: {}: {}", check.name, check.message);
+                    if let Some(fix) = &check.fix {
+                        println!("  fix: {fix}");
+                    }
+                }
+                if checks.is_empty() {
+                    println!("ok: nothing to check for agent {}", agent.record().slug);
+                }
+                if failed {
+                    std::process::exit(1);
+                }
             }
             AgentCommands::Delete { agent } => {
                 let record = must_get_agent(harness.as_ref(), &agent).await?.record().clone();
@@ -1911,7 +2017,9 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
             )
         }
         Commands::Agent { command, .. } => match command {
-            AgentCommands::Get { agent } | AgentCommands::Delete { agent } => (Some(agent), None),
+            AgentCommands::Get { agent }
+            | AgentCommands::Delete { agent }
+            | AgentCommands::Doctor { agent } => (Some(agent), None),
             AgentCommands::Mount { command } => match command {
                 AgentMountCommands::List { agent }
                 | AgentMountCommands::Create { agent, .. }
@@ -2000,7 +2108,8 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
         Commands::FirecrackerBridge
         | Commands::Provider { .. }
         | Commands::Environment { .. }
-        | Commands::Vault { .. } => (None, None),
+        | Commands::Vault { .. }
+        | Commands::Identity { .. } => (None, None),
     }
 }
 
@@ -2189,6 +2298,115 @@ fn print_mounts(mounts: &[FileSystemMount]) {
             if internal { ", internal" } else { "" }
         );
     }
+}
+
+/// Checks that hold on every provider: the saved definition loads, and each
+/// adapter's transport vault holds the secrets its transport needs.
+async fn diagnose_agent(
+    harness: &Runtime,
+    agent: &dyn AgentHandle,
+) -> Vec<exoharness::DiagnosticCheck> {
+    use exo_managed_agents::adapters::{AdapterDefinition, SlackTransport};
+    use exoharness::{DiagnosticCheck, DiagnosticStatus};
+    let check = |name: String, status, message: String, fix: Option<String>| DiagnosticCheck {
+        name,
+        status,
+        message,
+        fix,
+    };
+    let definition = match exo_managed_agents::load_definition(agent).await {
+        Ok(Some(definition)) => definition,
+        Ok(None) => {
+            return vec![check(
+                "definition".into(),
+                DiagnosticStatus::Error,
+                "No definition is saved".into(),
+                Some("exo agent update <file>".into()),
+            )];
+        }
+        Err(error) => {
+            return vec![check(
+                "definition".into(),
+                DiagnosticStatus::Error,
+                format!("{error:#}"),
+                Some("Fix the definition file, then run exo agent update <file>".into()),
+            )];
+        }
+    };
+    let mut checks = vec![check(
+        "definition".into(),
+        DiagnosticStatus::Ok,
+        "The saved definition loads".into(),
+        None,
+    )];
+    for adapter in &definition.frontmatter.adapters {
+        let AdapterDefinition::Slack(slack) = adapter;
+        let name = format!("slack adapter {}", adapter.name());
+        let vault = match exo_managed_agents::vaults::find_vault(
+            harness.exoharness_handle().as_ref(),
+            &slack.vault,
+        )
+        .await
+        {
+            Ok(vault) => vault,
+            Err(error) => {
+                checks.push(check(
+                    name,
+                    DiagnosticStatus::Error,
+                    format!("{error:#}"),
+                    Some(format!("exo vault create {}", slack.vault)),
+                ));
+                continue;
+            }
+        };
+        let secrets = match vault.list_secrets().await {
+            Ok(secrets) => secrets,
+            Err(error) => {
+                checks.push(check(
+                    name,
+                    DiagnosticStatus::Error,
+                    format!("{error:#}"),
+                    None,
+                ));
+                continue;
+            }
+        };
+        let required = match slack.transport {
+            SlackTransport::Socket => [
+                ("bot-token", "SLACK_BOT_TOKEN"),
+                ("app-token", "SLACK_APP_TOKEN"),
+            ],
+            SlackTransport::Http => [
+                ("bot-token", "SLACK_BOT_TOKEN"),
+                ("signing-secret", "SLACK_SIGNING_SECRET"),
+            ],
+        };
+        let missing: Vec<_> = required
+            .iter()
+            .filter(|(secret, _)| !secrets.iter().any(|stored| stored.name == *secret))
+            .collect();
+        if missing.is_empty() {
+            checks.push(check(
+                name,
+                DiagnosticStatus::Ok,
+                format!("Vault {} has the Slack credentials", slack.vault),
+                None,
+            ));
+            continue;
+        }
+        for (secret, env) in missing {
+            checks.push(check(
+                name.clone(),
+                DiagnosticStatus::Warning,
+                format!("Vault {} has no {secret} yet", slack.vault),
+                Some(format!(
+                    "exo vault secret create {} {secret} --token-env {env}",
+                    slack.vault
+                )),
+            ));
+        }
+    }
+    checks
 }
 
 async fn must_get_agent(harness: &Runtime, agent_ref: &str) -> Result<Arc<dyn AgentHandle>> {

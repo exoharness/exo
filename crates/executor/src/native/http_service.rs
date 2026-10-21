@@ -1,47 +1,29 @@
-use std::{net::TcpListener, ops::Bound, sync::Arc};
+use std::{net::TcpListener, sync::Arc};
 
-use crate::managed_agents::service::{AgentPath, ThreadPath, TurnPath, VaultPath};
+use crate::managed_agents::{http as dispatch, service as api};
 use actix_web::{
     App, Error, HttpMessage, HttpRequest, HttpResponse, HttpServer,
     body::MessageBody,
     dev::{Server, ServiceRequest, ServiceResponse},
-    error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound, ErrorUnauthorized},
+    error::{
+        ErrorBadRequest, ErrorInternalServerError, ErrorNotFound, ErrorPayloadTooLarge,
+        ErrorUnauthorized,
+    },
     http::header::{AUTHORIZATION, HeaderValue},
     middleware::{Next, from_fn},
     mime, web,
 };
 use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
 use exo_managed_agents::http::{RUNTIME_PATH, protocol::*, sse};
-use exoharness::{
-    AgentHandle, AgentId, Event, EventData, EventStream, ThreadHandle, ThreadId, Uuid7,
-};
+use exoharness::{AgentId, Event, ThreadHandle};
 use futures::StreamExt;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 
-use crate::{ExecutionStreamEvent, Runtime};
+use crate::Runtime;
 
 // Thread creation can include a large environment definition. Bytes buffers the request.
 const OPTIONAL_JSON_BODY_LIMIT: usize = 256 * 1024 * 1024;
-
-fn optional_json_body<T: Default + serde::de::DeserializeOwned>(
-    request: &HttpRequest,
-    body: &web::Bytes,
-) -> Result<T, Error> {
-    if body.is_empty() {
-        return Ok(T::default());
-    }
-    let json_content_type = request
-        .mime_type()
-        .ok()
-        .flatten()
-        .is_some_and(|content_type| {
-            content_type.subtype() == mime::JSON || content_type.suffix() == Some(mime::JSON)
-        });
-    if !json_content_type {
-        return Err(ErrorBadRequest("Content-Type must be JSON"));
-    }
-    serde_json::from_slice(body).map_err(ErrorBadRequest)
-}
 
 #[derive(Clone)]
 pub struct RuntimeHttpService {
@@ -55,6 +37,7 @@ pub struct RuntimeHttpService {
     callers: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<Runtime>>>>,
     account_id: String,
     session: Option<String>,
+    adapters: Option<Arc<crate::managed_agents::adapters::AdapterService>>,
 }
 
 impl RuntimeHttpService {
@@ -76,6 +59,7 @@ impl RuntimeHttpService {
             callers: Arc::default(),
             account_id: "local".into(),
             session: None,
+            adapters: None,
             agent_id: None,
             bearer_token: token
                 .map(|token| {
@@ -93,13 +77,32 @@ impl RuntimeHttpService {
         self
     }
 
+    pub fn with_adapters(
+        mut self,
+        adapters: Arc<crate::managed_agents::adapters::AdapterService>,
+    ) -> Self {
+        self.adapters = Some(adapters);
+        self
+    }
+
     pub fn spawn_recovery(&self) -> Result<()> {
         // Incoming turns can wake older queue entries before discovery finishes.
-        if self.auth.is_some() {
+        if self.auth.is_some() || self.adapters.is_some() {
             let service = self.clone();
             self.runtime
                 .set_recovery_resolver(Arc::new(move |principal: String| {
-                    service.caller_runtime(principal)
+                    let service = service.clone();
+                    Box::pin(async move {
+                        if principal.starts_with("adapter-") {
+                            let adapters = service
+                                .adapters
+                                .clone()
+                                .context("adapter recovery is unavailable")?;
+                            adapters.recover_caller(&principal).await
+                        } else {
+                            service.caller_runtime(principal)
+                        }
+                    })
                 }))?;
         }
         let service = self.clone();
@@ -146,30 +149,6 @@ impl RuntimeHttpService {
         self.agent_id = Some(agent_id);
         self
     }
-
-    async fn agent(&self, id: AgentId) -> Result<Arc<dyn AgentHandle>, Error> {
-        if self.agent_id.is_some_and(|agent_id| agent_id != id) {
-            return Err(ErrorNotFound("agent not found"));
-        }
-        self.runtime
-            .exoharness_handle()
-            .get_agent(&id)
-            .await
-            .map_err(ErrorInternalServerError)?
-            .ok_or_else(|| ErrorNotFound("agent not found"))
-    }
-
-    async fn thread(
-        &self,
-        agent: &dyn AgentHandle,
-        id: ThreadId,
-    ) -> Result<Arc<dyn ThreadHandle>, Error> {
-        agent
-            .get_thread(&id)
-            .await
-            .map_err(ErrorInternalServerError)?
-            .ok_or_else(|| ErrorNotFound("thread not found"))
-    }
 }
 
 pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::io::Result<Server> {
@@ -185,6 +164,9 @@ pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::i
             configure(cfg);
         })
     })
+    // The host coordinates signals with adapter and runtime shutdown.
+    .disable_signals()
+    .shutdown_timeout(5)
     .listen(listener)?;
     recovery_service
         .spawn_recovery()
@@ -193,110 +175,102 @@ pub fn server(listener: TcpListener, service: Arc<RuntimeHttpService>) -> std::i
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
+    // These exact callback routes authenticate using Slack signatures. The
+    // remaining API routes keep their normal Exo authentication.
+    cfg.service(
+        web::resource(format!("{RUNTIME_PATH}/adapter/{{name}}"))
+            .app_data(web::PayloadConfig::new(16 * 1024 * 1024))
+            .route(web::post().to(slack_webhook)),
+    );
+    cfg.service(
+        web::resource(format!("{RUNTIME_PATH}/agent/{{agent}}/adapter/{{name}}"))
+            .app_data(web::PayloadConfig::new(16 * 1024 * 1024))
+            .route(web::post().to(slack_webhook)),
+    );
     cfg.service(
         web::scope(RUNTIME_PATH)
             .wrap(from_fn(authorize))
-            .route("/identity", web::get().to(identity))
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/environment",
-                web::put().to(update_thread_environment),
-            )
-            .route("/environment", web::get().to(list_environments))
-            .route("/environment", web::put().to(put_environment))
-            .route("/environment/{name}", web::delete().to(delete_environment))
-            .configure(configure_vaults)
-            .route("/agent", web::get().to(list_agents))
-            .route("/agent", web::post().to(create_agent))
-            .route("/agent/{agent_id}", web::get().to(get_agent))
-            .route("/agent/{agent_id}", web::delete().to(delete_agent))
-            .route("/agent/{agent_id}/artifact", web::get().to(list_artifacts))
-            .route("/agent/{agent_id}/artifact", web::post().to(write_artifact))
-            .route(
-                "/agent/{agent_id}/artifact/read",
-                web::get().to(read_artifact),
-            )
-            .service(
-                web::resource("/agent/{agent_id}/thread")
-                    .app_data(web::PayloadConfig::new(OPTIONAL_JSON_BODY_LIMIT))
-                    .route(web::get().to(list_threads))
-                    .route(web::post().to(create_thread)),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}",
-                web::get().to(get_thread),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/previews",
-                web::get().to(preview_endpoint),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}",
-                web::delete().to(delete_thread),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/artifact",
-                web::get().to(list_thread_artifacts),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/artifact/read",
-                web::get().to(read_thread_artifact),
-            )
-            .service(
-                web::resource("/agent/{agent_id}/thread/{thread_id}/fork")
-                    .app_data(web::PayloadConfig::new(OPTIONAL_JSON_BODY_LIMIT))
-                    .route(web::post().to(fork_thread)),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/turn",
-                web::post().to(submit_turn),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}",
-                web::get().to(turn_status),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/cancel",
-                web::post().to(cancel_turn),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/approval-response",
-                web::post().to(approval_response),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/turn/{turn_id}/frontend-tool-result",
-                web::post().to(frontend_tool_result),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/event",
-                web::get().to(events),
-            )
-            .route(
-                "/agent/{agent_id}/thread/{thread_id}/event/watch",
-                web::get().to(watch),
-            ),
+            .route("/identity/manage", web::post().to(manage_identity))
+            .default_service(web::route().to(handle)),
     );
 }
 
-fn configure_vaults(cfg: &mut web::ServiceConfig) {
-    for prefix in [
-        "/vault",
-        "/agent/{agent_id}/vault",
-        "/agent/{agent_id}/thread/{thread_id}/vault",
-    ] {
-        let secrets = format!("{prefix}/{{vault_id}}/secret");
-        let secret = format!("{secrets}/{{secret_id}}");
-        cfg.route(prefix, web::get().to(list_vaults))
-            .route(&secrets, web::get().to(list_secrets))
-            .route(&secrets, web::post().to(put_secret))
-            .route(&secret, web::put().to(update_secret))
-            .route(&secret, web::delete().to(delete_secret));
+async fn slack_webhook(
+    service: web::Data<Arc<RuntimeHttpService>>,
+    request: HttpRequest,
+    body: web::Bytes,
+) -> Result<HttpResponse, Error> {
+    let adapters = service
+        .adapters
+        .as_ref()
+        .ok_or_else(|| ErrorNotFound("adapters are not configured"))?;
+    let content = std::str::from_utf8(&body).map_err(ErrorBadRequest)?;
+    let signature = request
+        .headers()
+        .get("x-slack-signature")
+        .and_then(|value| value.to_str().ok());
+    let timestamp = request
+        .headers()
+        .get("x-slack-request-timestamp")
+        .and_then(|value| value.to_str().ok());
+    let form = request
+        .mime_type()?
+        .is_some_and(|mime| mime == mime::APPLICATION_WWW_FORM_URLENCODED);
+    let challenge = adapters
+        .slack_webhook(
+            request.match_info().get("agent"),
+            request
+                .match_info()
+                .get("name")
+                .ok_or_else(|| ErrorBadRequest("adapter name required"))?,
+            content,
+            form,
+            signature,
+            timestamp,
+        )
+        .await
+        .map_err(|error| {
+            if error.downcast_ref::<slack_morphism::signature_verifier::SlackEventSignatureVerifierError>().is_some() {
+                ErrorUnauthorized("Slack signature verification failed")
+            } else if error.downcast_ref::<serde_json::Error>().is_some() || error.downcast_ref::<serde_urlencoded::de::Error>().is_some() {
+                ErrorBadRequest("invalid Slack payload")
+            } else {
+                tracing::warn!(%error, "Slack webhook retained for retry");
+                actix_web::error::ErrorServiceUnavailable("Slack adapter is not ready; retry")
+            }
+        })?;
+    #[derive(serde::Serialize)]
+    struct Challenge {
+        challenge: String,
     }
-    cfg.route("/vault", web::post().to(create_vault))
-        .route("/vault/{vault_id}", web::delete().to(delete_vault))
-        .route(
-            "/agent/{agent_id}/thread/{thread_id}/vault",
-            web::post().to(attach_thread_vaults),
-        );
+    Ok(match challenge {
+        Some(challenge) => HttpResponse::Ok().json(Challenge { challenge }),
+        None => HttpResponse::Ok().finish(),
+    })
+}
+
+async fn manage_identity(
+    service: Service,
+    body: web::Json<exo_managed_agents::identity::IdentityCommand>,
+) -> Result<HttpResponse, Error> {
+    if let Some(caller) = service.runtime.exoharness_handle().caller() {
+        caller
+            .policy
+            .check_operator(&caller.principal)
+            .await
+            .map_err(ErrorUnauthorized)?;
+    }
+    let adapters = service
+        .adapters
+        .as_ref()
+        .ok_or_else(|| ErrorNotFound("identity service is unavailable"))?;
+    Ok(HttpResponse::Ok().json(
+        adapters
+            .identities()
+            .execute(body.into_inner())
+            .await
+            .map_err(ErrorBadRequest)?,
+    ))
 }
 
 async fn authorize(
@@ -374,579 +348,171 @@ impl actix_web::FromRequest for Service {
     }
 }
 
-async fn list_agents(
-    service: Service,
-    query: web::Query<AgentsQuery>,
-) -> Result<web::Json<ListAgentsResult>, Error> {
-    crate::managed_agents::service::list_agents(&service.shared(), query.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn identity(service: Service) -> web::Json<ProviderIdentity> {
-    web::Json(ProviderIdentity {
-        account_id: service.account_id.clone(),
-    })
-}
-
-async fn list_environments(
-    service: Service,
-) -> Result<web::Json<Vec<exoharness::EnvironmentDefinition>>, Error> {
-    crate::managed_agents::service::list_environments(&service.shared())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-async fn put_environment(
-    service: Service,
-    body: web::Json<exoharness::EnvironmentDefinition>,
-) -> Result<web::Json<bool>, Error> {
-    crate::managed_agents::service::put_environment(&service.shared(), body.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-async fn delete_environment(
-    service: Service,
-    name: web::Path<String>,
-) -> Result<web::Json<bool>, Error> {
-    crate::managed_agents::service::delete_environment(&service.shared(), &name)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn list_vaults(
-    service: Service,
-    path: web::Path<VaultPath>,
-) -> Result<web::Json<Vec<exoharness::vault::VaultRecord>>, Error> {
-    crate::managed_agents::service::list_vaults(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn create_vault(
-    service: Service,
-    body: web::Json<CreateVaultBody>,
-) -> Result<web::Json<exoharness::vault::VaultRecord>, Error> {
-    crate::managed_agents::service::create_vault(&service.shared(), body.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-async fn delete_vault(
-    service: Service,
-    path: web::Path<VaultPath>,
-) -> Result<web::Json<bool>, Error> {
-    crate::managed_agents::service::delete_vault(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn put_secret(
-    service: Service,
-    path: web::Path<VaultPath>,
-    body: web::Json<exoharness::PutSecretRequest>,
-) -> Result<web::Json<exoharness::SecretId>, Error> {
-    crate::managed_agents::service::put_secret(&service.shared(), &path, body.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-async fn update_secret(
-    service: Service,
-    path: web::Path<VaultPath>,
-    body: web::Json<exoharness::UpdateSecretRequest>,
-) -> Result<web::Json<exoharness::SecretMetadata>, Error> {
-    crate::managed_agents::service::update_secret(&service.shared(), &path, body.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-async fn delete_secret(
-    service: Service,
-    path: web::Path<VaultPath>,
-) -> Result<web::Json<bool>, Error> {
-    crate::managed_agents::service::delete_secret(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn list_secrets(
-    service: Service,
-    path: web::Path<VaultPath>,
-) -> Result<web::Json<Vec<exoharness::SecretMetadata>>, Error> {
-    crate::managed_agents::service::list_secrets(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn create_agent(
-    service: Service,
-    body: web::Json<exoharness::NewAgentRequest>,
-) -> Result<web::Json<exoharness::AgentRecord>, Error> {
-    crate::managed_agents::service::create_agent(&service.shared(), body.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn get_agent(
-    service: Service,
-    path: web::Path<AgentPath>,
-) -> Result<web::Json<Option<exoharness::AgentRecord>>, Error> {
-    crate::managed_agents::service::get_agent(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn delete_agent(
-    service: Service,
-    path: web::Path<AgentPath>,
-) -> Result<web::Json<bool>, Error> {
-    crate::managed_agents::service::delete_agent(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn list_artifacts(
-    service: Service,
-    path: web::Path<AgentPath>,
-) -> Result<web::Json<Vec<exoharness::ArtifactVersion>>, Error> {
-    crate::managed_agents::service::list_artifacts(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn read_artifact(
-    service: Service,
-    path: web::Path<AgentPath>,
-    query: web::Query<exoharness::ReadArtifactRequest>,
-) -> Result<web::Json<Option<exoharness::Artifact>>, Error> {
-    crate::managed_agents::service::read_artifact(&service.shared(), &path, query.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn list_thread_artifacts(
-    service: Service,
-    path: web::Path<ThreadPath>,
-) -> Result<web::Json<Vec<exoharness::ArtifactVersion>>, Error> {
-    crate::managed_agents::service::list_thread_artifacts(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn read_thread_artifact(
-    service: Service,
-    path: web::Path<ThreadPath>,
-    query: web::Query<exoharness::ReadArtifactRequest>,
-) -> Result<web::Json<Option<exoharness::Artifact>>, Error> {
-    crate::managed_agents::service::read_thread_artifact(
-        &service.shared(),
-        &path,
-        query.into_inner(),
-    )
-    .await
-    .map(web::Json)
-    .map_err(request_error)
-}
-
-async fn write_artifact(
-    service: Service,
-    path: web::Path<AgentPath>,
-    body: web::Json<exoharness::WriteArtifactRequest>,
-) -> Result<web::Json<exoharness::ArtifactVersion>, Error> {
-    crate::managed_agents::service::write_artifact(&service.shared(), &path, body.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn get_thread(
-    service: Service,
-    path: web::Path<ThreadPath>,
-) -> Result<web::Json<ThreadResult>, Error> {
-    crate::managed_agents::service::get_thread(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn preview_endpoint(
-    service: Service,
-    path: web::Path<ThreadPath>,
-) -> Result<web::Json<Option<PreviewEndpoint>>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let endpoint = service.runtime.active_preview_endpoint();
-    if endpoint.is_some() {
-        let previews = service
-            .runtime
-            .register_previews(agent.as_ref(), thread)
-            .await
-            .map_err(ErrorBadRequest)?;
-        if previews.is_none() {
-            return Ok(web::Json(None));
-        }
+#[async_trait]
+impl dispatch::Platform for RuntimeHttpService {
+    fn account_id(&self) -> &str {
+        &self.account_id
     }
-    Ok(web::Json(endpoint))
-}
-
-async fn list_threads(
-    service: Service,
-    path: web::Path<AgentPath>,
-    query: web::Query<ThreadsQuery>,
-) -> Result<web::Json<ListThreadsResult>, Error> {
-    crate::managed_agents::service::list_threads(&service.shared(), &path, query.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn create_thread(
-    service: Service,
-    path: web::Path<AgentPath>,
-    request: HttpRequest,
-    body: web::Bytes,
-) -> Result<web::Json<CreateThreadResult>, Error> {
-    let body: CreateThreadBody = optional_json_body(&request, &body)?;
-    let agent = service.agent(path.agent_id).await?;
-    crate::managed_agents::service::create_thread(&service.runtime, &agent, body)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn update_thread_environment(
-    service: Service,
-    path: web::Path<ThreadPath>,
-    body: web::Json<exoharness::EnvironmentDefinition>,
-) -> Result<web::Json<ThreadResult>, Error> {
-    crate::managed_agents::service::update_thread_environment(
-        &service.shared(),
-        &path,
-        body.into_inner(),
-    )
-    .await
-    .map(web::Json)
-    .map_err(request_error)
-}
-
-async fn attach_thread_vaults(
-    service: Service,
-    path: web::Path<ThreadPath>,
-    body: web::Json<AttachThreadVaultsBody>,
-) -> Result<web::Json<ThreadResult>, Error> {
-    crate::managed_agents::service::attach_thread_vaults(
-        &service.shared(),
-        &path,
-        body.into_inner(),
-    )
-    .await
-    .map(web::Json)
-    .map_err(request_error)
-}
-
-async fn delete_thread(
-    service: Service,
-    path: web::Path<ThreadPath>,
-) -> Result<web::Json<DeleteThreadResult>, Error> {
-    crate::managed_agents::service::delete_thread(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn fork_thread(
-    service: Service,
-    path: web::Path<ThreadPath>,
-    request: HttpRequest,
-    body: web::Bytes,
-) -> Result<web::Json<ThreadResult>, Error> {
-    crate::managed_agents::service::fork_thread(
-        &service.shared(),
-        &path,
-        optional_json_body::<ForkThreadBody>(&request, &body)?,
-    )
-    .await
-    .map(web::Json)
-    .map_err(request_error)
-}
-
-async fn submit_turn(
-    service: Service,
-    path: web::Path<ThreadPath>,
-    body: web::Json<SubmitTurnBody>,
-) -> Result<HttpResponse, Error> {
-    let body = body.into_inner();
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let prepared = crate::managed_agents::service::prepare_turn(
-        &service.runtime,
-        agent.as_ref(),
-        thread.as_ref(),
-        body,
-    )
-    .await
-    .map_err(request_error)?;
-    let runtime = service.runtime.clone();
-    let progress = service.progress.clone();
-    let (receipt, received) = oneshot::channel();
-    tokio::spawn(async move {
-        let admitted = crate::managed_agents::service::submit_turn(
-            &runtime,
-            agent,
-            thread.clone(),
-            prepared,
-            true,
-        )
-        .await;
-        let (result, mut events) = match admitted {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                if receipt.send(Err(error)).is_err() {
-                    tracing::debug!("turn requester disconnected before admission failed");
-                }
-                return;
-            }
-        };
-        let turn = result.turn.clone();
-        if receipt.send(Ok(result)).is_err() {
-            tracing::debug!(turn_id = %turn.id, "turn requester disconnected after admission");
-        }
-        while let Some(event) = events.next().await {
-            match event {
-                Ok(ExecutionStreamEvent::Chunk(chunk)) => {
-                    let event = Event {
-                        id: Uuid7::now(),
-                        thread_id: thread.record().id,
-                        session_id: Some(turn.session_id),
-                        turn_id: Some(turn.id),
-                        created_at: chrono::Utc::now(),
-                        data: EventData::LinguaStreamChunk { chunk },
-                    };
-                    if progress.send(event).is_err() {
-                        tracing::trace!("no runtime progress subscribers");
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, turn_id = %turn.id, "runtime turn failed"),
-            }
-        }
-    });
-    let result = received
-        .await
-        .map_err(ErrorInternalServerError)?
-        .map_err(ErrorBadRequest)?;
-    Ok(HttpResponse::Accepted().json(result))
-}
-
-async fn turn_status(
-    service: Service,
-    path: web::Path<TurnPath>,
-) -> Result<web::Json<TurnStatusResult>, Error> {
-    crate::managed_agents::service::turn_status(&service.shared(), &path)
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn cancel_turn(
-    service: Service,
-    path: web::Path<TurnPath>,
-) -> Result<web::Json<CancelTurnResult>, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let runtime = if service.auth.is_some() {
-        if let Some(principal) = crate::permissions::turn_caller(thread.as_ref(), path.turn_id)
-            .await
-            .map_err(ErrorInternalServerError)?
+    fn host(&self) -> Arc<dyn crate::runtime_host::RuntimeHost> {
+        Arc::new(crate::TokioRuntimeHost)
+    }
+    async fn previews(
+        &self,
+        agent: &dyn exoharness::AgentHandle,
+        thread: Arc<dyn ThreadHandle>,
+    ) -> Result<Option<PreviewEndpoint>> {
+        let endpoint = self.runtime.active_preview_endpoint();
+        if endpoint.is_some()
+            && self
+                .runtime
+                .register_previews(agent, thread)
+                .await?
+                .is_none()
         {
-            service
-                .caller_runtime(principal)
-                .map_err(ErrorInternalServerError)?
-        } else {
-            service.runtime.clone()
+            return Ok(None);
         }
+        Ok(endpoint)
+    }
+    async fn cancel(
+        &self,
+        runtime: &Runtime,
+        path: &api::TurnPath,
+        thread: Arc<dyn ThreadHandle>,
+    ) -> Result<CancelTurnResult> {
+        let caller = if self.auth.is_some() {
+            crate::permissions::turn_caller(thread.as_ref(), path.turn_id)
+                .await?
+                .map(|principal| self.caller_runtime(principal))
+                .transpose()?
+        } else {
+            None
+        };
+        api::cancel_turn(
+            caller.as_deref().unwrap_or(runtime),
+            path.agent_id,
+            path.thread_id,
+            path.turn_id,
+        )
+        .await
+    }
+    async fn frontend_tool_result(
+        &self,
+        runtime: &Runtime,
+        path: &api::TurnPath,
+        body: FrontendToolResultBody,
+    ) -> Result<EventResult> {
+        Ok(EventResult {
+            event_id: runtime
+                .frontend_tool_result(path.agent_id, path.thread_id, path.turn_id, &body)
+                .await?,
+        })
+    }
+}
+
+async fn handle(
+    service: Service,
+    request: HttpRequest,
+    mut payload: web::Payload,
+) -> Result<HttpResponse, Error> {
+    // Only thread creation and forks accept large embedded environments.
+    let large_body = request.method() == actix_web::http::Method::POST
+        && (request.path().ends_with("/thread") || request.path().ends_with("/fork"));
+    let limit = if large_body {
+        OPTIONAL_JSON_BODY_LIMIT
     } else {
-        service.runtime.clone()
+        2 * 1024 * 1024
     };
-    crate::managed_agents::service::cancel_turn(
-        &runtime,
-        path.agent_id,
-        path.thread_id,
-        path.turn_id,
+    let mut body = Vec::new();
+    while let Some(chunk) = payload.next().await {
+        let chunk = chunk?;
+        if chunk.len() > limit - body.len() {
+            return Err(ErrorPayloadTooLarge("request body exceeds limit"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if !body.is_empty()
+        && !request
+            .headers()
+            .get("content-type")
+            .and_then(|h| h.to_str().ok())
+            .is_some_and(|h| {
+                h.split(';').next().is_some_and(|h| {
+                    h.trim().eq_ignore_ascii_case("application/json")
+                        || h.trim().to_ascii_lowercase().ends_with("+json")
+                })
+            })
+    {
+        return Ok(HttpResponse::BadRequest().body("Content-Type must be JSON"));
+    }
+    let relative = request
+        .path()
+        .strip_prefix(RUNTIME_PATH)
+        .ok_or_else(|| ErrorInternalServerError("request outside runtime scope"))?;
+    let path = relative
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            percent_encoding::percent_decode_str(part)
+                .decode_utf8()
+                .map(|s| s.into_owned())
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(actix_web::error::ErrorBadRequest)?;
+    let input = dispatch::Request {
+        method: request.method().to_string(),
+        path,
+        query: request.query_string().into(),
+        body: String::from_utf8(body).map_err(actix_web::error::ErrorBadRequest)?,
+    };
+    match dispatch::handle(
+        &service.shared(),
+        service.0.as_ref(),
+        &service.progress,
+        &input,
     )
     .await
-    .map(web::Json)
-    .map_err(request_error)
-}
-
-async fn approval_response(
-    service: Service,
-    path: web::Path<TurnPath>,
-    body: web::Json<ApprovalResponseBody>,
-) -> Result<web::Json<EventResult>, Error> {
-    crate::managed_agents::service::approval_response(&service.shared(), &path, body.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn frontend_tool_result(
-    service: Service,
-    path: web::Path<TurnPath>,
-    body: web::Json<FrontendToolResultBody>,
-) -> Result<web::Json<EventResult>, Error> {
-    let event_id = service
-        .runtime
-        .frontend_tool_result(path.agent_id, path.thread_id, path.turn_id, &body)
-        .await
-        .map_err(ErrorBadRequest)?;
-    Ok(web::Json(EventResult { event_id }))
-}
-
-async fn events(
-    service: Service,
-    path: web::Path<ThreadPath>,
-    query: web::Query<EventsQuery>,
-) -> Result<web::Json<exoharness::GetEventsResult>, Error> {
-    crate::managed_agents::service::events(&service.shared(), &path, query.into_inner())
-        .await
-        .map(web::Json)
-        .map_err(request_error)
-}
-
-async fn watch(
-    service: Service,
-    path: web::Path<ThreadPath>,
-    query: web::Query<WatchQuery>,
-) -> Result<HttpResponse, Error> {
-    let agent = service.agent(path.agent_id).await?;
-    let thread = service.thread(agent.as_ref(), path.thread_id).await?;
-    let receiver = service.progress.subscribe();
-    let thread_id = path.thread_id;
-    // Unbounded is live-only; the nil cursor includes all saved events.
-    let durable = thread
-        .watch_events(Bound::Excluded(
-            query.after.unwrap_or_else(|| Uuid7(Default::default())),
-        ))
-        .await
-        .map_err(ErrorBadRequest)?;
-    let mut stream: EventStream = Box::pin(futures::stream::select(
-        durable,
-        progress_stream(receiver, thread_id),
-    ));
-    if let Some(auth) = service.auth.clone() {
-        let session = service
-            .session
-            .clone()
-            .ok_or_else(|| ErrorUnauthorized("session missing"))?;
-        stream = Box::pin(futures::stream::unfold(
-            (
-                stream,
-                auth,
-                session,
-                tokio::time::interval(std::time::Duration::from_secs(1)),
-            ),
-            |(mut events, auth, session, mut timer)| async move {
-                loop {
-                    tokio::select! {
-                        event = events.next() => return event.map(|event| (event, (events, auth, session, timer))),
-                        _ = timer.tick() => if auth.session_principal(&session).await.is_err() { return None; },
-                    }
-                }
-            },
-        ));
-    }
-    Ok(HttpResponse::Ok()
-        .insert_header(("content-type", "text/event-stream; charset=utf-8"))
-        .insert_header(("cache-control", "no-cache, no-transform"))
-        .insert_header(("connection", "keep-alive"))
-        .insert_header(("x-accel-buffering", "no"))
-        .streaming(
-            sse::encode(Box::pin(stream)).map(|result| result.map_err(ErrorInternalServerError)),
-        ))
-}
-
-fn progress_stream(receiver: broadcast::Receiver<Event>, thread_id: ThreadId) -> EventStream {
-    Box::pin(futures::stream::unfold(
-        receiver,
-        move |mut receiver| async move {
-            loop {
-                match receiver.recv().await {
-                    Ok(event) if event.thread_id == thread_id => {
-                        return Some((Ok(event), receiver));
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                }
+    {
+        dispatch::Response::Error { status, message } => Ok(HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(status).expect("valid request status"),
+        )
+        .body(message)),
+        dispatch::Response::Json { status, body } => Ok(HttpResponse::build(
+            actix_web::http::StatusCode::from_u16(status).expect("valid request status"),
+        )
+        .content_type("application/json")
+        .body(body)),
+        dispatch::Response::Watch(mut stream) => {
+            if let Some(auth) = service.auth.clone() {
+                let session = service
+                    .session
+                    .clone()
+                    .ok_or_else(|| ErrorUnauthorized("session missing"))?;
+                stream = Box::pin(futures::stream::unfold(
+                    (
+                        stream,
+                        auth,
+                        session,
+                        tokio::time::interval(std::time::Duration::from_secs(1)),
+                    ),
+                    |(mut events, auth, session, mut timer)| async move {
+                        loop {
+                            tokio::select! {
+                                event = events.next() => return event.map(|event| (event, (events, auth, session, timer))),
+                                _ = timer.tick() => if auth.session_principal(&session).await.is_err() { return None; },
+                            }
+                        }
+                    },
+                ));
             }
-        },
-    ))
-}
-
-fn request_error(error: anyhow::Error) -> Error {
-    let status =
-        actix_web::http::StatusCode::from_u16(crate::managed_agents::service::error_status(&error))
-            .expect("valid request status");
-    actix_web::error::InternalError::new(error, status).into()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use anyhow::Context;
-
-    #[tokio::test]
-    async fn lagged_progress_skips_lost_chunks_and_keeps_the_stream_open() -> Result<()> {
-        let thread_id = Uuid7::now();
-        let event = |thread_id| Event {
-            id: Uuid7::now(),
-            thread_id,
-            session_id: None,
-            turn_id: None,
-            created_at: chrono::Utc::now(),
-            data: EventData::LinguaStreamChunk {
-                chunk: lingua::UniversalStreamChunk::new(
-                    Some("chunk".into()),
-                    None,
-                    vec![],
-                    None,
-                    None,
-                ),
-            },
-        };
-        let (sender, receiver) = broadcast::channel(2);
-        let mut progress = progress_stream(receiver, thread_id);
-        sender.send(event(thread_id))?;
-        sender.send(event(Uuid7::now()))?;
-        let retained = event(thread_id);
-        sender.send(retained.clone())?;
-        let actual = tokio::time::timeout(std::time::Duration::from_secs(1), progress.next())
-            .await?
-            .context("progress stream ended after lag")??;
-        assert_eq!(actual.id, retained.id);
-        let next = event(thread_id);
-        sender.send(next.clone())?;
-        assert_eq!(
-            progress.next().await.context("progress stream ended")??.id,
-            next.id
-        );
-        drop(sender);
-        assert!(progress.next().await.is_none());
-        Ok(())
+            Ok(HttpResponse::Ok()
+                .insert_header(("content-type", "text/event-stream; charset=utf-8"))
+                .insert_header(("cache-control", "no-cache, no-transform"))
+                .insert_header(("connection", "keep-alive"))
+                .insert_header(("x-accel-buffering", "no"))
+                .streaming(
+                    sse::encode(Box::pin(stream))
+                        .map(|result| result.map_err(ErrorInternalServerError)),
+                ))
+        }
     }
 }

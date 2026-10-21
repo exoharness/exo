@@ -19,6 +19,7 @@ struct ServerState {
     requests: Arc<Mutex<Vec<String>>>,
     sse: bool,
     anonymous: bool,
+    omit_auth_challenge: bool,
     failure: Option<(&'static str, StatusCode, bool)>,
     expire_session: Arc<AtomicBool>,
     token: Arc<Mutex<String>>,
@@ -30,6 +31,7 @@ impl Default for ServerState {
             requests: Arc::default(),
             sse: false,
             anonymous: false,
+            omit_auth_challenge: false,
             failure: None,
             expire_session: Arc::default(),
             token: Arc::new(Mutex::new("fixture-token".into())),
@@ -95,6 +97,13 @@ async fn rpc(
     if !state.anonymous
         && headers.get("authorization").and_then(|h| h.to_str().ok()) != Some(expected.as_str())
     {
+        if state.omit_auth_challenge {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"errors": ["Unauthorized"]})),
+            )
+                .into_response();
+        }
         return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Bearer")]).into_response();
     }
     let result = match request.method {
@@ -412,7 +421,9 @@ async fn authentication_challenges_distinguish_missing_credentials_from_rejected
                     };
                     let message = format!("{error:#}");
                     let auth = error.downcast_ref::<exo_mcp::McpAuthenticationError>();
-                    if status == StatusCode::INTERNAL_SERVER_ERROR || !challenge {
+                    if status == StatusCode::INTERNAL_SERVER_ERROR
+                        || (status == StatusCode::FORBIDDEN && !challenge)
+                    {
                         assert!(auth.is_none(), "{phase}: {message}");
                         assert!(!message.contains("MCP authentication failed"), "{message}");
                     } else {
@@ -662,4 +673,85 @@ async fn oauth_probe_preserves_challenges_and_closes_anonymous_sessions() -> any
             .any(|request| request == "delete")
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn unavailable_private_server_does_not_hide_public_tools() -> anyhow::Result<()> {
+    let public = Fixture::with_state(ServerState {
+        anonymous: true,
+        ..Default::default()
+    })
+    .await;
+    let private = Fixture::start(false).await;
+    let servers = vec![public.config("public"), private.config("private")];
+    let tools =
+        McpToolSet::connect_available_with_provider(&servers, Arc::new(McpCredentials::default()))
+            .await?;
+    assert!(
+        tools
+            .tools()
+            .iter()
+            .all(|tool| tool.server_name == "public")
+    );
+    assert_eq!(tools.tools().len(), 2);
+    tools.close().await?;
+    let invalid = McpCredentials::from(std::collections::HashMap::from([(
+        "private".into(),
+        "wrong-token".into(),
+    )]));
+    let error = match McpToolSet::connect_available_with_provider(&servers, Arc::new(invalid)).await
+    {
+        Ok(tools) => {
+            tools.close().await?;
+            anyhow::bail!("invalid supplied credentials must fail");
+        }
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .downcast_ref::<exo_mcp::McpAuthenticationError>()
+            .is_some_and(|auth| auth.credential_supplied)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn refreshes_rejected_credentials_without_an_authenticate_header() {
+    let fixture = Fixture::with_state(ServerState {
+        omit_auth_challenge: true,
+        ..Default::default()
+    })
+    .await;
+    let credentials = Arc::new(RotatingCredentials {
+        token: Mutex::new(Some(("1".into(), "expired-token".into()))),
+        refresh_token: Mutex::new(Some("fixture-token".into())),
+        ..Default::default()
+    });
+    let tools =
+        McpToolSet::connect_with_provider(&[fixture.config("fixture")], credentials.clone())
+            .await
+            .unwrap();
+    assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 1);
+    *fixture.state.token.lock().unwrap() = "rotated-token".into();
+    *credentials.refresh_token.lock().unwrap() = Some("rotated-token".into());
+    tools
+        .call(
+            "exo_mcp__fixture__search",
+            serde_json::from_value(json!({"query":"hello"})).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(credentials.refreshes.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture
+            .state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| *r == "call:search:hello")
+            .count(),
+        1
+    );
+    tools.close().await.unwrap();
 }

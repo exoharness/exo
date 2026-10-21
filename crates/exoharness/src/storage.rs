@@ -14,7 +14,11 @@ use crate::Result;
 pub trait Storage: Send + Sync {
     async fn put(&self, key: &str, bytes: Vec<u8>, blob: bool) -> Result<()>;
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    async fn list(&self, prefix: &str) -> Result<Vec<String>>;
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.list_after(prefix, None).await
+    }
+    /// List keys strictly after a previously listed key, in lexical order.
+    async fn list_after(&self, prefix: &str, after: Option<&str>) -> Result<Vec<String>>;
     async fn list_directories(&self, prefix: &str) -> Result<Vec<String>> {
         let base = if prefix.is_empty() {
             String::new()
@@ -39,19 +43,32 @@ pub trait Storage: Send + Sync {
 mod native;
 
 #[derive(Clone)]
-pub(crate) struct BasicObjectStore {
+pub struct BasicObjectStore {
     store: Arc<dyn Storage>,
     #[cfg(test)]
     fail_json_put_after: Arc<std::sync::Mutex<Option<usize>>>,
+    #[cfg(test)]
+    reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl BasicObjectStore {
-    pub(crate) fn new(store: Arc<dyn Storage>) -> Self {
+    pub(crate) fn raw(&self) -> Arc<dyn Storage> {
+        self.store.clone()
+    }
+
+    pub fn new(store: Arc<dyn Storage>) -> Self {
         Self {
             store,
             #[cfg(test)]
             fail_json_put_after: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(test)]
+            reads: Arc::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn read_count(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -62,11 +79,7 @@ impl BasicObjectStore {
             .expect("fault counter poisoned") = Some(successful_puts);
     }
 
-    pub(crate) async fn put_json<T: Serialize>(
-        &self,
-        key: impl AsRef<Path>,
-        value: &T,
-    ) -> Result<()> {
+    pub async fn put_json<T: Serialize>(&self, key: impl AsRef<Path>, value: &T) -> Result<()> {
         #[cfg(test)]
         {
             let mut remaining = self
@@ -81,17 +94,13 @@ impl BasicObjectStore {
                 *remaining = Some(count - 1);
             }
         }
-        let bytes = serde_json::to_vec_pretty(value)?;
-        let blob = bytes.len() > 64 * 1024;
-        self.store
-            .put(&normalize_path(key.as_ref()), bytes, blob)
-            .await?;
-        Ok(())
+        self.put_bytes(key, serde_json::to_vec_pretty(value)?).await
     }
 
     pub(crate) async fn put_bytes(&self, key: impl AsRef<Path>, value: Vec<u8>) -> Result<()> {
+        let blob = value.len() > 64 * 1024;
         self.store
-            .put(&normalize_path(key.as_ref()), value, true)
+            .put(&normalize_path(key.as_ref()), value, blob)
             .await?;
         Ok(())
     }
@@ -103,7 +112,7 @@ impl BasicObjectStore {
             .with_context(|| format!("failed to decode JSON {}", key.display()))
     }
 
-    pub(crate) async fn get_json_if_exists<T: DeserializeOwned>(
+    pub async fn get_json_if_exists<T: DeserializeOwned>(
         &self,
         key: impl AsRef<Path>,
     ) -> Result<Option<T>> {
@@ -117,6 +126,9 @@ impl BasicObjectStore {
     }
 
     pub(crate) async fn get_bytes(&self, key: impl AsRef<Path>) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = key.as_ref();
         self.store
             .get(&normalize_path(key))
@@ -128,11 +140,28 @@ impl BasicObjectStore {
         &self,
         key: impl AsRef<Path>,
     ) -> Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.store.get(&normalize_path(key.as_ref())).await
     }
 
-    pub(crate) async fn list_keys(&self, prefix: impl AsRef<Path>) -> Result<Vec<String>> {
-        let mut keys = self.store.list(&normalize_path(prefix.as_ref())).await?;
+    pub async fn list_keys(&self, prefix: impl AsRef<Path>) -> Result<Vec<String>> {
+        self.list_keys_after(prefix, None).await
+    }
+
+    pub(crate) async fn list_keys_after(
+        &self,
+        prefix: impl AsRef<Path>,
+        after: Option<&str>,
+    ) -> Result<Vec<String>> {
+        #[cfg(test)]
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut keys = self
+            .store
+            .list_after(&normalize_path(prefix.as_ref()), after)
+            .await?;
         keys.sort();
         Ok(keys)
     }

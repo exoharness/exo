@@ -5,7 +5,7 @@ use oauth2::{
     AuthType, ClientId, ClientSecret, DeviceAuthorizationUrl, Scope,
     StandardDeviceAuthorizationResponse, TokenResponse, TokenUrl, basic::BasicClient,
 };
-use rmcp::transport::auth::AuthorizationManager;
+use rmcp::transport::auth::{AuthorizationManager, AuthorizationMetadata};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -14,7 +14,7 @@ pub enum Preset {
     Openai,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 #[group(skip)]
 #[command(next_help_heading = "Credential source")]
 #[command(group(clap::ArgGroup::new("login_source").multiple(true).args(["preset", "url", "client_id"])))]
@@ -50,6 +50,35 @@ pub struct CredentialArgs {
 }
 
 impl CredentialArgs {
+    pub(super) fn for_mcp(&self, url: &str) -> Self {
+        Self {
+            url: Some(url.into()),
+            ..self.clone()
+        }
+    }
+
+    pub(super) fn imports_token(&self) -> bool {
+        self.token_env.is_some()
+    }
+
+    fn client_secret(&self, env: &HashMap<String, String>) -> Result<Option<String>> {
+        self.client_secret_env
+            .as_deref()
+            .map(|variable| crate::env_value_from_arg("--client-secret-env", variable, env))
+            .transpose()
+    }
+
+    pub(super) async fn read_mcp(
+        &self,
+        login: McpLogin,
+        env: &HashMap<String, String>,
+        policy: &CredentialPolicy,
+    ) -> Result<Secret> {
+        let secret = discover(self, login, self.client_secret(env)?).await?;
+        exoharness::vault::validate_secret(&secret, Some(policy))?;
+        Ok(secret)
+    }
+
     pub(super) fn default_name(&self) -> Option<&'static str> {
         match self.preset {
             Some(Preset::Github) => Some("github"),
@@ -109,13 +138,12 @@ impl CredentialArgs {
             policy.is_some(),
             "provide a credential policy with --allow-origin, --allow-url, or --policy"
         );
-        let client_secret = self
-            .client_secret_env
-            .as_deref()
-            .map(|variable| crate::env_value_from_arg("--client-secret-env", variable, env))
-            .transpose()?;
+        let client_secret = self.client_secret(env)?;
         let secret = if let Some(resource) = &self.url {
-            discover(self, resource, client_secret).await?
+            let login = prepare_mcp_login(resource)
+                .await?
+                .context("MCP server does not require authentication; no login needed")?;
+            discover(self, login, client_secret).await?
         } else if self.client_id.is_some() {
             device(self, client_secret).await?
         } else {
@@ -126,41 +154,58 @@ impl CredentialArgs {
     }
 }
 
-async fn discover(
-    args: &CredentialArgs,
-    resource: &str,
-    client_secret: Option<String>,
-) -> Result<Secret> {
+pub(super) struct McpLogin {
+    manager: AuthorizationManager,
+    metadata: AuthorizationMetadata,
+}
+
+pub(super) async fn prepare_mcp_login(resource: &str) -> Result<Option<McpLogin>> {
     CredentialDestination::url(resource)?;
-    let mut manager = AuthorizationManager::new(resource).await?;
+    let manager = AuthorizationManager::new(resource).await?;
     // Standard discovery also handles servers whose 401 omits WWW-Authenticate.
     let resolution = manager.resolve_metadata().await?;
     let resolution = if resolution.source.is_discovered() {
         resolution
     } else {
-        let challenge = exo_mcp::probe_auth_challenge(resource).await?;
+        let Some(challenge) = exo_mcp::probe_auth_challenge(resource).await? else {
+            return Ok(None);
+        };
         manager
-            .resolve_metadata_from_challenge(challenge.as_deref())
+            .resolve_metadata_from_challenge(Some(&challenge))
             .await?
     };
     ensure!(
         resolution.source.is_discovered(),
         "resource does not advertise OAuth; import a token with `exo vault secret create --token-env`"
     );
+    Ok(Some(McpLogin {
+        manager,
+        metadata: resolution.metadata,
+    }))
+}
+
+async fn discover(
+    args: &CredentialArgs,
+    login: McpLogin,
+    client_secret: Option<String>,
+) -> Result<Secret> {
+    let McpLogin {
+        mut manager,
+        metadata,
+    } = login;
     #[derive(serde::Deserialize)]
     struct Authentication {
         #[serde(default)]
         token_endpoint_auth_methods_supported: Vec<String>,
     }
-    let authentication: Authentication = serde_json::from_value(serde_json::to_value(
-        &resolution.metadata.additional_fields,
-    )?)?;
+    let authentication: Authentication =
+        serde_json::from_value(serde_json::to_value(&metadata.additional_fields)?)?;
     let methods = authentication.token_endpoint_auth_methods_supported;
     let client_secret_basic = client_secret.is_some()
         && (methods.iter().any(|m| m == "client_secret_basic")
             || !methods.iter().any(|m| m == "client_secret_post"));
-    let token_endpoint = resolution.metadata.token_endpoint.clone();
-    manager.set_metadata(resolution.metadata);
+    let token_endpoint = metadata.token_endpoint.clone();
+    manager.set_metadata(metadata);
     let grant = crate::oauth::authorize_with(
         manager,
         &args.scope,

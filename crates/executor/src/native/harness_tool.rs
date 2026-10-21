@@ -1,11 +1,5 @@
 use std::path::PathBuf;
 
-use crate::adapter::AdapterStore;
-use crate::adapter::tools::{
-    AdapterCreationOptions, execute_create_adapter_tool, execute_delete_adapter_tool,
-    execute_disable_adapter_tool, execute_enable_adapter_tool, execute_list_adapter_events_tool,
-    execute_list_adapters_tool, execute_send_adapter_message_tool,
-};
 use crate::agent_sandbox::{current_agent_sandbox, ensure_agent_sandbox};
 use crate::conversation_events::execute_list_conversation_events_tool;
 use crate::conversation_sandbox::{
@@ -35,29 +29,17 @@ pub struct BasicToolRuntime;
 #[derive(Debug, Clone)]
 pub struct ExoToolRuntime {
     scheduler_store: SchedulerStore,
-    adapter_store: AdapterStore,
-    adapter_creation_options: AdapterCreationOptions,
 }
 
 impl ExoToolRuntime {
     pub fn from_root(root: impl AsRef<std::path::Path>) -> Result<Self> {
         let root = root.as_ref();
-        Ok(Self::with_roots(
-            root.join("scheduled-tasks"),
-            root.join("adapters"),
-            crate::typescript::typescript_workspace_root()?.join("exo/adapters"),
-        ))
+        Ok(Self::with_scheduler_root(root.join("scheduled-tasks")))
     }
 
-    pub fn with_roots(
-        scheduler_root: impl Into<PathBuf>,
-        adapter_root: impl Into<PathBuf>,
-        adapter_worker_root: impl Into<PathBuf>,
-    ) -> Self {
+    pub fn with_scheduler_root(scheduler_root: impl Into<PathBuf>) -> Self {
         Self {
             scheduler_store: SchedulerStore::new(scheduler_root),
-            adapter_store: AdapterStore::new(adapter_root),
-            adapter_creation_options: AdapterCreationOptions::new(adapter_worker_root),
         }
     }
 }
@@ -163,46 +145,8 @@ impl ToolRuntime for ExoToolRuntime {
                 )
                 .await
             }
-            "create_adapter" => {
-                execute_create_adapter_tool(
-                    agent,
-                    conversation,
-                    &self.adapter_store,
-                    &self.adapter_creation_options,
-                    request,
-                )
-                .await
-            }
-            "list_adapters" => {
-                execute_list_adapters_tool(agent, conversation, &self.adapter_store, request).await
-            }
-            "list_adapter_events" => {
-                execute_list_adapter_events_tool(agent, conversation, &self.adapter_store, request)
-                    .await
-            }
             "list_conversation_events" => {
                 execute_list_conversation_events_tool(conversation, request).await
-            }
-            "disable_adapter" => {
-                execute_disable_adapter_tool(conversation, agent, &self.adapter_store, request)
-                    .await
-            }
-            "enable_adapter" => {
-                execute_enable_adapter_tool(conversation, agent, &self.adapter_store, request).await
-            }
-            "delete_adapter" => {
-                execute_delete_adapter_tool(conversation, agent, &self.adapter_store, request).await
-            }
-            "send_adapter_message" => {
-                execute_send_adapter_message_tool(
-                    agent,
-                    conversation,
-                    agent_config,
-                    config,
-                    &self.adapter_store,
-                    request,
-                )
-                .await
             }
             "get_sandbox_status" => {
                 execute_get_sandbox_status_tool(agent, conversation, agent_config, config, request)
@@ -254,7 +198,7 @@ impl ToolRuntime for ExoToolRuntime {
 }
 
 use crate::ShellToolArguments;
-use crate::shell_tool::read_shell_process;
+use crate::shell_tool::{execute_shell_tool, read_shell_process};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -879,29 +823,6 @@ fn parse_snapshot_id(value: &str) -> Result<SnapshotId> {
         .map_err(|error| anyhow::anyhow!("invalid snapshotId {value}: {error}"))
 }
 
-async fn execute_shell_tool(
-    conversation: &dyn ConversationHandle,
-    agent_config: &AgentConfig,
-    config: &ConversationConfig,
-    request: &ToolRequest,
-) -> Result<ToolResult> {
-    let args =
-        serde_json::from_value::<ShellToolArguments>(Value::Object(request.arguments.clone()))?;
-    let program = config
-        .shell_program
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("shell tool is not enabled for this conversation"))?;
-    let sandbox_id = ensure_shell_sandbox(conversation, agent_config, config).await?;
-    let process = conversation
-        .run_in_sandbox(RunInSandboxRequest {
-            id: sandbox_id,
-            command: vec![program, "-lc".to_string(), args.command],
-            env: Default::default(),
-        })
-        .await?;
-    read_shell_process(process).await
-}
-
 async fn execute_exo_shell_tool(
     agent: &dyn AgentHandle,
     conversation: &dyn ConversationHandle,
@@ -930,20 +851,6 @@ async fn execute_exo_shell_tool(
         })
         .await?;
     read_shell_process(process).await
-}
-
-pub(crate) async fn ensure_shell_sandbox(
-    conversation: &dyn ConversationHandle,
-    agent_config: &AgentConfig,
-    config: &ConversationConfig,
-) -> Result<String> {
-    ensure_conversation_sandbox(
-        conversation,
-        agent_config,
-        config,
-        config.shell_program.as_deref(),
-    )
-    .await
 }
 
 #[cfg(test)]

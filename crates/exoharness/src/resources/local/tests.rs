@@ -303,35 +303,71 @@ fn directory_copy_preserves_links_and_excludes_runtime_state() -> Result<()> {
 }
 
 #[test]
-fn checkout_resolves_branches_tags_and_full_commits() -> Result<()> {
+fn checkout_fetches_only_the_selected_revision() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let repo = temp.path().join("repo");
-    fs::create_dir(&repo)?;
-    git(&repo, ["init", "--initial-branch=main"], None)?;
-    let tagged = commit(&repo, "release")?;
-    git(&repo, ["tag", "v1"], None)?;
-    let latest = commit(&repo, "latest")?;
+    let source = temp.path().join("source");
+    fs::create_dir(&source)?;
+    git(&source, ["init", "--initial-branch=main"], None)?;
+    let tagged = commit(&source, "release")?;
     git(
-        &repo,
-        ["update-ref", "refs/remotes/origin/main", &latest],
+        &source,
+        [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "tag",
+            "-a",
+            "v1",
+            "-m",
+            "release",
+        ],
         None,
     )?;
+    git(&source, ["branch", "other"], None)?;
+    let latest = commit(&source, "latest")?;
+    let url = url::Url::from_directory_path(&source).unwrap().to_string();
     let store = ResourceStore::new(&temp.path().join("state"))?;
-    for (reference, branch, revision) in [
-        ("main", Some("main"), &latest),
-        ("v1", None, &tagged),
-        (tagged.as_str(), None, &tagged),
-    ] {
+    for (index, (reference, branch, revision)) in [
+        (None, Some("main"), &latest),
+        (Some("main"), Some("main"), &latest),
+        (Some("other"), Some("other"), &tagged),
+        (Some("v1"), None, &tagged),
+        (Some(tagged.as_str()), None, &tagged),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let workspace = temp.path().join(format!("checkout-{index}"));
+        fs::create_dir(&workspace)?;
+        git(&workspace, ["init"], None)?;
+        git(&workspace, ["remote", "add", "origin", &url], None)?;
         assert_eq!(
-            store.resolve_checkout(&repo, Some(reference), None)?,
+            store.fetch_checkout(&workspace, reference, None)?,
             (branch.map(str::to_owned), revision.clone())
         );
+        assert_eq!(
+            git(&workspace, ["rev-list", "--count", "--all"], None)?.trim(),
+            "1"
+        );
+        assert_eq!(
+            git(&workspace, ["rev-parse", "--is-shallow-repository"], None)?.trim(),
+            "true"
+        );
+        let refs = git(&workspace, ["for-each-ref", "--format=%(refname)"], None)?;
+        let expected = match (branch, reference) {
+            (Some(name), _) => format!("refs/remotes/origin/{name}"),
+            (_, Some("v1")) => "refs/tags/v1".into(),
+            _ => "refs/exo/checkout".into(),
+        };
+        assert_eq!(refs.trim(), expected);
+        assert!(!git(&workspace, ["config", "remote.origin.fetch"], None)?.contains('*'));
+        assert!(
+            store
+                .fetch_checkout(&workspace, Some("missing"), None)
+                .is_err()
+        );
     }
-    assert!(
-        store
-            .resolve_checkout(&repo, Some("missing"), None)
-            .is_err()
-    );
     Ok(())
 }
 

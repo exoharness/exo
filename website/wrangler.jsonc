@@ -6,7 +6,6 @@
   "assets": {
     "binding": "ASSETS",
     "directory": "dist",
-    "run_worker_first": ["/chat", "/chat/*"],
   },
   "migrations": [
     {

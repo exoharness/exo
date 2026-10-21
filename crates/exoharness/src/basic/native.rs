@@ -1422,6 +1422,32 @@ impl BasicConversationHandle {
 pub struct TokioRuntimeHost;
 impl crate::runtime_host::RuntimeHost for TokioRuntimeHost {
     fn spawn(&self, task: futures::future::BoxFuture<'static, ()>) {
-        drop(tokio::spawn(task));
+        ProcessRuntimeHost(tokio::runtime::Handle::current()).spawn(task);
+    }
+
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> futures::future::BoxFuture<'static, Result<()>> {
+        ProcessRuntimeHost(tokio::runtime::Handle::current()).sleep(duration)
+    }
+}
+
+/// Capture the runtime before opening process I/O so drop can run on any thread.
+pub(crate) struct ProcessRuntimeHost(pub tokio::runtime::Handle);
+impl crate::runtime_host::RuntimeHost for ProcessRuntimeHost {
+    fn spawn(&self, task: futures::future::BoxFuture<'static, ()>) {
+        drop(self.0.spawn(task));
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> futures::future::BoxFuture<'static, Result<()>> {
+        let _entered = self.0.enter();
+        let sleep = tokio::time::sleep(duration);
+        Box::pin(async move {
+            sleep.await;
+            Ok(())
+        })
     }
 }

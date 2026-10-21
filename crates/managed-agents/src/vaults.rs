@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-#[cfg(feature = "client")]
 use async_trait::async_trait;
 use exo_mcp::McpServerConfig;
-#[cfg(feature = "client")]
 use exo_mcp::{McpCredential, McpCredentialProvider};
 use exoharness::vault::{
     CredentialDestination, SecretReference, VaultContext, VaultHandle, VaultId, VaultRecord,
@@ -163,20 +161,17 @@ pub async fn load_selection(thread: &dyn ThreadHandle) -> Result<Option<VaultSel
     Ok(Some(selected))
 }
 
-#[cfg(feature = "client")]
 pub struct VaultMcpCredentials {
     vaults: Vec<Arc<dyn VaultHandle>>,
     selection: VaultSelection,
 }
 
-#[cfg(feature = "client")]
 impl VaultMcpCredentials {
     pub fn new(vaults: Vec<Arc<dyn VaultHandle>>, selection: VaultSelection) -> Self {
         Self { vaults, selection }
     }
 }
 
-#[cfg(feature = "client")]
 #[async_trait]
 impl McpCredentialProvider for VaultMcpCredentials {
     fn authentication_failure_context(&self, server: &McpServerConfig, supplied: bool) -> String {
@@ -221,7 +216,6 @@ impl McpCredentialProvider for VaultMcpCredentials {
     }
 }
 
-#[cfg(feature = "client")]
 impl VaultMcpCredentials {
     async fn credential(
         &self,

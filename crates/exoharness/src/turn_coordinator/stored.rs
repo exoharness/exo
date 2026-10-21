@@ -213,7 +213,11 @@ impl<Work: Clone + Send + Sync + 'static> TurnAdmission<Work> for StoredTurnCoor
                 principal: turn.principal.clone(),
                 key,
                 turn: record.clone(),
-                expires_at: now + 24 * 60 * 60,
+                expires_at: if turn.options.retain_receipt {
+                    i64::MAX
+                } else {
+                    now + 24 * 60 * 60
+                },
             });
         }
         let entry = QueuedTurn {

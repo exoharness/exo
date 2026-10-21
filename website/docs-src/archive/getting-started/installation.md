@@ -26,7 +26,7 @@ You'll also need an **OpenAI API key**.
 ## Run the setup script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/exoharness/exo/main/setup.sh -o setup.sh
+curl -fsSL https://raw.githubusercontent.com/exoharness/exo/main/examples/self-improving-agent/setup.sh -o setup.sh
 bash setup.sh
 ```
 

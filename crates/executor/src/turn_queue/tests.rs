@@ -210,6 +210,7 @@ impl Fixture {
             options: TurnOptions {
                 idempotency_key: Some(Uuid7::now().to_string()),
                 attention: TurnAttention::Wake,
+                ..Default::default()
             },
         })
     }
@@ -431,6 +432,7 @@ async fn queued_cancellation_skips_execution_and_interrupt_starts_its_replacemen
             TurnOptions {
                 attention: TurnAttention::Interrupt,
                 idempotency_key: Some("replacement".into()),
+                ..Default::default()
             },
         )
         .await?;

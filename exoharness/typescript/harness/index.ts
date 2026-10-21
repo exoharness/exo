@@ -33,7 +33,12 @@ export interface AgentConfig {
 
 export interface AgentSandboxConfig {
   image?: string | null;
-  provider: "daytona" | "apple_container" | "docker" | "local_process";
+  provider:
+    | "daytona"
+    | "apple_container"
+    | "docker"
+    | "local_process"
+    | "cloudflare";
   mounts: FileSystemMount[];
   enableNetworking: boolean;
   scope: "agent" | "conversation";
@@ -137,6 +142,7 @@ export interface ConversationConfig {
     | "apple_container"
     | "docker"
     | "local_process"
+    | "cloudflare"
     | null;
   shellProgram?: string | null;
   sandboxScope?: "agent" | "conversation" | null;
@@ -415,6 +421,7 @@ export interface TurnContext {
   ): Promise<SandboxProcess>;
   executePendingTools(toolCalls: PendingToolCall[]): Promise<EventData[]>;
   stream: {
+    status(message: string): Promise<void>;
     firstChunk(ttftMs: number): Promise<void>;
     text(text: string): Promise<void>;
     /** For custom tool events (e.g. RLM); canonical tool events stream after persistence. */
@@ -952,5 +959,4 @@ export function toJsonObject(value: unknown): JsonObject {
 export * from "./tools";
 export * from "./built-in-tools";
 export * from "./tool-modules";
-export * from "./adapter-tools";
 export * from "./skill-tools";

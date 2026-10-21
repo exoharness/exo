@@ -30,9 +30,9 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{self, ServerConfig, pki_types::PrivatePkcs8KeyDer};
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{canonical_egress_host, canonical_egress_hosts};
+use crate::types::canonical_egress_host;
 
-use crate::{EgressPolicy, SandboxEgressProxy, SandboxNetworkPolicy};
+use crate::{EgressPolicy, SandboxEgressProxy};
 
 mod external;
 pub use external::ExternalProxyConfig;
@@ -50,7 +50,7 @@ use crate::egress_credentials::{Binding, strip_hop_headers};
 pub use crate::egress_credentials::{EgressCredentialResolver, EgressDestination, EgressIdentity};
 pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_REQUEST_BODY: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
 const HTTP_BUFFER_SIZE: usize = 32 * 1024;
 const MAX_CONNECTIONS: usize = 128;
 
@@ -115,10 +115,10 @@ struct PooledClient {
 // are pooled by destination and replaced whenever its resolved addresses change.
 pub(crate) struct State {
     external: Option<ExternalProxyConfig>,
+    max_request_body_bytes: usize,
     clients: Mutex<HashMap<(String, u16), PooledClient>>,
     hosts: HashSet<String>,
-    unrestricted: bool,
-    allowed_tcp_ports: Option<Vec<u16>>,
+    network: crate::egress_credentials::NetworkPolicy,
     bindings: Vec<Binding>,
     identity: EgressIdentity,
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
@@ -243,32 +243,22 @@ impl State {
             proxy.validate()?;
         }
         ensure!(
-            policy
-                .allowed_tcp_ports
-                .as_ref()
-                .is_none_or(|ports| ports.iter().all(|port| *port != 0)),
-            "policy.allowed_tcp_ports cannot contain port zero"
-        );
-        ensure!(
             !identity.sandbox_id.is_empty(),
             "egress identity is required"
         );
-        let unrestricted = policy.networking == SandboxNetworkPolicy::Unrestricted;
-        let hosts = match &policy.networking {
-            SandboxNetworkPolicy::Limited { allowed_hosts } => {
-                canonical_egress_hosts(allowed_hosts)?
+        ensure!(
+            policy.networking_enabled(),
+            "credential proxy requires networking"
+        );
+        let network = crate::egress_credentials::NetworkPolicy::new(&policy)?;
+        // Allowed hosts also determine TLS interception; unrestricted traffic
+        // needs certificates only for destinations with credential bindings.
+        let mut hosts = network.hosts().clone();
+        if network.unrestricted() {
+            for binding in &policy.credentials {
+                hosts.extend(binding.networking.hosts()?);
             }
-            SandboxNetworkPolicy::Unrestricted => {
-                policy
-                    .credentials
-                    .iter()
-                    .try_fold(HashSet::new(), |mut hosts, binding| {
-                        hosts.extend(binding.networking.hosts()?);
-                        Ok::<_, anyhow::Error>(hosts)
-                    })?
-            }
-            SandboxNetworkPolicy::Disabled => anyhow::bail!("credential proxy requires networking"),
-        };
+        }
         ensure!(
             policy.credentials.is_empty() || resolver.is_some() || external.is_some(),
             "credential substitution requires an egress credential resolver"
@@ -285,10 +275,18 @@ impl State {
             crate::egress_credentials::prepare_bindings(policy.credentials, placeholders)?;
         Ok(Self {
             external,
+            max_request_body_bytes: match std::env::var("EXO_EGRESS_MAX_REQUEST_BODY_BYTES") {
+                Ok(value) => value.parse().context(
+                    "EXO_EGRESS_MAX_REQUEST_BODY_BYTES must be a non-negative integer in bytes",
+                )?,
+                Err(std::env::VarError::NotPresent) => DEFAULT_MAX_REQUEST_BODY_BYTES,
+                Err(error) => {
+                    return Err(error).context("reading EXO_EGRESS_MAX_REQUEST_BODY_BYTES");
+                }
+            },
             clients: Mutex::new(HashMap::new()),
             hosts,
-            unrestricted,
-            allowed_tcp_ports: policy.allowed_tcp_ports,
+            network,
             bindings,
             identity,
             resolver,
@@ -297,15 +295,7 @@ impl State {
     }
 
     pub(crate) fn check_port(&self, port: u16) -> Result<()> {
-        ensure!(
-            port != 0
-                && self
-                    .allowed_tcp_ports
-                    .as_ref()
-                    .is_none_or(|ports| ports.contains(&port)),
-            "TCP port is not allowed"
-        );
-        Ok(())
+        self.network.check_port(port)
     }
 
     pub(crate) async fn connect_tcp(
@@ -313,7 +303,7 @@ impl State {
         destination: SocketAddr,
     ) -> Result<tokio::net::TcpStream> {
         ensure!(
-            self.unrestricted,
+            self.network.unrestricted(),
             "opaque TCP requires unrestricted networking"
         );
         self.check_port(destination.port())?;
@@ -341,10 +331,7 @@ impl State {
             "CONNECT requires port 443"
         );
         let host = canonical_egress_host(authority.host())?;
-        ensure!(
-            self.unrestricted || self.hosts.contains(&host),
-            "host is not allowed"
-        );
+        ensure!(self.network.permits_host(&host), "host is not allowed");
         Ok(host)
     }
 
@@ -355,16 +342,21 @@ impl State {
     ) -> Result<Response<ProxyBody>> {
         let (destination, url) = self.destination(&request, sni)?;
         let mut headers = request.headers().clone();
-        self.validate_credentials(&headers, &destination, sni.is_some())?;
-        strip_hop_headers(&mut headers)?;
+
         let client = self.client(&destination.host, destination.port).await?;
         let original_headers = headers.clone();
-        let credentials = self
-            .substitute_credentials(&mut headers, &destination)
-            .await?;
+        let credentials = crate::egress_credentials::rewrite_headers(
+            &self.bindings,
+            &mut headers,
+            &destination,
+            sni.is_some(),
+            &self.identity,
+            &TimedResolver(self.resolver.as_deref().unwrap_or(&NoCredentials)),
+        )
+        .await?;
         let body = tokio::time::timeout(
             IO_TIMEOUT,
-            Limited::new(request.body_mut(), MAX_REQUEST_BODY).collect(),
+            Limited::new(request.body_mut(), self.max_request_body_bytes).collect(),
         )
         .await?
         .map_err(|_| anyhow!("invalid or oversized request body"))?
@@ -389,8 +381,15 @@ impl State {
             }
             if refreshed {
                 let mut headers = original_headers;
-                self.substitute_credentials(&mut headers, &destination)
-                    .await?;
+                crate::egress_credentials::rewrite_headers(
+                    &self.bindings,
+                    &mut headers,
+                    &destination,
+                    sni.is_some(),
+                    &self.identity,
+                    &TimedResolver(resolver.as_ref()),
+                )
+                .await?;
                 response = relay(method, headers, url, body, &client).await?;
             }
         }
@@ -407,10 +406,6 @@ impl State {
             "CONNECT is not supported on the transparent listener"
         );
         ensure!(
-            !request.headers().contains_key("upgrade"),
-            "protocol upgrades are not supported"
-        );
-        ensure!(
             request.uri().scheme().is_none() && request.uri().authority().is_none(),
             "expected origin-form request"
         );
@@ -425,10 +420,7 @@ impl State {
             .to_str()?
             .parse()?;
         let host = canonical_egress_host(authority.host())?;
-        ensure!(
-            self.unrestricted || self.hosts.contains(&host),
-            "host is not allowed"
-        );
+        ensure!(self.network.permits_host(&host), "host is not allowed");
         let port = if sni.is_some() { 443 } else { 80 };
         self.check_port(port)?;
         ensure!(
@@ -457,48 +449,11 @@ impl State {
             url.host_str() == Some(host.as_str()) && url.port_or_known_default() == Some(port),
             "request changed the upstream authority"
         );
-        let path = match url.query() {
-            Some(query) => format!("{}?{query}", url.path()),
-            None => url.path().to_owned(),
-        };
-        let destination = EgressDestination {
-            host,
-            port,
-            method: request.method().clone(),
-            path,
-        };
+        let destination =
+            crate::egress_credentials::http_destination(&url, request.method().clone())?;
         Ok((destination, url))
     }
 
-    fn validate_credentials(
-        &self,
-        headers: &HeaderMap,
-        destination: &EgressDestination,
-        tls: bool,
-    ) -> Result<()> {
-        crate::egress_credentials::validate_credentials(&self.bindings, headers, destination, tls)
-    }
-    async fn substitute_credentials(
-        &self,
-        headers: &mut HeaderMap,
-        destination: &EgressDestination,
-    ) -> Result<Vec<(String, String)>> {
-        if self.bindings.is_empty() {
-            return Ok(Vec::new());
-        }
-        crate::egress_credentials::substitute_credentials(
-            &self.bindings,
-            headers,
-            destination,
-            &self.identity,
-            &TimedResolver(
-                self.resolver
-                    .as_deref()
-                    .context("credential resolver is unavailable")?,
-            ),
-        )
-        .await
-    }
     async fn client(&self, host: &str, port: u16) -> Result<reqwest::Client> {
         let mut upstream = self
             .upstream
@@ -693,7 +648,7 @@ where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
     state.check_port(443)?;
-    if !state.unrestricted
+    if !state.network.unrestricted()
         && let Some(tls) = &tls
     {
         return https_connection(stream, tls.clone(), state, None).await;
@@ -725,10 +680,7 @@ where
     .await??;
     let (read, write) = tokio::io::split(stream);
     let mut stream = tokio::io::join(std::io::Cursor::new(prefix).chain(read), write);
-    ensure!(
-        state.unrestricted || state.hosts.contains(&host),
-        "host is not allowed"
-    );
+    ensure!(state.network.permits_host(&host), "host is not allowed");
     if state.hosts.contains(&host)
         && let Some(tls) = tls
     {
@@ -873,5 +825,18 @@ impl EgressCredentialResolver for TimedResolver<'_> {
         destination: &EgressDestination,
     ) -> Result<String> {
         tokio::time::timeout(IO_TIMEOUT, self.0.resolve(identity, name, destination)).await?
+    }
+}
+
+struct NoCredentials;
+#[async_trait]
+impl EgressCredentialResolver for NoCredentials {
+    async fn resolve(
+        &self,
+        _identity: &EgressIdentity,
+        _name: &str,
+        _destination: &EgressDestination,
+    ) -> Result<String> {
+        anyhow::bail!("credential resolver is unavailable")
     }
 }

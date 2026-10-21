@@ -1,22 +1,12 @@
-use crate::auth;
-
 use crate::{McpServerConfig, validate_servers};
 
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
 };
 
-use anyhow::{Context, Result, bail, ensure};
-use rmcp::{
-    ServiceExt,
-    model::CallToolRequestParams,
-    service::{RoleClient, RunningService},
-    transport::{
-        StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
-    },
-};
+use anyhow::{Context, Result, bail};
+use rmcp::model::{CallToolResult, Tool};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -98,51 +88,51 @@ pub struct McpTool {
     pub annotations: Option<rmcp::model::ToolAnnotations>,
 }
 
+#[async_trait::async_trait]
+pub trait McpConnection: Send + Sync {
+    async fn list_tools(&self) -> Result<Vec<Tool>>;
+    async fn call(&self, name: &str, arguments: Map<String, Value>) -> Result<CallToolResult>;
+    async fn close(&self) -> Result<()>;
+}
+
+#[async_trait::async_trait]
+pub trait McpConnector: Send + Sync {
+    async fn connect(
+        &self,
+        server: &McpServerConfig,
+        credentials: Arc<dyn McpCredentialProvider>,
+    ) -> Result<Arc<dyn McpConnection>>;
+}
+
 struct Connection {
     server: McpServerConfig,
     disabled_tools: Vec<String>,
-    service: tokio::sync::RwLock<Option<RunningService<RoleClient, ()>>>,
+    service: Arc<dyn McpConnection>,
 }
 
-async fn connect_service(
+/// Resolve credentials for each HTTP request and retry once after a rejection.
+/// The transport decides what constitutes an authentication rejection.
+pub async fn send_authenticated<T, E, F, Fut>(
+    credentials: &dyn McpCredentialProvider,
     server: &McpServerConfig,
-    credentials: Arc<dyn McpCredentialProvider>,
-    client: reqwest::Client,
-) -> Result<RunningService<RoleClient, ()>> {
-    let config = StreamableHttpClientTransportConfig::with_uri(server.url.clone());
-    let client = auth::CredentialClient::new(client, server.clone(), credentials);
-    let transport = StreamableHttpClientTransport::with_client(client, config);
-    tokio::time::timeout(Duration::from_secs(60), ().serve(transport))
-        .await
-        .context("MCP initialization timed out")?
-        .map_err(auth::authentication_context)
-}
-
-fn http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(30))
-        .build()?)
-}
-
-pub async fn probe_auth_challenge(url: &str) -> Result<Option<String>> {
-    let server = McpServerConfig {
-        name: "authorization".into(),
-        url: url.into(),
-        allowed_tools: None,
-        blocked_tools: Vec::new(),
-    };
-    validate_servers(std::slice::from_ref(&server))?;
-    match connect_service(&server, Arc::new(McpCredentials::default()), http_client()?).await {
-        Ok(mut service) => {
-            service.close_with_timeout(Duration::from_secs(5)).await?;
-            Ok(None)
-        }
-        Err(error) => match auth::auth_challenge(&error) {
-            Some(challenge) => Ok(Some(challenge.to_owned())),
-            None => Err(error),
-        },
+    call: F,
+    rejected: impl Fn(&std::result::Result<T, E>) -> bool,
+) -> Result<(std::result::Result<T, E>, bool)>
+where
+    F: Fn(Option<String>) -> Fut,
+    Fut: Future<Output = std::result::Result<T, E>>,
+{
+    let credential = credentials.resolve(server).await?;
+    let supplied = credential.is_some();
+    let mut result = call(credential.as_ref().map(|c| c.token.clone())).await;
+    if rejected(&result)
+        && let Some(previous) = credential
+        && let Some(fresh) = credentials.refresh(server, &previous).await?
+        && fresh.token != previous.token
+    {
+        result = call(Some(fresh.token)).await;
     }
+    Ok((result, supplied))
 }
 
 pub fn tool_result_is_error(result: &Value) -> bool {
@@ -161,38 +151,77 @@ pub struct McpToolSet {
 }
 
 impl McpToolSet {
+    #[cfg(feature = "client")]
     pub async fn connect(servers: &[McpServerConfig], credentials: McpCredentials) -> Result<Self> {
         Self::connect_with_provider(servers, Arc::new(credentials)).await
     }
 
+    #[cfg(feature = "client")]
     pub async fn connect_with_provider(
         servers: &[McpServerConfig],
         credentials: Arc<dyn McpCredentialProvider>,
     ) -> Result<Self> {
-        Self::connect_with_http_clients(servers, credentials, &vec![http_client()?; servers.len()])
+        Self::connect_with_connector(servers, credentials, &crate::NativeMcpConnector).await
+    }
+
+    /// Public MCP servers stay available; omit auth-required servers only when
+    /// this caller has no credential. Invalid supplied credentials remain errors.
+    #[cfg(feature = "client")]
+    pub async fn connect_available_with_provider(
+        servers: &[McpServerConfig],
+        credentials: Arc<dyn McpCredentialProvider>,
+    ) -> Result<Self> {
+        Self::connect_available_with_connector(servers, credentials, &crate::NativeMcpConnector)
             .await
     }
 
     /// Connect using a caller-supplied HTTP client for each server, in the same order.
     /// Hosts can enforce destination restrictions, DNS pinning and redirect policies.
+    #[cfg(feature = "client")]
     pub async fn connect_with_http_clients(
         servers: &[McpServerConfig],
         credentials: Arc<dyn McpCredentialProvider>,
         clients: &[reqwest::Client],
     ) -> Result<Self> {
-        validate_servers(servers)?;
-        ensure!(
+        anyhow::ensure!(
             servers.len() == clients.len(),
             "each MCP server requires an HTTP client"
         );
-        let connections = servers.iter().zip(clients);
-        let connected = futures::future::try_join_all(connections.map(|(server, client)| async {
+        Self::connect_with_connector(
+            servers,
+            credentials,
+            &crate::native::HttpMcpConnector { servers, clients },
+        )
+        .await
+    }
+
+    pub async fn connect_with_connector(
+        servers: &[McpServerConfig],
+        credentials: Arc<dyn McpCredentialProvider>,
+        connector: &dyn McpConnector,
+    ) -> Result<Self> {
+        Self::connect_servers(servers, credentials, connector, false).await
+    }
+
+    pub async fn connect_available_with_connector(
+        servers: &[McpServerConfig],
+        credentials: Arc<dyn McpCredentialProvider>,
+        connector: &dyn McpConnector,
+    ) -> Result<Self> {
+        Self::connect_servers(servers, credentials, connector, true).await
+    }
+
+    async fn connect_servers(
+        servers: &[McpServerConfig],
+        credentials: Arc<dyn McpCredentialProvider>,
+        connector: &dyn McpConnector,
+        omit_missing_auth: bool,
+    ) -> Result<Self> {
+        validate_servers(servers)?;
+        let connected = futures::future::try_join_all(servers.iter().map(|server| async {
             let connected = async {
-                let service = connect_service(server, credentials.clone(), client.clone()).await?;
-                let tools = tokio::time::timeout(Duration::from_secs(60), service.list_all_tools())
-                    .await
-                    .context("MCP tool discovery timed out")?
-                    .map_err(auth::authentication_context)?;
+                let service = connector.connect(server, credentials.clone()).await?;
+                let tools = service.list_tools().await?;
                 server.validate_tool_names(tools.iter().map(|tool| tool.name.as_ref()))?;
                 let disabled_tools = tools
                     .iter()
@@ -218,18 +247,30 @@ impl McpToolSet {
                     Connection {
                         server: server.clone(),
                         disabled_tools,
-                        service: tokio::sync::RwLock::new(Some(service)),
+                        service,
                     },
                     tools,
                 ))
             }
             .await;
-            connected.with_context(|| format!("connecting MCP server {}", server.name))
+            match connected {
+                Err(error)
+                    if omit_missing_auth
+                        && error
+                            .downcast_ref::<McpAuthenticationError>()
+                            .is_some_and(|auth| !auth.credential_supplied) =>
+                {
+                    Ok(None)
+                }
+                result => result
+                    .map(Some)
+                    .with_context(|| format!("connecting MCP server {}", server.name)),
+            }
         }))
         .await?;
         let mut set = Self::default();
         let mut names = HashSet::new();
-        for (connection, tools) in connected {
+        for (connection, tools) in connected.into_iter().flatten() {
             for tool in &tools {
                 if !names.insert(tool.name.clone()) {
                     bail!("duplicate exposed MCP tool: {}", tool.name);
@@ -243,12 +284,11 @@ impl McpToolSet {
 
     pub async fn close(&self) -> Result<()> {
         let results = futures::future::join_all(self.connections.iter().map(|connection| async {
-            if let Some(mut service) = connection.service.write().await.take() {
-                service
-                    .close_with_timeout(Duration::from_secs(5))
-                    .await
-                    .with_context(|| format!("closing MCP server {}", connection.server.name))?;
-            }
+            connection
+                .service
+                .close()
+                .await
+                .with_context(|| format!("closing MCP server {}", connection.server.name))?;
             Ok::<_, anyhow::Error>(())
         }))
         .await;
@@ -272,11 +312,7 @@ impl McpToolSet {
         self.tools.iter().any(|tool| tool.name == name)
     }
 
-    pub async fn call(
-        &self,
-        name: &str,
-        arguments: Map<String, Value>,
-    ) -> Result<rmcp::model::CallToolResult> {
+    pub async fn call(&self, name: &str, arguments: Map<String, Value>) -> Result<CallToolResult> {
         let tool = self
             .tools
             .iter()
@@ -287,18 +323,11 @@ impl McpToolSet {
             .iter()
             .find(|connection| connection.server.name == tool.server_name)
             .context("MCP connection is missing")?;
-        let current = connection.service.read().await;
-        let service = current.as_ref().context("MCP connection is closed")?;
-        tokio::time::timeout(
-            Duration::from_secs(300),
-            service.call_tool(
-                CallToolRequestParams::new(tool.tool_name.clone()).with_arguments(arguments),
-            ),
-        )
-        .await
-        .context("MCP tool call timed out")?
-        .map_err(auth::authentication_context)
-        .with_context(|| format!("MCP tool {}.{} failed", tool.server_name, tool.tool_name))
+        connection
+            .service
+            .call(&tool.tool_name, arguments)
+            .await
+            .with_context(|| format!("MCP tool {}.{} failed", tool.server_name, tool.tool_name))
     }
 }
 

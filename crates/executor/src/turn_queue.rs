@@ -34,6 +34,16 @@ impl std::fmt::Display for TurnSuspended {
 }
 impl std::error::Error for TurnSuspended {}
 
+/// A failure recorded together with the turn's terminal journal event.
+#[derive(Debug, Clone)]
+pub(crate) struct TurnFailed(pub String);
+impl std::fmt::Display for TurnFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for TurnFailed {}
+
 struct TurnContext {
     runtime: Runtime,
     observers: Vec<mpsc::UnboundedSender<Result<ExecutionStreamEvent>>>,
@@ -122,7 +132,10 @@ impl TurnQueueRuntime {
                 observer
                     .send(match &event {
                         Ok(event) => Ok(event.clone()),
-                        Err(error) => Err(anyhow!(error.to_string())),
+                        Err(error) => Err(match error.downcast_ref::<TurnFailed>() {
+                            Some(failure) => failure.clone().into(),
+                            None => anyhow!(error.to_string()),
+                        }),
                     })
                     .is_ok()
             });
@@ -421,6 +434,7 @@ impl Runtime {
             }
         };
         let accepted_key = HarnessTurnKey::new(scope.agent_id, scope.thread_id, accepted.turn.id);
+        let mut replay = false;
         if accepted.duplicate {
             provider
                 .turns
@@ -432,11 +446,14 @@ impl Runtime {
                 .turns
                 .register_observer(accepted_key, self, sender.clone());
             match journal_status(thread.as_ref(), &accepted.turn).await {
-                Ok(JournalStatus::Finished(result)) => provider.turns.replay_completion(
-                    accepted_key,
-                    &sender,
-                    result.map(ExecutionStreamEvent::Completed),
-                ),
+                Ok(JournalStatus::Finished(result)) => {
+                    provider.turns.replay_completion(
+                        accepted_key,
+                        &sender,
+                        result.map(ExecutionStreamEvent::Completed),
+                    );
+                    replay = true;
+                }
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(
@@ -451,6 +468,12 @@ impl Runtime {
         if let Err(error) = self.spawn_queue(provider, scope).await {
             provider.turns.stop_observers(accepted_key, &error);
             tracing::error!(?scope, %error, "accepted turn retained; failed to wake queue");
+        }
+        if replay {
+            let stream = self
+                .watch_turn(thread.as_ref(), accepted.turn.clone(), None)
+                .await?;
+            return Ok((accepted.turn, stream));
         }
         Ok((
             accepted.turn,
@@ -672,7 +695,7 @@ impl Runtime {
                     let error = error
                         .unwrap_or_else(|| anyhow!("turn execution stopped without completion"));
                     persist_head_failure(thread.as_ref(), &head, status, &error).await?;
-                    turns.broadcast(key, Err(error));
+                    turns.broadcast(key, Err(TurnFailed(error.to_string()).into()));
                 }
             }
             initial_head = Some(turns.coordinator.acknowledge(lease, head.turn.id).await?);
@@ -744,7 +767,8 @@ impl Runtime {
                     .get()
                     .context("caller-scoped queue recovery is unavailable")?(
                     principal.clone()
-                )?
+                )
+                .await?
                 .as_ref()
                 .clone(),
                 None => self.root_runtime(),
@@ -857,7 +881,7 @@ fn journal_status_from_events(events: &[exoharness::Event], turn: &TurnRecord) -
         EventData::Error { message, .. } => Some(message),
         _ => None,
     }) {
-        Some(message) => Err(anyhow!(message.clone())),
+        Some(message) => Err(TurnFailed(message.clone()).into()),
         None => Ok(crate::SendResult {
             turn_id: turn.id,
             session_id: turn.session_id,

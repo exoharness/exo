@@ -62,7 +62,7 @@ starting an authorized worker; raw credentials do not belong in prompts or
 durable configuration.
 
 Protocol-specific code lives with each adapter under
-[`exo/adapters/`](https://github.com/exoharness/exo/tree/main/exo/adapters).
+[`exo/adapters/`](https://github.com/exoharness/exo/tree/da45556f9bd3383c44f14e0521fdf4d3a6bcb8a0/exo/adapters).
 Adapter records, event history, and the outbound queue are stored under
 `.exo/adapters/`.
 
@@ -181,7 +181,7 @@ Events API port/path for Slack, and the mount root for agent-cli.
 ::: info
   Each adapter has a full setup walkthrough (bot creation, permissions,
   linking, troubleshooting) in its README under
-  [`exo/adapters/`](https://github.com/exoharness/exo/tree/main/exo/adapters)
+  [`exo/adapters/`](https://github.com/exoharness/exo/tree/da45556f9bd3383c44f14e0521fdf4d3a6bcb8a0/exo/adapters)
   — start there when setting one up for real.
 :::
 

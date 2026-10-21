@@ -6,7 +6,7 @@ search: false
 
 # Archive
 
-These pages describe the earlier Exo self-agent and older APIs. They are kept for reference, but may be out of date.
+These pages describe the earlier Exo self-agent and older APIs. They are kept for reference, but may be out of date. The self-improving agent now lives in [examples/self-improving-agent](https://github.com/exoharness/exo/tree/main/examples/self-improving-agent).
 
 For the current product, start with the [overview](/), [agent definition](/agent-definition), or [support agent tutorial](/tutorials/support-agent).
 

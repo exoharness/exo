@@ -37,7 +37,8 @@ use crate::{
 pub(crate) const RUNTIME_TURN_WORK: &str = "exo.runtime.turn_work";
 pub(crate) const RUNTIME_TURN_COMPLETED: &str = "exo.runtime.turn_completed";
 
-pub type RecoveryRuntimeResolver = Arc<dyn Fn(String) -> Result<Arc<Runtime>> + Send + Sync>;
+pub type RecoveryRuntimeResolver =
+    Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, Result<Arc<Runtime>>> + Send + Sync>;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnWork {
@@ -141,6 +142,9 @@ pub trait HarnessExecutor: Send + Sync + 'static {
         Ok(())
     }
 
+    /// The runtime calls this once before each execute/resume, with the same
+    /// configuration, under the thread's turn lease. Executors may hand prepared
+    /// state to execution; callers must not invoke execution without preparation.
     async fn prepare_conversation(
         &self,
         _agent: &dyn AgentHandle,
@@ -404,6 +408,44 @@ impl Runtime {
             .await
     }
 
+    pub(crate) async fn respond_to_pending_approval(
+        &self,
+        agent_id: exoharness::AgentId,
+        thread_id: exoharness::ThreadId,
+        turn_id: exoharness::TurnId,
+        body: &exo_managed_agents::http::protocol::ApprovalResponseBody,
+    ) -> Result<bool> {
+        let agent = self
+            .exoharness_handle()
+            .get_agent(&agent_id)
+            .await?
+            .context("approval agent missing")?;
+        let thread = agent
+            .get_thread(&thread_id)
+            .await?
+            .context("approval thread missing")?;
+        let pending = crate::permissions::pending_from_events(
+            crate::permissions::approval_events(
+                thread.as_ref(),
+                EventQuery {
+                    turn_id: Some(turn_id),
+                    session_id: Some(body.session_id),
+                    ..Default::default()
+                },
+            )
+            .await?,
+        )?;
+        if !pending
+            .iter()
+            .any(|request| request.approval_id == body.approval_id)
+        {
+            return Ok(false);
+        }
+        self.approval_response(agent_id, thread_id, turn_id, body)
+            .await?;
+        Ok(true)
+    }
+
     pub async fn frontend_tool_result(
         &self,
         agent: exoharness::AgentId,
@@ -486,11 +528,66 @@ impl Runtime {
         let live = thread
             .watch_events(std::ops::Bound::Excluded(after))
             .await?;
-        let stream = crate::harness_events::turn_stream(live, turn.clone());
+        let stream = crate::harness_events::turn_stream(live, turn.clone(), None);
         Ok(Some((
             turn,
             ExecutionStreamHandle::new(futures::stream::iter(initial).chain(stream)),
         )))
+    }
+
+    /// Resume a client's result stream from its last committed checkpoint.
+    /// History replay and live observation use the same execution event format.
+    pub async fn watch_turn(
+        &self,
+        thread: &dyn exoharness::ThreadHandle,
+        turn: exoharness::TurnRecord,
+        after: Option<exoharness::EventId>,
+    ) -> Result<ExecutionStreamHandle> {
+        let bound = match after {
+            Some(id) => std::ops::Bound::Excluded(id),
+            None => {
+                let started = thread
+                    .get_events(Some(EventQuery {
+                        turn_id: Some(turn.id),
+                        types: Some(vec![EventKind::TURN_STARTED]),
+                        direction: Some(EventQueryDirection::Desc),
+                        limit: Some(1),
+                        ..Default::default()
+                    }))
+                    .await?
+                    .events
+                    .into_iter()
+                    .next();
+                started.map_or(std::ops::Bound::Unbounded, |event| {
+                    std::ops::Bound::Excluded(event.id)
+                })
+            }
+        };
+        let events = thread.watch_events(bound).await?;
+        // A checkpoint can follow an error event. Seed the observer from the
+        // saved turn so reconnecting cannot turn its partial text into success.
+        let failure = if after.is_some() {
+            thread
+                .get_events(Some(EventQuery {
+                    turn_id: Some(turn.id),
+                    types: Some(vec![EventKind::ERROR]),
+                    direction: Some(EventQueryDirection::Desc),
+                    limit: Some(1),
+                    ..Default::default()
+                }))
+                .await?
+                .events
+                .into_iter()
+                .find_map(|event| match event.data {
+                    EventData::Error { message, .. } => Some(message),
+                    _ => None,
+                })
+        } else {
+            None
+        };
+        Ok(ExecutionStreamHandle::new(
+            crate::harness_events::turn_stream(events, turn, failure),
+        ))
     }
 
     pub(crate) async fn recover_local_turns(&self, provider: &crate::LocalProvider) -> Result<()> {
@@ -539,6 +636,16 @@ impl Runtime {
         work: TurnWork,
         recovering: bool,
     ) -> Result<ExecutionStreamHandle> {
+        let setup_key = HarnessTurnKey::new(agent.record().id, thread.record().id, record.id);
+        let completion_cursor = (!recovering)
+            .then(|| thread.record().latest_event_id)
+            .flatten();
+        provider.turns.broadcast(
+            setup_key,
+            Ok(ExecutionStreamEvent::Status {
+                message: "Preparing workspace".into(),
+            }),
+        );
         {
             let mut active = provider
                 .turns
@@ -567,6 +674,12 @@ impl Runtime {
         if !recovering && thread.activate_caller().await? {
             provider.executor.reset_thread(thread.record().id).await?;
         }
+        let preparing_key = HarnessTurnKey::new(agent.record().id, thread.record().id, record.id);
+        let progress = |message| {
+            provider
+                .turns
+                .broadcast(preparing_key, Ok(ExecutionStreamEvent::Status { message }));
+        };
         let TurnWork {
             request,
             streaming,
@@ -580,10 +693,14 @@ impl Runtime {
             if thread.caller().is_some() {
                 thread_config.sandbox_scope = Some(crate::SandboxScope::Conversation);
             }
-            if !thread_config.resources.is_empty() {
-                thread_config
-                    .materialize_resources(thread.as_ref(), &agent_config)
-                    .await?;
+        }
+        if !thread_config.resources.is_empty()
+            && (!recovering || !thread_config.uses_host_resource_mounts(&agent_config))
+        {
+            thread_config
+                .materialize_resources_with_progress(thread.as_ref(), &agent_config, &progress)
+                .await?;
+            if !recovering {
                 let mut locations = String::from("Filesystem resources for this thread:\n");
                 for resource in &thread_config.resources {
                     let resource = &resource.definition;
@@ -613,6 +730,7 @@ impl Runtime {
                     &previews.instructions(),
                 ));
         }
+        progress("Preparing agent".into());
         provider
             .executor
             .prepare_conversation(
@@ -678,6 +796,7 @@ impl Runtime {
             }
         }
         let completion_thread = Arc::clone(&thread);
+        progress("Waiting for model".into());
         let submission = provider
             .harness
             .submit(HarnessCommand::StartTurn(ExecutorTurn {
@@ -709,6 +828,8 @@ impl Runtime {
                     let marked = completion_thread
                         .get_events(Some(EventQuery {
                             turn_id: Some(key.turn_id),
+                            cursor: completion_cursor,
+                            limit: Some(1),
                             types: Some(vec![EventKind::custom(RUNTIME_TURN_COMPLETED)]),
                             ..Default::default()
                         }))
@@ -888,7 +1009,9 @@ impl Runtime {
 
     pub async fn shutdown(&self) -> Result<()> {
         #[cfg(feature = "native")]
-        if let Some(previews) = self.previews.get() {
+        if Arc::ptr_eq(&self.provider, &self.root_provider)
+            && let Some(previews) = self.previews.get()
+        {
             previews.stop();
         }
         let shutdown = self.provider.harness().shutdown().await;

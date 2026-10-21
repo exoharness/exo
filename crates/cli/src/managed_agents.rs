@@ -324,12 +324,21 @@ pub async fn open_thread(
     {
         println!("mcp: {count} tools");
     }
+    Ok((agent, opened.thread))
+}
+
+pub async fn check_model_credentials(
+    runtime: &Runtime,
+    agent: &dyn AgentHandle,
+    thread: &dyn ConversationHandle,
+) -> Result<()> {
+    let mut progress = crate::turn_display::TurnProgress::new();
     progress.set_status(Some("Checking model credentials".into()));
     let config = progress
-        .wait(runtime.get_thread_agent_config(agent.as_ref(), opened.thread.as_ref()))
+        .wait(runtime.get_thread_agent_config(agent, thread))
         .await?;
     if let Some(name) = config.credential.as_deref() {
-        let reference = progress.wait(exoharness::vault::find_secret(opened.thread.as_ref(), name))
+        let reference = progress.wait(exoharness::vault::find_secret(thread, name))
                 .await?
                 .with_context(|| {
                     format!(
@@ -338,7 +347,7 @@ pub async fn open_thread(
                 })?;
         let vault = progress
             .wait(exoharness::vault::require_vault(
-                opened.thread.as_ref(),
+                thread,
                 &reference.vault_id,
             ))
             .await?;
@@ -371,7 +380,7 @@ pub async fn open_thread(
             );
         }
     }
-    Ok((agent, opened.thread))
+    Ok(())
 }
 
 pub async fn list_threads(harness: &Runtime, agent: &str) -> Result<()> {

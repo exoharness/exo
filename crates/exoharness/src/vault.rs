@@ -9,6 +9,13 @@ mod local;
 #[cfg(feature = "store")]
 pub(crate) use local::BasicVaultStore;
 
+#[cfg(feature = "store")]
+/// HTTP I/O for the shared OAuth refresh implementation. Redirects must be disabled.
+#[async_trait]
+pub trait OAuthHttpClient: Send + Sync {
+    async fn request(&self, request: oauth2::HttpRequest) -> Result<oauth2::HttpResponse>;
+}
+
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod github;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]

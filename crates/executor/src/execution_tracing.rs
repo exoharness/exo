@@ -60,3 +60,23 @@ pub trait ToolExecutionTrace: Send + Sync {
 
     async fn finish_error(self: Box<Self>, error: &anyhow::Error);
 }
+
+pub struct NoopExecutionTracer;
+#[async_trait]
+impl ExecutionTracer for NoopExecutionTracer {
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+    async fn start_turn(
+        &self,
+        _config: Option<&BraintrustTracingConfig>,
+        _agent: &exoharness::AgentRecord,
+        _thread: &exoharness::ConversationRecord,
+        _agent_config: &AgentConfig,
+        _session: exoharness::SessionId,
+        _turn: exoharness::TurnId,
+        _streamed: bool,
+    ) -> Option<Box<dyn TurnExecutionTrace>> {
+        None
+    }
+}

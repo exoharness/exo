@@ -214,9 +214,12 @@ TCP 80/443 and TCP/UDP 53, checks the guest source against its veth, and rejects
 other traffic, including IPv6 and QUIC. CIDR exceptions cannot bypass the proxy.
 DNS answers exact allowed names with a synthetic IPv4 address. The proxy resolves
 and pins public upstream IPv4 addresses, validates TLS, requires matching SNI
-and HTTP Host, and does not follow redirects. Requests are bounded to 8 MiB;
-responses stream, including SSE. Allowed upstreams can still return sensitive
-values in their responses.
+and HTTP Host, and does not follow redirects. Request bodies are bounded to
+128 MiB by default; responses stream, including SSE. Set
+`EXO_EGRESS_MAX_REQUEST_BODY_BYTES` in the host process environment to override
+the limit in bytes. The proxy reads it when creating each sandbox session;
+invalid values fail session creation. Allowed upstreams can still return
+sensitive values in their responses.
 
 `CreateSandboxRequest.policy` supplies the policy through the Exoharness API.
 `BasicExoHarnessConfig.sandbox_policy` supplies a default, including for the
@@ -409,10 +412,11 @@ git -C "$repo" config --local \
 For this raw-header configuration, the resolver returns the Base64 payload
 expected after `Basic`, and the proxy substitutes it for the placeholder. `Git-Protocol: version=2`
 passes through unchanged, and `GIT_SSL_CAINFO` provides trust for the
-proxy's certificate. Redirects are not followed. Request bodies over 8 MiB are
-rejected, so larger push packfiles need additional support. Repository and
-operation authorization remain the caller's responsibility; Exo resolves the
-selected binding and forwards only requests the resolver authorizes.
+proxy's certificate. Redirects are not followed. Request bodies over the
+configured limit (128 MiB by default) are rejected; raise
+`EXO_EGRESS_MAX_REQUEST_BODY_BYTES` on the host for larger push packfiles.
+Repository and operation authorization remain the caller's responsibility; Exo
+resolves the selected binding and forwards only requests the resolver authorizes.
 
 ## Tests
 

@@ -362,10 +362,11 @@ async fn queued_turn_waits_for_cancelled_execution_cleanup() -> Result<()> {
     executor.cleanup.add_permits(1);
     tokio::time::timeout(Duration::from_secs(1), executor.started.notified()).await?;
     executor.release.add_permits(1);
-    assert!(matches!(
-        second.next().await.transpose()?,
-        Some(crate::ExecutionStreamEvent::Completed(_))
-    ));
+    let mut completed = false;
+    while let Some(event) = second.next().await {
+        completed |= matches!(event?, crate::ExecutionStreamEvent::Completed(_));
+    }
+    assert!(completed);
     runtime.shutdown().await?;
     assert_eq!(executor.running.load(Ordering::SeqCst), 0);
     Ok(())
@@ -493,6 +494,9 @@ async fn harness_turn_publishes_canonical_tools_after_persistence() -> Result<()
     );
     assert!(
         matches!(receiver.try_recv()??, crate::ExecutionStreamEvent::ToolResult { tool_call_id, .. } if tool_call_id == "call")
+    );
+    assert!(
+        matches!(receiver.try_recv()??, crate::ExecutionStreamEvent::Checkpoint { event_id } if event_id == result.latest_event_id)
     );
     assert!(receiver.try_recv().is_err());
     events

@@ -353,6 +353,7 @@ export function createCodexHarness(version: string) {
     nativeToolApprovals: false,
     reconcileUnresolvedToolCalls: true,
     async runTurn(context) {
+      await context.stream.status("Preparing Codex");
       validateToolPolicies(
         context,
         context.tools.map((tool) => tool.name),
@@ -372,6 +373,7 @@ export function createCodexHarness(version: string) {
       );
     },
     async resumeTurn(context) {
+      await context.stream.status("Preparing Codex");
       validateToolPolicies(
         context,
         context.tools.map((tool) => tool.name),
@@ -431,6 +433,7 @@ async function runCodexTurn(
   };
   const sessionKey = codexWarmSessionKey(context, modelBinding, version);
   const sandboxRuntime = codexSandboxRuntimeKey(context, version);
+  await context.stream.status("Starting Codex");
   const { resource: session, reused: appServerReused } = await traceCodexTask(
     turnParent,
     "codex_app_server_ready",
@@ -450,6 +453,7 @@ async function runCodexTurn(
   session.setTurnScope(scope);
 
   try {
+    await context.stream.status("Preparing conversation");
     if (savedTurn) {
       session.threadId = session.process.reused ? savedTurn.threadId : null;
       session.resumeThreadId = session.process.reused
@@ -582,6 +586,7 @@ async function runCodexTurn(
         codex_thread_id: threadId,
       });
     }
+    await context.stream.status("Waiting for model");
     const turnStart = attachingLiveTurn
       ? null
       : await traceCodexTask(
@@ -643,26 +648,43 @@ async function runCodexTurn(
             continue;
           }
           if (notification.method === "turn/completed") {
-            const response = await session.server.request<JsonObject>(
-              "thread/read",
-              { threadId, includeTurns: true },
-            );
-            const completedSnapshot = nativeTurnSnapshot(
-              response,
-              nativeTurnId,
-            );
-            if (!completedSnapshot) {
-              throw new Error(
-                `Codex thread has no completed turn ${nativeTurnId}`,
+            // Completion can carry final items. Other items have already been
+            // committed through item/completed notifications.
+            const items = asRecord(asRecord(notification.params).turn).items;
+            if (Array.isArray(items)) {
+              for (const item of items) {
+                await projectNativeItem(
+                  context,
+                  turnParent,
+                  asRecord(item),
+                  nativeTurnId,
+                  activeItems,
+                  projectedItems,
+                );
+              }
+            }
+            if (activeItems.size > 0) {
+              const response = await session.server.request<JsonObject>(
+                "thread/read",
+                { threadId, includeTurns: true },
+              );
+              const completedSnapshot = nativeTurnSnapshot(
+                response,
+                nativeTurnId,
+              );
+              if (!completedSnapshot) {
+                throw new Error(
+                  `Codex thread has no completed turn ${nativeTurnId}`,
+                );
+              }
+              await projectNativeSnapshot(
+                context,
+                turnParent,
+                completedSnapshot,
+                projectedItems,
+                activeItems,
               );
             }
-            await projectNativeSnapshot(
-              context,
-              turnParent,
-              completedSnapshot,
-              projectedItems,
-              activeItems,
-            );
           }
           const outcome = await handleCodexNotification(
             context,
@@ -685,13 +707,14 @@ async function runCodexTurn(
       },
     );
 
+    await context.stream.status("Finishing turn");
+    await protocolLog.flush();
     await recordCodexWarmSession(
       context,
       sessionKey,
       session.process,
       threadId,
     );
-    await protocolLog.flush();
     return null;
   } catch (error) {
     await codexSessions.delete(sessionKey, (warmSession) =>
@@ -916,22 +939,31 @@ async function latestCodexWarmSession(
   sessionKey: string,
   process: SandboxProcess,
 ): Promise<CodexWarmSessionRecord | null> {
-  const result = await context.exoharness.current.conversation.getEvents({
-    direction: "desc",
-    limit: 100,
-    types: [CODEX_WARM_SESSION_EVENT],
-  });
-  for (const event of result.events) {
+  let cursor: string | null = null;
+  for (let count = 0; count < 100; count++) {
+    const result = await context.exoharness.current.conversation.getEvents({
+      direction: "desc",
+      limit: 1,
+      types: [CODEX_WARM_SESSION_EVENT],
+      cursor,
+    });
+    const event = result.events[0];
+    if (!event) break;
     const record = codexWarmSessionRecord(event.data);
     if (
       record?.sessionKey === sessionKey &&
-      (!process.sandboxId || record.sandboxId === process.sandboxId) &&
-      (!process.reused ||
-        !process.sandboxProcessId ||
-        record.sandboxProcessId === process.sandboxProcessId)
+      (!process.sandboxId || record.sandboxId === process.sandboxId)
     ) {
+      if (
+        process.reused &&
+        process.sandboxProcessId &&
+        record.sandboxProcessId !== process.sandboxProcessId
+      ) {
+        return null;
+      }
       return record;
     }
+    cursor = event.id;
   }
   return null;
 }

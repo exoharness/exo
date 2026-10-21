@@ -17,8 +17,66 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use tokio::sync::Notify;
 const SANDBOX_PROVIDER_STATE_EVENT: &str = "sandbox_provider_state";
+
+#[cfg(all(test, feature = "basic-backend"))]
+mod poll_tests {
+    use super::*;
+    use crate::runtime_host::RuntimeHost;
+
+    struct ExpiredRead;
+    impl RuntimeHost for ExpiredRead {
+        fn spawn(&self, task: BoxFuture<'static, ()>) {
+            TokioRuntimeHost.spawn(task);
+        }
+        fn sleep(&self, duration: Duration) -> BoxFuture<'static, Result<()>> {
+            assert_eq!(duration, Duration::from_secs(30));
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    #[tokio::test]
+    async fn quiet_follow_expires_without_stopping_the_process() -> Result<()> {
+        let mut harness = BasicExoHarness::in_memory(crate::test_support::local_test_config(
+            "unused-follow-test",
+        ))
+        .await?;
+        Arc::get_mut(&mut harness.inner).expect("new harness").host = Arc::new(ExpiredRead);
+        let process = Arc::new(RunningSandboxProcess {
+            event_log: None,
+            sandbox_id: "sandbox".into(),
+            process_id: "process".into(),
+            stdin: AsyncMutex::new(None),
+            events: AsyncMutex::new(vec![]),
+            status: AsyncMutex::new(SandboxProcessStatus::Running),
+            open_output_streams: AsyncMutex::new(2),
+            output_drained: Notify::new(),
+            tasks: Mutex::new(None),
+            notify: Notify::new(),
+        });
+        harness
+            .inner
+            .running_processes
+            .lock()
+            .await
+            .insert("process".into(), process.clone());
+        let result = BasicScopedSandboxHandle::agent(&harness, Uuid7::now())
+            .get_sandbox_process_events(SandboxProcessEventQuery {
+                sandbox_id: "sandbox".into(),
+                process_id: "process".into(),
+                after: None,
+                limit: None,
+                follow: Some(true),
+            })
+            .await?;
+        assert!(result.events.is_empty());
+        assert_eq!(result.status, SandboxProcessStatus::Running);
+        assert_eq!(*process.status.lock().await, SandboxProcessStatus::Running);
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct SandboxProviderStatePayload {
@@ -716,6 +774,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .await?;
         let after = query.after.unwrap_or_default();
         let limit = query.limit.unwrap_or(u32::MAX) as usize;
+        let mut deadline = None;
         loop {
             let notified = process.notify.notified();
             futures::pin_mut!(notified);
@@ -745,7 +804,20 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                     status,
                 });
             }
-            notified.await;
+            // Quiet processes must periodically release HTTP/RPC requests.
+            // Expiring a read leaves the process and its output cursor intact.
+            let deadline = deadline
+                .get_or_insert_with(|| self.harness.inner.host.sleep(Duration::from_secs(30)));
+            if let futures::future::Either::Right((result, _)) =
+                futures::future::select(notified, deadline).await
+            {
+                result?;
+                return Ok(GetSandboxProcessEventsResult {
+                    events,
+                    cursor,
+                    status,
+                });
+            }
         }
     }
 
@@ -1116,7 +1188,75 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         process_id: &str,
     ) -> Result<Arc<RunningSandboxProcess>> {
         self.harness.check(self.owner).await?;
-        require_running_sandbox_process(self.harness, sandbox_id, process_id).await
+        let cached = self
+            .harness
+            .inner
+            .running_processes
+            .lock()
+            .await
+            .get(process_id)
+            .cloned();
+        if let Some(process) = cached {
+            if process.sandbox_id != sandbox_id {
+                bail!("sandbox process {process_id} does not belong to sandbox {sandbox_id}");
+            }
+            return Ok(process);
+        }
+        // Completed process results outlive the host that held their live I/O.
+        // A restarted server (or an unloaded Durable Object) reads the same log.
+        let mut events = Vec::new();
+        let mut status = None;
+        for event in load_events(&self.harness.inner.storage, &self.owner_dir).await? {
+            match event.data {
+                EventData::SandboxProcessStarted {
+                    sandbox_id: id,
+                    process_id: pid,
+                    status: started,
+                    ..
+                } if id == sandbox_id && pid == process_id => status = Some(started),
+                EventData::SandboxProcessEvent {
+                    sandbox_id: id,
+                    process_id: pid,
+                    event,
+                } if id == sandbox_id && pid == process_id => events.push(event),
+                _ => {}
+            }
+        }
+        let mut status =
+            status.ok_or_else(|| anyhow!("sandbox process not found: {process_id}"))?;
+        events.sort_by_key(SandboxProcessEvent::cursor);
+        for event in &events {
+            status = match event {
+                SandboxProcessEvent::Exit { exit_code, .. } => SandboxProcessStatus::Exited {
+                    exit_code: *exit_code,
+                },
+                SandboxProcessEvent::Error { message, .. } => SandboxProcessStatus::Failed {
+                    message: message.clone(),
+                },
+                SandboxProcessEvent::Cancelled { .. } => SandboxProcessStatus::Cancelled,
+                _ => status,
+            };
+        }
+        if status.is_running() {
+            bail!("sandbox process lost its live connection: {process_id}");
+        }
+        let process = Arc::new(RunningSandboxProcess {
+            event_log: None,
+            sandbox_id: sandbox_id.into(),
+            process_id: process_id.into(),
+            stdin: AsyncMutex::new(None),
+            events: AsyncMutex::new(events),
+            status: AsyncMutex::new(status),
+            open_output_streams: AsyncMutex::new(0),
+            output_drained: Notify::new(),
+            tasks: Mutex::new(None),
+            notify: Notify::new(),
+        });
+        let mut processes = self.harness.inner.running_processes.lock().await;
+        Ok(processes
+            .entry(process_id.into())
+            .or_insert(process)
+            .clone())
     }
 
     pub(super) fn process_event_log(&self) -> Option<SandboxProcessEventLog> {
@@ -1899,25 +2039,6 @@ pub(super) fn sandbox_provider_state_event(
     }))
 }
 
-pub(super) async fn require_running_sandbox_process(
-    harness: &BasicExoHarness,
-    sandbox_id: &str,
-    process_id: &str,
-) -> Result<Arc<RunningSandboxProcess>> {
-    let process = harness
-        .inner
-        .running_processes
-        .lock()
-        .await
-        .get(process_id)
-        .cloned()
-        .ok_or_else(|| anyhow!("sandbox process not found: {process_id}"))?;
-    if process.sandbox_id != sandbox_id {
-        bail!("sandbox process {process_id} does not belong to sandbox {sandbox_id}");
-    }
-    Ok(process)
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct StoredSandbox {
     #[serde(default)]
@@ -1975,6 +2096,7 @@ impl StoredSandbox {
 
 impl From<StoredSandbox> for SandboxRecord {
     fn from(sandbox: StoredSandbox) -> Self {
+        let policy = sandbox.policy();
         Self {
             id: sandbox.id,
             name: sandbox.name,
@@ -1982,6 +2104,13 @@ impl From<StoredSandbox> for SandboxRecord {
             image: sandbox.image,
             tcp_ports: sandbox.tcp_ports,
             running: sandbox.running,
+            default_workdir: sandbox.default_workdir.unwrap_or_default(),
+            file_system_mounts: sandbox.file_system_mounts,
+            durable_file_systems: sandbox.durable_file_systems,
+            resources: sandbox.resources,
+            policy,
+            idle_seconds: sandbox.idle_seconds,
+            attachment: sandbox.attachment,
         }
     }
 }

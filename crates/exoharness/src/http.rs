@@ -1,6 +1,5 @@
 mod client;
 pub use client::{ExoHttpTransport, HttpExoHarness, HttpSandboxHandle};
-#[cfg(feature = "basic-backend")]
 mod process;
 #[cfg(feature = "basic-backend")]
 mod server;

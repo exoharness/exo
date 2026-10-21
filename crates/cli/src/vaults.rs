@@ -1,3 +1,4 @@
+mod from_agent;
 mod login;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -10,6 +11,12 @@ use std::{collections::HashMap, path::PathBuf};
 
 #[derive(Debug, Subcommand)]
 pub enum VaultCommands {
+    /// Associate a private vault with a user email.
+    Bind {
+        vault: String,
+        #[arg(long)]
+        email: String,
+    },
     /// Create a vault.
     Create { name: String },
     /// List vaults, or the secrets inside a vault.
@@ -66,12 +73,18 @@ impl PolicyArgs {
 pub enum SecretCommands {
     /// Create a secret by importing a token or logging in.
     #[command(group(clap::ArgGroup::new("source").required(true).multiple(true)
-        .args(["token_env", "preset", "url", "client_id"])))]
+        .args(["token_env", "preset", "url", "client_id", "from_agent"])))]
     Create {
-        vault: String,
-        /// Secret name; defaults to the preset name.
-        #[arg(required_unless_present = "preset")]
+        /// Target vault; with --from-agent, defaults to global locally and personal remotely.
+        #[arg(required_unless_present = "from_agent")]
+        vault: Option<String>,
+        /// Secret name; with --from-agent, selects an MCP server by name.
+        #[arg(required_unless_present_any = ["preset", "from_agent"])]
         name: Option<String>,
+        /// Set up missing MCP credentials from an agent Markdown file.
+        #[arg(long, value_name = "FILE", group = "login_source",
+            conflicts_with_all = ["preset", "url", "device_url", "token_url", "allow_origin", "allow_url", "policy"])]
+        from_agent: Option<PathBuf>,
         #[command(flatten)]
         credential: login::CredentialArgs,
         #[command(flatten)]
@@ -97,6 +110,7 @@ pub async fn run(
     local: bool,
 ) -> Result<()> {
     match command {
+        VaultCommands::Bind { .. } => unreachable!("identity management is handled by the CLI"),
         VaultCommands::Create { name } => {
             let vault = store.create_vault(name).await?;
             println!(
@@ -184,12 +198,26 @@ pub async fn run(
         VaultCommands::Secret { command } => {
             let command = command.as_ref();
             let vault = match command {
-                SecretCommands::Create { vault, .. }
-                | SecretCommands::Update { vault, .. }
-                | SecretCommands::Delete { vault, .. } => vault,
+                SecretCommands::Create { vault, .. } => {
+                    vault
+                        .as_deref()
+                        .unwrap_or(if local { "global" } else { "personal" })
+                }
+                SecretCommands::Update { vault, .. } | SecretCommands::Delete { vault, .. } => {
+                    vault.as_str()
+                }
             };
             let vault = find_vault(store, vault).await?;
             match command {
+                SecretCommands::Create {
+                    from_agent: Some(path),
+                    name,
+                    credential,
+                    ..
+                } => {
+                    from_agent::create(&vault, path, name.as_deref(), credential, env, local)
+                        .await?;
+                }
                 SecretCommands::Create {
                     name,
                     policy,

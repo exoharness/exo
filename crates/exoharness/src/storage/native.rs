@@ -34,13 +34,14 @@ impl Storage for NativeStorage {
             Err(error) => Err(error.into()),
         }
     }
-    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+    async fn list_after(&self, prefix: &str, after: Option<&str>) -> Result<Vec<String>> {
         let prefix = (!prefix.is_empty())
             .then(|| ObjectPath::parse(prefix))
             .transpose()?;
+        let after = after.map(ObjectPath::parse).transpose()?;
         Ok(self
             .0
-            .list(prefix.as_ref())
+            .list_with_offset(prefix.as_ref(), &after.unwrap_or_default())
             .map_ok(|meta| meta.location.to_string())
             .try_collect()
             .await?)

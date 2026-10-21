@@ -175,6 +175,18 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
     stdout.read_to_end(&mut output).await.expect("stdout");
     assert_eq!(output, b"hello");
     assert_eq!(parts.wait.await.expect("exit"), 0);
+    let abandoned = conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id,
+            command: vec!["cat".to_string()],
+            env: Default::default(),
+        })
+        .await
+        .expect("attached process")
+        .into_parts();
+    std::thread::spawn(move || drop(abandoned))
+        .join()
+        .expect("dropping process outside Tokio must not panic");
 }
 
 #[actix_web::test]

@@ -8,8 +8,7 @@ the call, and the result is returned on the next model round.
 
 The harness supports:
 
-- the bootstrap tools `shell`, `inspect_tools`, `manage_tool`, and
-  `rebuild_and_restart_exo`
+- the built-in tools `shell`, `inspect_tools`, and `manage_tool`
 - library tool modules selected in agent configuration
 - manifest tools installed from workspace-relative directories or exact pinned
   Git commits
@@ -100,25 +99,13 @@ Use `exo agent get NAME` to inspect the saved definition and resolved module pat
 
 ## Bootstrap surface
 
-The bootstrap profile has four built-in tools:
+The default Responses harness registers three built-in tools:
 
 ```text
 shell
 inspect_tools
 manage_tool
-rebuild_and_restart_exo
 ```
-
-`rebuild_and_restart_exo` uses the guarded host service rather than accepting
-arbitrary deployment commands. Pass a short `reason` so the durable update
-record under `.exo/guardian-updates/` is self-describing. When the deferred
-job finishes, the same outcome is appended to the requesting conversation's
-event log as a `rebuild_and_restart_exo` host event (including failures).
-
-The practical profile adds the current scheduler and adapter tools plus the
-shipped sandbox recovery, introspection, memory, todo, skill, and web tools.
-Bootstrap and practical are the only profiles. Profiles are curated defaults,
-not alternate registries, scopes, or trust mechanisms.
 
 ## Execution and Events
 
@@ -135,10 +122,8 @@ but it does not sandbox the harness process that loaded the tool module.
 Also deferred are code mode, generic adapter commands, remote registries, and
 signatures.
 
-## Scheduler and Adapters
+## Adapters
 
-The scheduler remains the current scheduler service with its existing tools; it
-is not represented as an adapter in this phase. Adapters remain long-running
-supervised workers that can wake conversations. Their existing lifecycle and
-messaging tools may be included by practical profiles, while a generic
-manifest-driven adapter command protocol is deferred.
+Managed adapters submit inputs to the normal turn queue and deliver the execution
+stream. They do not require the agent to call a messaging tool. See
+[Managed adapters](../../docs/managed-adapters.md).

@@ -37,6 +37,79 @@ use crate::{
 const DEFAULT_DURABLE_CONTRACT_MOUNT_PATH: &str = "/home/exo/workspace";
 
 #[tokio::test]
+async fn slow_watch_replays_batch_cursor_and_lagged_appends_without_loss() -> crate::Result<()> {
+    use futures::StreamExt;
+    use std::ops::Bound;
+    let harness = BasicExoHarness::in_memory(local_test_config("unused-watch-test")).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "watch".into(),
+            name: "Watch".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let thread = agent.new_conversation(Default::default()).await?;
+    let first = thread
+        .add_events(crate::AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: (0..32)
+                .map(|i| EventData::Error {
+                    message: i.to_string(),
+                    metadata: None,
+                })
+                .collect(),
+        })
+        .await?;
+    let mut watch = thread
+        .watch_events(Bound::Excluded(first.event_ids[15]))
+        .await?;
+    let mut expected = first.event_ids[16..].to_vec();
+    // Exceed the live buffer before reading: lagged observers must replay all
+    // persisted events without dropping or duplicating any batch.
+    for i in 32..128 {
+        let added = thread
+            .add_events(crate::AddEventsRequest {
+                session_id: None,
+                turn_id: None,
+                data: vec![EventData::Error {
+                    message: i.to_string(),
+                    metadata: None,
+                }],
+            })
+            .await?;
+        expected.extend(added.event_ids);
+    }
+    for id in expected {
+        assert_eq!(
+            timeout(Duration::from_secs(5), watch.next())
+                .await?
+                .expect("event")?
+                .id,
+            id
+        );
+    }
+    let added = thread
+        .add_events(crate::AddEventsRequest {
+            session_id: None,
+            turn_id: None,
+            data: vec![EventData::Error {
+                message: "last".into(),
+                metadata: None,
+            }],
+        })
+        .await?;
+    assert_eq!(
+        timeout(Duration::from_secs(5), watch.next())
+            .await?
+            .expect("event")?
+            .id,
+        added.latest_event_id
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn in_memory_state_does_not_create_files_or_survive_reopening() -> crate::Result<()> {
     let temp = TempDir::new()?;
     let root = temp.path().join("unused");
@@ -1837,6 +1910,40 @@ async fn basic_backend_exposes_process_events_and_input() {
         events.events.last(),
         Some(SandboxProcessEvent::Exit { exit_code: 0, .. })
     ));
+
+    let restarted = BasicExoHarness::new(local_test_config(tempdir.path()))
+        .await
+        .expect("restart harness");
+    let restored = restarted
+        .get_agent(&agent.record().id)
+        .await
+        .expect("agent lookup")
+        .expect("saved agent")
+        .get_thread(&conversation.record().id)
+        .await
+        .expect("thread lookup")
+        .expect("saved thread");
+    let restored_events = restored
+        .get_sandbox_process_events(SandboxProcessEventQuery {
+            sandbox_id: sandbox_id.clone(),
+            process_id: process.id.clone(),
+            after: None,
+            limit: None,
+            follow: Some(true),
+        })
+        .await
+        .expect("completed output survives restart");
+    assert_eq!(restored_events, events);
+    assert_eq!(
+        restored
+            .wait_sandbox_process(WaitSandboxProcessRequest {
+                sandbox_id: sandbox_id.clone(),
+                process_id: process.id.clone(),
+            })
+            .await
+            .expect("completed status survives restart"),
+        status
+    );
 
     let conversation_events = conversation
         .get_events(None)

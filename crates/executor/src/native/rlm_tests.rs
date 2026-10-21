@@ -317,6 +317,9 @@ async fn rlm_send_stream_suppresses_internal_control_text() {
     let mut saw_chunk = false;
     while let Some(event) = stream.next().await {
         match event.expect("stream event should succeed") {
+            ExecutionStreamEvent::Status { .. }
+            | ExecutionStreamEvent::Messages { .. }
+            | ExecutionStreamEvent::Checkpoint { .. } => {}
             ExecutionStreamEvent::Suspended(_) => panic!("unexpected turn suspension"),
             ExecutionStreamEvent::FirstChunk { .. } => {}
             ExecutionStreamEvent::Chunk(_) => saw_chunk = true,

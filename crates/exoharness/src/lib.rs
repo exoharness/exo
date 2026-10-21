@@ -63,7 +63,7 @@ pub use types::*;
 pub use uuid7::*;
 
 #[cfg(feature = "store")]
-pub use storage::Storage;
+pub use storage::{BasicObjectStore, Storage};
 
 #[cfg(feature = "store")]
 pub mod egress_credentials;

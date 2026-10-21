@@ -250,7 +250,7 @@ Omit the agent argument to serve the local provider, including agent creation. T
 
 Declare adapter attachment names in the agent spec, for example
 `adapters: [support-slack]`. Pass deployment definitions as
-`exo run support --serve --adapters-file adapters.yaml`.
+`exo run support --serve`. Configure adapters in the agent definition.
 Each YAML key is an attachment name; its value is an `AdapterConfig` with
 `adapterType`, `workerCommand`, optional `initialization`, `stateDir`, and
 `secretEnv: [{env: SLACK_BOT_TOKEN, vault: team, secretId: slack-token}]`.

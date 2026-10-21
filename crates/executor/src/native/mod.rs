@@ -1,4 +1,3 @@
-pub(crate) mod adapter;
 pub(crate) mod agent_sandbox;
 pub(crate) mod braintrust;
 #[cfg(test)]
@@ -13,7 +12,6 @@ pub mod http_service;
 #[cfg(test)]
 pub(crate) mod http_tests;
 pub(crate) mod local_sandbox;
-pub(crate) mod mcp;
 pub mod remote;
 pub(crate) mod rlm;
 #[cfg(test)]
@@ -22,15 +20,8 @@ pub(crate) mod scheduler_runtime;
 pub(crate) mod scheduler_store;
 pub(crate) mod scheduler_types;
 pub(crate) mod typescript;
-pub use adapter::AdapterStore;
-pub use adapter::{
-    AdapterAttachment, AdapterAttachmentKind, AdapterConfig, AdapterEventRecord, AdapterEventType,
-    AdapterRecord, AdapterSource, NewAdapter, WorkerSecretEnvVar,
-};
-pub use adapter::{AdapterRunOptions, run_adapters_watch};
 pub use braintrust::BraintrustRuntimeConfig;
 pub use conversation_events::{
-    HOST_EVENT_ADAPTER_RUNNER_DRAINING, HOST_EVENT_ADAPTER_RUNNER_STARTED, HOST_EVENT_REBOOT,
     HOST_EVENT_REBUILD_AND_RESTART, RebuildUpdateRecord, complete_rebuild_and_restart_update,
     finalize_rebuild_update_file, record_host_event,
 };
@@ -39,7 +30,6 @@ pub use harness_runtime::RouterModelClient;
 pub use harness_tool::{BasicToolRuntime, ExoToolRuntime};
 pub use http_provider::HttpProvider;
 pub use local_sandbox::LocalSandboxExoHarness;
-pub use mcp::McpToolRuntime;
 pub use scheduler_runtime::{
     SchedulerRunOptions, redeliver_pending_wakes, run_due_tasks, run_task,
 };
@@ -62,7 +52,6 @@ mod task_host;
 pub(crate) mod test_support;
 pub use task_host::TokioRuntimeHost;
 pub(crate) mod managed_executor;
-pub(crate) mod managed_mcp;
 pub use exoharness::{
     BasicExoHarness, BasicExoHarnessConfig, DEFAULT_SANDBOX_IMAGE, DEFAULT_SANDBOX_MEMORY_MIB,
     DEFAULT_SANDBOX_VCPU_COUNT, ExoHarnessHttpServeOptions, HTTP_EXOHARNESS_TRACING_TARGET,

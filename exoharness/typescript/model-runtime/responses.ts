@@ -91,6 +91,7 @@ export type ToolCallExecutor = (
 ) => Promise<EventData[]>;
 
 export interface NativeTraceOptions {
+  signal?: AbortSignal;
   parent?: TraceParent;
   roundIndex?: number;
 }
@@ -246,26 +247,29 @@ export class ResponsesRuntime extends ModelRuntime {
       return this.completeStreamRaw(
         buildStreamingBody(request),
         options.handlers,
+        options.signal,
       );
     }
-    return this.completeRaw(buildNonStreamingBody(request));
+    return this.completeRaw(buildNonStreamingBody(request), options.signal);
   }
 
   private async completeRaw(
     body: ResponseCreateParamsNonStreaming,
+    signal?: AbortSignal,
   ): Promise<Response> {
-    return this.client.responses.create(body);
+    return this.client.responses.create(body, { signal });
   }
 
   private async completeStreamRaw(
     body: ResponseCreateParamsStreaming,
     handlers: NativeStreamHandlers = {},
+    signal?: AbortSignal,
   ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
     let finalResponse: Response | null = null;
-    const stream = await this.client.responses.create(body);
+    const stream = await this.client.responses.create(body, { signal });
 
     for await (const event of stream) {
       if (!sawFirstChunk) {
@@ -363,28 +367,34 @@ export class ChatCompletionsRuntime extends ModelRuntime {
       return this.completeStreamRaw(
         buildChatStreamingBody(request),
         options.handlers,
+        options.signal,
       );
     }
     return chatCompletionToResponse(
-      await this.completeRaw(buildChatNonStreamingBody(request)),
+      await this.completeRaw(
+        buildChatNonStreamingBody(request),
+        options.signal,
+      ),
     );
   }
 
   private async completeRaw(
     body: ChatCompletionCreateParamsNonStreaming,
+    signal?: AbortSignal,
   ): Promise<ChatCompletion> {
-    return this.client.chat.completions.create(body);
+    return this.client.chat.completions.create(body, { signal });
   }
 
   private async completeStreamRaw(
     body: ChatCompletionCreateParamsStreaming,
     handlers: NativeStreamHandlers = {},
+    signal?: AbortSignal,
   ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
     const accumulator = new ChatCompletionAccumulator();
-    const stream = await this.client.chat.completions.create(body);
+    const stream = await this.client.chat.completions.create(body, { signal });
 
     for await (const chunk of stream) {
       if (!sawFirstChunk) {
@@ -440,19 +450,22 @@ export class AnthropicRuntime extends ModelRuntime {
   ): Promise<Response> {
     const body = buildAnthropicBody(request);
     if (options.streamed) {
-      return this.completeStreamRaw(body, options.handlers);
+      return this.completeStreamRaw(body, options.handlers, options.signal);
     }
-    return anthropicMessageToResponse(await this.client.messages.create(body));
+    return anthropicMessageToResponse(
+      await this.client.messages.create(body, { signal: options.signal }),
+    );
   }
 
   private async completeStreamRaw(
     body: Anthropic.MessageCreateParamsNonStreaming,
     handlers: NativeStreamHandlers = {},
+    signal?: AbortSignal,
   ): Promise<Response> {
     const startedAt = performance.now();
     let sawFirstChunk = false;
     let ttftMs: number | null = null;
-    const stream = this.client.messages.stream(body);
+    const stream = this.client.messages.stream(body, { signal });
 
     for await (const event of stream) {
       if (

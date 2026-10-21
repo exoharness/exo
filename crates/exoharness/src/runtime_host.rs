@@ -11,6 +11,9 @@ use futures::{FutureExt, StreamExt};
 
 pub trait RuntimeHost: Send + Sync {
     fn spawn(&self, task: BoxFuture<'static, ()>);
+
+    /// Timers must use the same host as process I/O, including on wasm.
+    fn sleep(&self, duration: std::time::Duration) -> BoxFuture<'static, Result<()>>;
 }
 
 struct CancelOnDrop(AbortHandle);

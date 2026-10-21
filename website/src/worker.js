@@ -1,5 +1,3 @@
-const SESSION_PATH_PATTERN = /^\/chat\/(?:s|agent)\/([A-Za-z0-9_-]{8,128})\/?$/;
-
 const SECURITY_HEADERS = {
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
@@ -19,12 +17,6 @@ export default {
         status: 404,
         headers: SECURITY_HEADERS,
       });
-    }
-
-    if (SESSION_PATH_PATTERN.test(url.pathname)) {
-      const chatUrl = new URL("/chat", url);
-      const response = await env.ASSETS.fetch(new Request(chatUrl, request));
-      return withSecurityHeaders(response);
     }
 
     const response = await env.ASSETS.fetch(request);

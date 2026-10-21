@@ -1,11 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::sandbox_policy::sandbox_policy;
 use crate::{AgentConfig, ConversationConfig};
 use exoharness::{
-    ConversationHandle, CreateSandboxRequest, EventData, EventKind, EventQuery,
-    EventQueryDirection, FileSystemMount, FileSystemMountMode, Result, SandboxProvider,
+    ConversationHandle, CreateSandboxRequest, FileSystemMount, FileSystemMountMode, Result,
+    SandboxProvider,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -146,91 +146,39 @@ enum ConversationSandboxCandidate {
     Attached { id: String },
 }
 
-impl ConversationSandboxCandidate {
-    fn id(&self) -> &str {
-        match self {
-            Self::Created(sandbox) => &sandbox.id,
-            Self::Attached { id } => id,
-        }
-    }
-}
-
-// Replay sandbox lifecycle events and return candidates in chronological order.
-// Stopped managed sandboxes remain resumable; detached sandboxes are excluded.
+// Sandbox records are authoritative for configuration and ownership. Reading
+// conversation output to reconstruct this state makes setup grow with history.
 async fn conversation_sandbox_candidates(
     conversation: &dyn ConversationHandle,
 ) -> Result<Vec<ConversationSandboxCandidate>> {
-    let events = conversation
-        .get_events(Some(EventQuery {
-            cursor: None,
-            direction: Some(EventQueryDirection::Asc),
-            limit: None,
-            session_id: None,
-            turn_id: None,
-            types: Some(vec![
-                EventKind::SANDBOX_CREATED,
-                EventKind::SANDBOX_ATTACHED,
-                EventKind::SANDBOX_DETACHED,
-            ]),
-        }))
-        .await?
-        .events;
-    let mut candidates = Vec::new();
-    let mut inactive = HashSet::new();
-    for event in events {
-        match event.data {
-            EventData::SandboxCreated {
-                sandbox_id,
-                provider,
-                image,
-                default_workdir,
-                file_system_mounts,
-                durable_file_systems,
-                tcp_ports,
-                resources,
-                enable_networking,
-                idle_seconds,
-                policy,
-                ..
-            } => {
-                candidates.push(ConversationSandboxCandidate::Created(Box::new(
-                    ConversationSandboxInfo {
-                        id: sandbox_id,
-                        policy,
-                        provider,
-                        image,
-                        default_workdir,
-                        file_system_mounts,
-                        durable_file_systems,
-                        tcp_ports,
-                        resources,
-                        enable_networking,
-                        idle_seconds,
-                        running: true,
-                    },
-                )));
+    let mut records = conversation.list_sandboxes().await?;
+    records.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    Ok(records
+        .into_iter()
+        .filter_map(|record| {
+            if record.attachment.is_some() {
+                return record
+                    .running
+                    .then_some(ConversationSandboxCandidate::Attached { id: record.id });
             }
-            EventData::SandboxAttached { sandbox_id, .. } => {
-                candidates.push(ConversationSandboxCandidate::Attached { id: sandbox_id });
-            }
-            EventData::SandboxDetached { sandbox_id, .. } => {
-                inactive.insert(sandbox_id);
-            }
-            _ => {}
-        }
-    }
-    candidates.retain(|candidate| !inactive.contains(candidate.id()));
-    let owned = conversation.list_sandboxes().await?;
-    candidates.retain_mut(|candidate| {
-        let Some(record) = owned.iter().find(|record| record.id == candidate.id()) else {
-            return false;
-        };
-        if let ConversationSandboxCandidate::Created(sandbox) = candidate {
-            sandbox.running = record.running;
-        }
-        true
-    });
-    Ok(candidates)
+            Some(ConversationSandboxCandidate::Created(Box::new(
+                ConversationSandboxInfo {
+                    id: record.id,
+                    enable_networking: record.policy.networking_enabled(),
+                    policy: Some(record.policy),
+                    provider: record.provider,
+                    image: record.image,
+                    default_workdir: record.default_workdir,
+                    file_system_mounts: record.file_system_mounts,
+                    durable_file_systems: record.durable_file_systems,
+                    tcp_ports: record.tcp_ports,
+                    resources: record.resources,
+                    idle_seconds: record.idle_seconds,
+                    running: record.running,
+                },
+            )))
+        })
+        .collect())
 }
 
 #[cfg(feature = "native")]
@@ -426,6 +374,21 @@ mod tests {
         };
         let first =
             ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?;
+        // Selecting a sandbox must not deserialize unrelated conversation output.
+        let unrelated = temp
+            .path()
+            .join("agents")
+            .join(agent.record().id.to_string())
+            .join("conversations")
+            .join(thread.record().id.to_string())
+            .join("events")
+            .join(format!("{}.json", exoharness::Uuid7::now()));
+        std::fs::write(&unrelated, b"unread unrelated event blob")?;
+        assert_eq!(
+            ensure_conversation_sandbox(thread.as_ref(), &agent_config, &config, None).await?,
+            first
+        );
+        std::fs::remove_file(unrelated)?;
         thread.stop_sandbox(first.clone()).await?;
         assert_eq!(thread.list_sandboxes().await?[0].id, first);
         assert!(!thread.list_sandboxes().await?[0].running);

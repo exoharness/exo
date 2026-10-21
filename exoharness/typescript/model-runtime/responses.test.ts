@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Response } from "openai/resources/responses/responses";
 
 import {
@@ -12,6 +12,41 @@ import {
   runtimeFromModelConfig,
   ResponsesRuntime,
 } from "./responses";
+
+describe("model runtime cancellation", () => {
+  it("aborts an in-flight model request through the SDK", async () => {
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+          started();
+        }),
+    );
+    try {
+      const controller = new AbortController();
+      const runtime = new ResponsesRuntime({ apiKey: "synthetic-key" });
+      const pending = runtime.complete(
+        { model: "test-model", input: "hello" },
+        { signal: controller.signal },
+      );
+      const rejected = expect(pending).rejects.toThrow(/abort/i);
+      await ready;
+      controller.abort();
+      await rejected;
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
+});
 
 describe("model runtime dispatch", () => {
   it("matches the Responses-required model families", () => {

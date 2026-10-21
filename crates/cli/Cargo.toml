@@ -27,7 +27,7 @@ actix-web.workspace = true
 reqwest.workspace = true
 url.workspace = true
 rmcp = { workspace = true, features = ["auth", "reqwest"] }
-oauth2.workspace = true
+oauth2 = { workspace = true, features = ["reqwest"] }
 keyring = "4.0.0-rc.3"
 keyring-core = "0.7.2"
 futures.workspace = true

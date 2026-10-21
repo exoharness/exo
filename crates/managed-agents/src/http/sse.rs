@@ -1,11 +1,20 @@
-use std::{io, time::Duration};
+#[cfg(feature = "client")]
+use std::io;
+use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+#[cfg(feature = "client")]
+use anyhow::bail;
 use bytes::Bytes;
+#[cfg(feature = "client")]
 use exoharness::{Event, EventStream};
+#[cfg(feature = "client")]
 use futures::{Stream, StreamExt, TryStreamExt};
+#[cfg(feature = "client")]
 use serde::Deserialize;
+#[cfg(feature = "client")]
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(feature = "client")]
 use tokio_util::io::StreamReader;
 
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -24,6 +33,7 @@ pub fn encode_error(error: &str) -> Bytes {
     ))
 }
 
+#[cfg(feature = "client")]
 pub fn with_heartbeats<S, E>(
     events: S,
     heartbeat_interval: Duration,
@@ -49,6 +59,7 @@ where
     )
 }
 
+#[cfg(feature = "client")]
 pub fn encode(events: EventStream) -> impl Stream<Item = Result<Bytes>> {
     with_heartbeats(
         events.map(|event| match event {
@@ -59,6 +70,7 @@ pub fn encode(events: EventStream) -> impl Stream<Item = Result<Bytes>> {
     )
 }
 
+#[cfg(feature = "client")]
 pub fn decode<S, E>(bytes: S) -> EventStream
 where
     S: Stream<Item = std::result::Result<Bytes, E>> + Send + 'static,
@@ -119,7 +131,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exoharness::{EventData, Uuid7};
+    use exoharness::{Event, EventData, Uuid7};
 
     #[tokio::test]
     async fn decodes_fragmented_utf8_multiline_data_and_crlf() -> Result<()> {

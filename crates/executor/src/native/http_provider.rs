@@ -68,6 +68,7 @@ impl HttpProvider {
         }
         watchers.spawn(async move {
             let observed = async {
+                let mut failure = None;
                 if body.options.idempotency_key.is_some() {
                     let terminal = client
                         .events(
@@ -90,6 +91,7 @@ impl HttpProvider {
                         let stream = crate::harness_events::turn_stream(
                             Box::pin(futures::stream::iter(terminal.into_iter().map(Ok))),
                             result.turn,
+                            None,
                         );
                         futures::pin_mut!(stream);
                         while let Some(event) = stream.next().await {
@@ -99,6 +101,13 @@ impl HttpProvider {
                         }
                         return Ok(());
                     }
+                    failure = terminal
+                        .into_iter()
+                        .rev()
+                        .find_map(|event| match event.data {
+                            exoharness::EventData::Error { message, .. } => Some(message),
+                            _ => None,
+                        });
                 }
                 let events = client
                     .watch(
@@ -109,7 +118,7 @@ impl HttpProvider {
                         },
                     )
                     .await?;
-                let stream = crate::harness_events::turn_stream(events, result.turn);
+                let stream = crate::harness_events::turn_stream(events, result.turn, failure);
                 futures::pin_mut!(stream);
                 loop {
                     let event = tokio::select! {
@@ -331,6 +340,9 @@ impl ExoHttpTransport for RuntimeTransport {
             Request::AgentListArtifacts { agent_id } => Ok(Response::ArtifactVersions {
                 artifacts: self.client.list_agent_artifacts(agent_id).await?,
             }),
+            Request::AgentDiagnose { agent_id } => Ok(Response::Diagnostics {
+                checks: self.client.diagnose_agent(agent_id).await?,
+            }),
             Request::AgentReadArtifact { agent_id, request } => Ok(Response::Artifact {
                 artifact: self.client.read_agent_artifact(agent_id, &request).await?,
             }),
@@ -342,7 +354,7 @@ impl ExoHttpTransport for RuntimeTransport {
             }),
             Request::DeleteVault { vault_id } => {
                 self.client.delete_vault(vault_id).await?;
-                Ok(Response::Unit)
+                Ok(Response::Bool { value: true })
             }
             Request::VaultPutSecret {
                 scope,
@@ -376,7 +388,7 @@ impl ExoHttpTransport for RuntimeTransport {
                 self.client
                     .delete_secret(scope, vault_id, secret_id)
                     .await?;
-                Ok(Response::Unit)
+                Ok(Response::Bool { value: true })
             }
             Request::ListVaults { scope } => Ok(Response::Vaults {
                 vaults: self.client.list_vaults(scope).await?,

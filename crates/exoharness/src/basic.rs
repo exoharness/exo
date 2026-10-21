@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{self, Display, Formatter};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
@@ -6,19 +6,21 @@ use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, anyhow, bail};
 use async_trait::async_trait;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{
-    Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock as AsyncRwLock, mpsc,
+    Mutex as AsyncMutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock as AsyncRwLock,
+    broadcast,
 };
-use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::storage::BasicObjectStore;
 
 #[cfg(feature = "basic-backend")]
 #[path = "basic/native.rs"]
 mod native;
+#[cfg(feature = "basic-backend")]
+pub(crate) use native::ProcessRuntimeHost;
 #[cfg(feature = "basic-backend")]
 pub use native::*;
 #[path = "basic/sandboxes.rs"]
@@ -68,6 +70,9 @@ use sessions::LocalSessions;
 #[path = "basic/resource_tests.rs"]
 mod resource_tests;
 
+#[cfg(all(test, feature = "basic-backend"))]
+#[path = "basic/event_query_tests.rs"]
+mod event_query_tests;
 #[path = "basic/turn_queue.rs"]
 mod turn_queue;
 
@@ -193,7 +198,7 @@ struct BasicExoHarnessInner {
     storage: BasicObjectStore,
     write_lock: AsyncMutex<()>,
     resource_locks: Mutex<HashMap<ResourceScope, Weak<AsyncRwLock<()>>>>,
-    subscribers: Mutex<HashMap<ConversationId, Vec<mpsc::UnboundedSender<Result<Event>>>>>,
+    subscribers: Mutex<HashMap<ConversationId, broadcast::Sender<Arc<AppendedEvents>>>>,
     #[cfg(feature = "basic-backend")]
     native: NativeState,
     sandbox_registry: HashMap<SandboxProvider, SandboxBackendRegistration>,
@@ -251,6 +256,7 @@ impl BasicExoHarness {
         master_key: [u8; 32],
         backends: Vec<SandboxBackendRegistration>,
         host: Arc<dyn crate::runtime_host::RuntimeHost>,
+        oauth: Option<Arc<dyn crate::vault::OAuthHttpClient>>,
     ) -> Result<Self> {
         let mut registry = HashMap::new();
         for backend in backends {
@@ -269,7 +275,12 @@ impl BasicExoHarness {
             inner: Arc::new(BasicExoHarnessInner {
                 turn_queue_locks: Arc::default(),
                 access_policy: Default::default(),
-                vaults: BasicVaultStore::hosted(storage.clone(), cipher.clone()),
+                vaults: BasicVaultStore::hosted(
+                    storage.clone(),
+                    cipher.clone(),
+                    host.clone(),
+                    oauth,
+                ),
                 storage,
                 write_lock: AsyncMutex::new(()),
                 resource_locks: Mutex::default(),
@@ -381,6 +392,14 @@ impl BasicExoHarness {
 
 #[async_trait]
 impl ExoHarness for BasicExoHarness {
+    fn provider_storage(&self) -> Result<Arc<dyn crate::Storage>> {
+        anyhow::ensure!(
+            self.caller.is_none(),
+            "provider storage is restricted to the runtime host"
+        );
+        Ok(self.inner.storage.raw())
+    }
+
     fn with_caller(&self, caller: crate::access::Caller) -> Result<Arc<dyn ExoHarness>> {
         self.inner
             .access_policy
@@ -927,11 +946,21 @@ impl AgentHandle for BasicAgentHandle {
                     agent_id: self.record.id,
                 })
                 .await?;
-            anyhow::ensure!(
-                resources.is_empty(),
-                "this host does not support filesystem resources"
-            );
-            Ok(Vec::new())
+            crate::resources::validate_resources(&resources)?;
+            let prepared = resources
+                .into_iter()
+                .map(|definition| crate::resources::PreparedResource {
+                    definition,
+                    snapshot: None,
+                })
+                .collect::<Vec<_>>();
+            crate::resources::validate_sandbox_resources(&prepared)?;
+            if !prepared.is_empty()
+                && let Some(caller) = &self.harness.caller
+            {
+                caller.policy.check_operator(&caller.principal).await?;
+            }
+            Ok(prepared)
         }
     }
 
@@ -1790,40 +1819,13 @@ impl ConversationHandle for BasicConversationHandle {
                 thread_id: self.record.id,
             })
             .await?;
-        let mut events = load_events(&self.harness.inner.storage, &self.conversation_dir()).await?;
-        if let Some(query) = query {
-            if let Some(session_id) = query.session_id {
-                events.retain(|event| event.session_id == Some(session_id));
-            }
-            if let Some(turn_id) = query.turn_id {
-                events.retain(|event| event.turn_id == Some(turn_id));
-            }
-            if let Some(types) = query.types {
-                events.retain(|event| {
-                    let event_kind = event.data.kind();
-                    types.iter().any(|kind| kind.matches(&event_kind))
-                });
-            }
-            match query.direction.unwrap_or(EventQueryDirection::Asc) {
-                EventQueryDirection::Asc => {
-                    if let Some(cursor) = query.cursor {
-                        events.retain(|event| event.id > cursor);
-                    }
-                }
-                EventQueryDirection::Desc => {
-                    events.reverse();
-                    if let Some(cursor) = query.cursor {
-                        events.retain(|event| event.id < cursor);
-                    }
-                }
-            }
-            if let Some(limit) = query.limit {
-                events.truncate(limit as usize);
-            }
-        }
-        // The cursor is a resume position, even on the final page; Basic's history
-        // cache needs it to avoid replaying events. Callers that scan until an empty
-        // page pay another full log read here, which is acceptable for Basic.
+        let events = load_event_query(
+            &self.harness.inner.storage,
+            &self.conversation_dir(),
+            &query.unwrap_or_default(),
+        )
+        .await?;
+        // The cursor is a resume position, even on the final page.
         let cursor = events.last().map(|event| event.id);
         Ok(GetEventsResult { events, cursor })
     }
@@ -1836,30 +1838,98 @@ impl ConversationHandle for BasicConversationHandle {
             })
             .await?;
         let _guard = self.harness.inner.write_lock.lock().await;
-        let existing = match after_exclusive {
-            Bound::Unbounded => Vec::new(),
-            _ => {
-                let events =
-                    load_events(&self.harness.inner.storage, &self.conversation_dir()).await?;
-                events
-                    .into_iter()
-                    .filter(|event| matches_bound(event.id, &after_exclusive))
-                    .collect::<Vec<_>>()
-            }
+        let bound = match after_exclusive {
+            Bound::Unbounded => Bound::Excluded(
+                load_conversation_record(&self.harness.inner.storage, &self.conversation_dir())
+                    .await?
+                    .latest_event_id
+                    .unwrap_or(Uuid7(Default::default())),
+            ),
+            bound => bound,
         };
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.harness
+        let rx = self
+            .harness
             .inner
             .subscribers
             .lock()
             .expect("subscribers poisoned")
             .entry(self.record.id)
-            .or_default()
-            .push(tx);
-        let existing_stream: BoxStream<'static, Result<Event>> =
-            stream::iter(existing.into_iter().map(Ok)).boxed();
-        let live_stream = UnboundedReceiverStream::new(rx);
-        Ok(Box::pin(existing_stream.chain(live_stream)))
+            .or_insert_with(|| broadcast::channel(64).0)
+            .subscribe();
+        let (keys, last_key) = if matches!(after_exclusive, Bound::Unbounded) {
+            // A live-only observer needs no history scan.
+            (Vec::new(), None)
+        } else {
+            watch_keys(
+                &self.harness.inner.storage,
+                &self.events_dir(),
+                &bound,
+                None,
+            )
+            .await?
+        };
+        let watch = StoredEventWatch {
+            storage: self.harness.inner.storage.clone(),
+            directory: self.events_dir(),
+            keys: keys.into_iter(),
+            events: VecDeque::new(),
+            last_key,
+            bound,
+            rx,
+        };
+        Ok(Box::pin(futures::stream::try_unfold(
+            watch,
+            |mut watch| async move {
+                loop {
+                    if let Some(event) = watch.events.pop_front() {
+                        watch.bound = Bound::Excluded(event.id);
+                        return Ok(Some((event, watch)));
+                    }
+                    if let Some(key) = watch.keys.next() {
+                        let mut events = load_event_object(&watch.storage, &key).await?;
+                        events.retain(|event| matches_bound(event.id, &watch.bound));
+                        events.sort_by_key(|event| event.id);
+                        watch.events = events.into();
+                        continue;
+                    }
+                    match watch.rx.recv().await {
+                        Ok(batch) => {
+                            if watch
+                                .last_key
+                                .as_ref()
+                                .is_some_and(|last| &batch.key <= last)
+                            {
+                                continue;
+                            }
+                            watch.last_key = Some(batch.key.clone());
+                            watch.events = batch
+                                .events
+                                .iter()
+                                .filter(|event| matches_bound(event.id, &watch.bound))
+                                .cloned()
+                                .collect();
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // Subscribe before listing: replay covers older batches,
+                            // and appends racing that scan remain in the live buffer.
+                            watch.rx = watch.rx.resubscribe();
+                            let (keys, last_key) = watch_keys(
+                                &watch.storage,
+                                &watch.directory,
+                                &watch.bound,
+                                watch.last_key.as_deref(),
+                            )
+                            .await?;
+                            if last_key.is_some() {
+                                watch.last_key = last_key;
+                            }
+                            watch.keys = keys.into_iter();
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return Ok(None),
+                    }
+                }
+            },
+        )))
     }
 
     async fn get_event(&self, id: EventId) -> Result<Option<Event>> {
@@ -2409,33 +2479,24 @@ async fn append_events_to_conversation(
     }
     let first_event_id = events.first().expect("at least one event").id;
     let latest_event_id = events.last().expect("at least one event").id;
+    let key = if events.len() == 1 {
+        conversation_dir
+            .join("events")
+            .join(format!("{latest_event_id}.json"))
+    } else {
+        event_batch_path(conversation_dir, first_event_id, latest_event_id)
+    };
     if events.len() == 1 {
-        inner
-            .storage
-            .put_json(
-                conversation_dir
-                    .join("events")
-                    .join(format!("{latest_event_id}.json")),
-                &events[0],
-            )
-            .await?;
+        inner.storage.put_json(&key, &events[0]).await?;
     } else {
         // One object put commits the whole batch. The filename bounds let
         // get_event skip unrelated batches without a separate index write.
         let batch = StoredEventBatch { events };
-        inner
-            .storage
-            .put_json(
-                event_batch_path(conversation_dir, first_event_id, latest_event_id),
-                &batch,
-            )
-            .await?;
+        inner.storage.put_json(&key, &batch).await?;
         events = batch.events;
     }
     let event_ids = events.iter().map(|event| event.id).collect();
-    for event in events {
-        notify_subscribers(inner, conversation_id, event);
-    }
+    notify_subscribers(inner, conversation_id, &key, events);
     record.latest_event_id = Some(latest_event_id);
     Ok(AddEventsResult {
         event_ids,
@@ -2503,12 +2564,61 @@ fn format_event_head_timestamp(head: Option<EventId>) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn notify_subscribers(inner: &BasicExoHarnessInner, conversation_id: ConversationId, event: Event) {
+struct AppendedEvents {
+    key: String,
+    events: Vec<Event>,
+}
+
+fn notify_subscribers(
+    inner: &BasicExoHarnessInner,
+    conversation_id: ConversationId,
+    key: &Path,
+    events: Vec<Event>,
+) {
     let mut subscribers = inner.subscribers.lock().expect("subscribers poisoned");
-    let Some(entries) = subscribers.get_mut(&conversation_id) else {
+    let Some(sender) = subscribers.get(&conversation_id) else {
         return;
     };
-    entries.retain(|sender| sender.send(Ok(event.clone())).is_ok());
+    if sender
+        .send(Arc::new(AppendedEvents {
+            key: key.to_string_lossy().into_owned(),
+            events,
+        }))
+        .is_err()
+    {
+        subscribers.remove(&conversation_id);
+    }
+}
+
+// Live batches share a bounded broadcast buffer. Only lagged observers replay
+// the journal; keeping up with appends requires no storage reads or listings.
+struct StoredEventWatch {
+    storage: BasicObjectStore,
+    directory: PathBuf,
+    keys: std::vec::IntoIter<String>,
+    events: VecDeque<Event>,
+    last_key: Option<String>,
+    bound: Bound<EventId>,
+    rx: broadcast::Receiver<Arc<AppendedEvents>>,
+}
+async fn watch_keys(
+    storage: &BasicObjectStore,
+    directory: &Path,
+    bound: &Bound<EventId>,
+    after_key: Option<&str>,
+) -> Result<(Vec<String>, Option<String>)> {
+    let mut keys = storage.list_keys_after(directory, after_key).await?;
+    // The initial scan must include a batch whose range straddles the event
+    // cursor. Lag recovery lists only keys appended after the previous scan.
+    let last_key = keys.last().cloned();
+    keys.retain(|key| {
+        event_batch_range_from_key(key)
+            .map(|(_, last)| last)
+            .or_else(|| event_id_from_key(key))
+            .is_some_and(|last| matches_bound(last, bound))
+    });
+    keys.sort_by_key(|key| event_id_from_key(key));
+    Ok((keys, last_key))
 }
 
 fn matches_bound(event_id: EventId, bound: &Bound<EventId>) -> bool {
@@ -2516,6 +2626,55 @@ fn matches_bound(event_id: EventId, bound: &Bound<EventId>) -> bool {
         Bound::Unbounded => false,
         Bound::Included(id) => event_id >= *id,
         Bound::Excluded(id) => event_id > *id,
+    }
+}
+
+#[cfg(all(test, feature = "basic-backend"))]
+mod watch_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn filesystem_live_watch_delivery_performs_no_storage_reads() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let harness =
+            BasicExoHarness::new(crate::test_support::local_test_config(temp.path())).await?;
+        let agent = harness
+            .new_agent(NewAgentRequest {
+                vaults: vec![],
+                slug: "watch".into(),
+                name: "Watch".into(),
+            })
+            .await?;
+        let thread = agent.new_thread(Default::default()).await?;
+        let mut first = thread.watch_events(Bound::Unbounded).await?;
+        let mut second = thread.watch_events(Bound::Unbounded).await?;
+        for i in 0..100 {
+            let added = thread
+                .add_events(AddEventsRequest {
+                    session_id: None,
+                    turn_id: None,
+                    data: vec![EventData::Error {
+                        message: i.to_string(),
+                        metadata: None,
+                    }],
+                })
+                .await?;
+            let reads = harness.inner.storage.read_count();
+            assert_eq!(
+                first.next().await.expect("first watcher")?.id,
+                added.latest_event_id
+            );
+            assert_eq!(
+                second.next().await.expect("second watcher")?.id,
+                added.latest_event_id
+            );
+            assert_eq!(
+                harness.inner.storage.read_count(),
+                reads,
+                "live delivery re-read the filesystem"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -2553,6 +2712,92 @@ async fn load_events(storage: &BasicObjectStore, conversation_dir: &Path) -> Res
         .flatten()
         .collect::<Vec<_>>();
     events.sort_by_key(|event| event.id);
+    Ok(events)
+}
+
+async fn load_event_query(
+    storage: &BasicObjectStore,
+    conversation_dir: &Path,
+    query: &EventQuery,
+) -> Result<Vec<Event>> {
+    if query.limit == Some(0) {
+        return Ok(Vec::new());
+    }
+    let descending = query.direction == Some(EventQueryDirection::Desc);
+    let mut keys = storage
+        .list_keys(conversation_dir.join("events"))
+        .await?
+        .into_iter()
+        .filter_map(|key| {
+            let (first, last) = event_batch_range_from_key(&key)
+                .or_else(|| event_id_from_key(&key).map(|id| (id, id)))?;
+            let visible = query.cursor.is_none_or(|cursor| {
+                if descending {
+                    first < cursor
+                } else {
+                    last > cursor
+                }
+            });
+            visible.then_some((first, last, key))
+        })
+        .collect::<Vec<_>>();
+    if descending {
+        keys.sort_by_key(|(_, last, _)| std::cmp::Reverse(*last));
+    } else {
+        keys.sort_by_key(|(first, _, _)| *first);
+    }
+    let loading =
+        stream::iter(keys)
+            .map(|(first, last, key)| async move {
+                (first, last, load_event_object(storage, &key).await)
+            })
+            .buffered(16);
+    futures::pin_mut!(loading);
+    let mut events: Vec<Event> = Vec::new();
+    while let Some((first, last, batch)) = loading.next().await {
+        if let Some(limit) = query.limit
+            && events.len() >= limit as usize
+            && events.last().is_some_and(|event| {
+                if descending {
+                    last < event.id
+                } else {
+                    first > event.id
+                }
+            })
+        {
+            break;
+        }
+        events.extend(batch?.into_iter().filter(|event| {
+            query
+                .session_id
+                .is_none_or(|id| event.session_id == Some(id))
+                && query.turn_id.is_none_or(|id| event.turn_id == Some(id))
+                && query.cursor.is_none_or(|cursor| {
+                    if descending {
+                        event.id < cursor
+                    } else {
+                        event.id > cursor
+                    }
+                })
+                && query
+                    .types
+                    .as_ref()
+                    .is_none_or(|types| types.iter().any(|kind| kind.matches(&event.data.kind())))
+        }));
+        if let Some(limit) = query.limit {
+            events.sort_by_key(|event| event.id);
+            if descending {
+                events.reverse();
+            }
+            events.truncate(limit as usize);
+        }
+    }
+    if query.limit.is_none() {
+        events.sort_by_key(|event| event.id);
+        if descending {
+            events.reverse();
+        }
+    }
     Ok(events)
 }
 

@@ -5,12 +5,12 @@ use crate::{
     AddEventsRequest, AddEventsResult, AgentId, AgentRecord, Artifact, ArtifactVersion,
     AttachSandboxRequest, BeginTurnRequest, Binding, BindingId, BindingRecord,
     CancelSandboxProcessRequest, CloseSandboxProcessInputRequest, ConversationId,
-    CreateSandboxRequest, Event, EventData, EventId, EventQuery, ForkConversationRequest,
-    ForkSandboxRequest, GetEventsResult, GetSandboxProcessEventsResult, ListConversationsRequest,
-    ListConversationsResult, NewAgentRequest, NewConversationRequest, PutSecretRequest,
-    ReadArtifactRequest, ResourceScope, RestoreSandboxRequest, SandboxAttachment, SandboxId,
-    SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, SandboxRecord, Secret,
-    SecretId, SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest,
+    CreateSandboxRequest, DiagnosticCheck, Event, EventData, EventId, EventQuery,
+    ForkConversationRequest, ForkSandboxRequest, GetEventsResult, GetSandboxProcessEventsResult,
+    ListConversationsRequest, ListConversationsResult, NewAgentRequest, NewConversationRequest,
+    PutSecretRequest, ReadArtifactRequest, ResourceScope, RestoreSandboxRequest, SandboxAttachment,
+    SandboxId, SandboxProcessEventQuery, SandboxProcessRecord, SandboxProcessStatus, SandboxRecord,
+    Secret, SecretId, SecretMetadata, SessionId, SnapshotId, StartSandboxProcessRequest,
     StartSandboxRequest, ThreadId, ThreadRecord, TurnId, TurnRecord, WaitSandboxProcessRequest,
     WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
@@ -168,6 +168,9 @@ pub enum Request {
         conversation_id: ConversationId,
     },
     AgentListArtifacts {
+        agent_id: AgentId,
+    },
+    AgentDiagnose {
         agent_id: AgentId,
     },
     AgentReadArtifact {
@@ -351,6 +354,7 @@ impl Request {
             Self::NewConversation { .. } => "new_conversation",
             Self::DeleteConversation { .. } => "delete_conversation",
             Self::AgentListArtifacts { .. } => "agent_list_artifacts",
+            Self::AgentDiagnose { .. } => "agent_diagnose",
             Self::AgentReadArtifact { .. } => "agent_read_artifact",
             Self::AgentWriteArtifact { .. } => "agent_write_artifact",
             Self::ListSandboxes { .. } => "list_sandboxes",
@@ -437,6 +441,9 @@ pub enum Response {
     ArtifactVersions {
         artifacts: Vec<ArtifactVersion>,
     },
+    Diagnostics {
+        checks: Vec<DiagnosticCheck>,
+    },
     Artifact {
         artifact: Option<Artifact>,
     },
@@ -509,6 +516,7 @@ impl Response {
             Self::AddEvents { .. } => "add_events",
             Self::SessionId { .. } => "session_id",
             Self::ArtifactVersions { .. } => "artifact_versions",
+            Self::Diagnostics { .. } => "diagnostics",
             Self::Artifact { .. } => "artifact",
             Self::ArtifactVersion { .. } => "artifact_version",
             Self::SandboxId { .. } => "sandbox_id",

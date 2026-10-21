@@ -26,6 +26,7 @@ vi.mock("@exo/model-runtime/shared", async (importOriginal) => ({
 }));
 
 import harness from "./codex-harness";
+import { createCodexHarness } from "../../typescript/codex/harness";
 
 function testContext(
   server: FakeCodexAppServer,
@@ -142,6 +143,7 @@ function testContext(
     },
     startSandboxProcess: async () => server.process,
     stream: {
+      status: async () => {},
       firstChunk: async () => {},
       text: async () => {},
     },
@@ -150,6 +152,73 @@ function testContext(
 }
 
 describe("Codex harness recovery", () => {
+  it("commits a live answer without reading the native thread history", async () => {
+    const server = new FakeCodexAppServer({ resumeAvailable: true });
+    const { context, events } = testContext(server, "live-completion");
+    await harness.runTurn(context);
+    expect(
+      server.requests.some((request) => request.method === "thread/read"),
+    ).toBe(false);
+    expect(events.map((event) => event.data)).toContainEqual(
+      expect.objectContaining({
+        type: "messages",
+        messages: [
+          expect.objectContaining({ role: "assistant", content: "done" }),
+        ],
+      }),
+    );
+  });
+
+  it("reattaches to the newest matching warm process without collecting older sessions", async () => {
+    const first = testContext(
+      new FakeCodexAppServer({ resumeAvailable: true }),
+      "warm-lookup",
+    );
+    await createCodexHarness("test").runTurn(first.context);
+    const server = new FakeCodexAppServer({
+      resumeAvailable: true,
+      reused: true,
+    });
+    const second = testContext(server, "warm-lookup");
+    second.events.push(...first.events.slice(2));
+    const warm = [...first.events]
+      .reverse()
+      .find(
+        (event) =>
+          event.data.type === "custom" &&
+          event.data.event_type === "codex_warm_session",
+      )!;
+    expect(warm).toBeDefined();
+    second.events.push({
+      ...warm,
+      id: String(second.events.length + 1),
+      data: {
+        type: "custom",
+        event_type: "codex_warm_session",
+        payload: {
+          ...(warm.data.payload as Record<string, unknown>),
+          sandboxId: "another-sandbox",
+        },
+      },
+    });
+    await createCodexHarness("test").runTurn(second.context);
+    expect(
+      server.requests.some((request) => request.method === "thread/start"),
+    ).toBe(false);
+    expect(
+      second.queries.filter((query) =>
+        query.types?.includes("codex_warm_session"),
+      ),
+    ).toEqual([
+      expect.objectContaining({ direction: "desc", limit: 1, cursor: null }),
+      expect.objectContaining({
+        direction: "desc",
+        limit: 1,
+        cursor: second.events[first.events.length]?.id,
+      }),
+    ]);
+  });
+
   it("reads the unfinished turn backwards in 1000-event pages", async () => {
     const server = new FakeCodexAppServer({ resumeAvailable: true });
     const { context, queries } = testContext(server, "long-turn", {

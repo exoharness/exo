@@ -1913,12 +1913,24 @@ async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_h
                 .await?;
             assert!(!failed.status.success());
             let stderr = String::from_utf8_lossy(&failed.stderr);
-            assert!(stderr.contains(expected), "{stderr}");
-            assert!(
-                stderr
-                    .contains("exo vault secret update personal unscoped-model-key --allow-origin"),
-                "{stderr}"
-            );
+            if provider == "local" {
+                assert!(stderr.contains(expected), "{stderr}");
+                assert!(
+                    stderr.contains(
+                        "exo vault secret update personal unscoped-model-key --allow-origin"
+                    ),
+                    "{stderr}"
+                );
+            } else {
+                assert!(
+                    stderr.contains(&format!(
+                        "secret \"unscoped-model-key\" is not authorized for {}",
+                        f.model.uri()
+                    )),
+                    "{stderr}"
+                );
+                assert!(stderr.contains("--allow-origin or --allow-url"), "{stderr}");
+            }
             assert!(!stderr.contains("typescript harness"), "{stderr}");
         }
         let missing = f
@@ -1932,11 +1944,22 @@ async fn models_use_spec_names_and_selected_vault_credentials_locally_and_over_h
             .await?;
         assert!(!failed.status.success());
         let stderr = String::from_utf8_lossy(&failed.stderr);
-        assert!(
-            stderr.contains("model credential \"missing\" was not found in this thread's vaults"),
-            "{stderr}"
-        );
+        let expected = if provider == "local" {
+            "model credential \"missing\" was not found in this thread's vaults"
+        } else {
+            "model credential \"missing\" was not found in the selected vaults"
+        };
+        assert!(stderr.contains(expected), "{stderr}");
         assert!(!stderr.contains("typescript harness"), "{stderr}");
+        assert_eq!(
+            f.model
+                .received_requests()
+                .await
+                .context("model requests")?
+                .len(),
+            1,
+            "rejected credentials must not reach the model endpoint ({provider})"
+        );
         f.stop().await?;
     }
     Ok(())

@@ -372,3 +372,54 @@ impl AgentBackend for StorageBackend {
         self.0.clone()
     }
 }
+
+#[test]
+fn invalid_checkout_diagnostic_identifies_the_leaf_field() -> Result<()> {
+    let source = "---\nharness: codex\nmodel:\n  name: gpt-6.1-sol\nresources:\n  - name: braintrust\n    type: git\n    url: https://github.com/braintrustdata/braintrust.git\n    checkout: { type: branch, name: main }\n---\nInvestigate.\n";
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("sre.md");
+    // The displayed location must refer to Markdown, including the delimiter,
+    // even with Windows line endings and a UTF-8 BOM.
+    std::fs::write(&path, format!("\u{feff}{}", source.replace('\n', "\r\n")))?;
+    let error = AgentDefinition::load(&path).unwrap_err().to_string();
+    assert!(
+        error.starts_with(&format!("{}:9:15:", path.display())),
+        "{error}"
+    );
+    assert!(error.contains("resources[0].checkout"), "{error}");
+    assert!(
+        error.contains("invalid type: map, expected a string"),
+        "{error}"
+    );
+    assert!(
+        error.contains("9 |     checkout: { type: branch, name: main }"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn model_type_errors_and_yaml_syntax_errors_have_source_diagnostics() -> Result<()> {
+    let directory = tempfile::TempDir::new()?;
+    let path = directory.path().join("agent.md");
+    std::fs::write(
+        &path,
+        SOURCE.replace("name: gpt-6.1-sol", "name: [gpt-6.1-sol]"),
+    )?;
+    let error = AgentDefinition::load(&path).unwrap_err().to_string();
+    assert!(
+        error.starts_with(&format!("{}:4:9:", path.display())),
+        "{error}"
+    );
+    assert!(error.contains("model.name"), "{error}");
+    assert!(error.contains("4 |   name: [gpt-6.1-sol]"), "{error}");
+
+    std::fs::write(&path, SOURCE.replace("name: gpt-6.1-sol", "name: @invalid"))?;
+    let error = AgentDefinition::load(&path).unwrap_err().to_string();
+    assert!(
+        error.starts_with(&format!("{}:4:9:", path.display())),
+        "{error}"
+    );
+    assert!(error.contains("4 |   name: @invalid"), "{error}");
+    Ok(())
+}

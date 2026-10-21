@@ -52,6 +52,7 @@ impl AuthServer {
                 .ok_or_else(|| anyhow::anyhow!("shared vault not found: {reference}"))?;
             ensure!(
                 vault.record().id != self.auth_vault()
+                    && !next.protected_vaults.contains(&vault.record().id)
                     && !next
                         .principals
                         .values()
@@ -61,7 +62,9 @@ impl AuthServer {
             next.shared_vaults.push(vault.record().id);
         }
         for vault in vaults {
-            if vault.record().id != self.auth_vault() {
+            if vault.record().id != self.auth_vault()
+                && !next.protected_vaults.contains(&vault.record().id)
+            {
                 next.vault_owners
                     .entry(vault.record().id)
                     .or_insert(next.owner.clone());
@@ -164,6 +167,7 @@ impl AccessPolicy for Policy {
             .get(&record.id)
             .is_some_and(|owner| owner == principal);
         if record.id == self.store.vault_id()
+            || state.protected_vaults.contains(&record.id)
             || (!owns
                 && (write
                     || (record.name != "global" && !state.shared_vaults.contains(&record.id))))

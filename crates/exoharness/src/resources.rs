@@ -65,6 +65,23 @@ impl PreparedResource {
     }
 }
 
+/// Parse a Git stderr progress record into a display phase and percentage.
+pub fn git_progress(line: &[u8]) -> Option<(&'static str, u8)> {
+    let line = std::str::from_utf8(line).ok()?.trim();
+    let line = line.strip_prefix("remote: ").unwrap_or(line);
+    let (phase, progress) = line.split_once(':')?;
+    let phase = match phase {
+        "Counting objects" => "Counting objects for",
+        "Compressing objects" => "Compressing objects for",
+        "Receiving objects" => "Downloading",
+        "Resolving deltas" => "Resolving deltas for",
+        "Updating files" => "Checking out",
+        _ => return None,
+    };
+    let percent = progress.split_once('%')?.0.trim().parse::<u8>().ok()?;
+    (percent <= 100).then_some((phase, percent))
+}
+
 fn writable() -> FileSystemMountMode {
     FileSystemMountMode::ReadWrite
 }
@@ -84,6 +101,13 @@ impl ResourceDefinition {
             .map(|byte| format!("{byte:02x}"))
             .collect();
         format!("EXO_GIT_{name}")
+    }
+
+    pub fn git_credential_helper(&self) -> String {
+        let variable = self.git_credential_variable();
+        format!(
+            "!f() {{ if [ \"$1\" = get ] && [ -n \"${{{variable}:-}}\" ]; then printf 'username=x-access-token\\npassword=%s\\n' \"${variable}\"; fi; }}; f"
+        )
     }
 
     pub fn local_path(&self) -> Option<&Path> {
@@ -124,13 +148,16 @@ impl ResourceDefinition {
         let mount_path = self.mount_path();
         let mount = Path::new(mount_path.as_ref());
         ensure!(
-            mount.is_absolute()
+            // Mount paths describe the sandbox filesystem, including on wasm
+            // where std::Path::is_absolute rejects ordinary POSIX roots.
+            mount.has_root()
                 && mount != Path::new("/")
                 && mount
                     .components()
                     .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
                 && !mount_path.contains(['\0', ':']),
-            "resource mount_path must be an absolute path without '..', ':' or NUL"
+            "resource mount_path must be an absolute path without '..', ':' or NUL: {:?}",
+            mount_path
         );
         match &self.source {
             ResourceSource::Directory { path } => ensure!(
@@ -240,4 +267,36 @@ impl std::fmt::Debug for GitCredential {
             .field("identity", &self.identity)
             .finish_non_exhaustive()
     }
+}
+
+/// These backends mount resources prepared on the Exo host. Remote backends
+/// populate Git workspaces through their ordinary sandbox process interface.
+pub fn uses_host_resource_mounts(provider: &crate::SandboxProvider) -> bool {
+    matches!(
+        provider.as_str(),
+        "apple_container" | "docker" | "local_process" | "firecracker" | "smolvm"
+    )
+}
+
+pub fn validate_sandbox_resources(resources: &[PreparedResource]) -> Result<()> {
+    for resource in resources {
+        // Definitions were validated by prepare_resources; this checks only
+        // the execution backend's mount capabilities after provider selection.
+        ensure!(
+            matches!(
+                &resource.definition.source,
+                ResourceSource::GitRepository {
+                    path: None,
+                    url: Some(_),
+                    ..
+                }
+            ),
+            "remote sandboxes require Git resource URLs; local directories cannot be mounted"
+        );
+        ensure!(
+            resource.definition.mode == FileSystemMountMode::ReadWrite,
+            "remote Git resources require read-write mode; read-only filesystem mounts are unavailable"
+        );
+    }
+    Ok(())
 }

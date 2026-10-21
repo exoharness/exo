@@ -15,15 +15,6 @@ use exoharness::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Custom event written when the adapter runner claims a reboot notice:
-/// host services were restarted deliberately, with a reason.
-pub const HOST_EVENT_REBOOT: &str = "host_reboot";
-/// Custom event written whenever the adapter runner starts. A start without a
-/// preceding `host_reboot` implies an unplanned restart (crash or manual).
-pub const HOST_EVENT_ADAPTER_RUNNER_STARTED: &str = "adapter_runner_started";
-/// Custom event written when the adapter runner claims a drain marker and
-/// begins a graceful shutdown.
-pub const HOST_EVENT_ADAPTER_RUNNER_DRAINING: &str = "adapter_runner_draining";
 /// Custom event written when a deferred `rebuild_and_restart_exo` finishes
 /// (succeeded or failed). The side-channel outcome file under
 /// `.exo/guardian-updates/` is updated first; this event is the durable
@@ -47,9 +38,6 @@ fn default_event_kinds() -> Vec<EventKind> {
         EventKind::SANDBOX_STARTED,
         EventKind::SANDBOX_STOPPED,
         EventKind::SANDBOX_SNAPSHOTTED,
-        EventKind::custom(HOST_EVENT_REBOOT),
-        EventKind::custom(HOST_EVENT_ADAPTER_RUNNER_STARTED),
-        EventKind::custom(HOST_EVENT_ADAPTER_RUNNER_DRAINING),
         EventKind::custom(HOST_EVENT_REBUILD_AND_RESTART),
     ]
 }
@@ -341,14 +329,14 @@ mod tests {
 
         record_host_event(
             conversation.as_ref(),
-            HOST_EVENT_REBOOT,
+            HOST_EVENT_REBUILD_AND_RESTART,
             serde_json::json!({ "reason": "restart-all" }),
         )
         .await
         .unwrap();
         record_host_event(
             conversation.as_ref(),
-            HOST_EVENT_ADAPTER_RUNNER_STARTED,
+            HOST_EVENT_REBUILD_AND_RESTART,
             serde_json::json!({ "adapterCount": 2 }),
         )
         .await
@@ -373,8 +361,8 @@ mod tests {
             .collect::<Vec<_>>();
         // Default kinds include thread_created; custom host events come
         // first because the listing is newest first.
-        assert_eq!(kinds[0], HOST_EVENT_ADAPTER_RUNNER_STARTED);
-        assert_eq!(kinds[1], HOST_EVENT_REBOOT);
+        assert_eq!(kinds[0], HOST_EVENT_REBUILD_AND_RESTART);
+        assert_eq!(kinds[1], HOST_EVENT_REBUILD_AND_RESTART);
         assert_eq!(
             events.last().unwrap()["data"]["type"]
                 .as_str()
@@ -390,7 +378,7 @@ mod tests {
         for index in 0..3 {
             record_host_event(
                 conversation.as_ref(),
-                HOST_EVENT_REBOOT,
+                HOST_EVENT_REBUILD_AND_RESTART,
                 serde_json::json!({ "reason": format!("restart-{index}") }),
             )
             .await
@@ -400,7 +388,7 @@ mod tests {
         let result = execute_list_conversation_events_tool(
             conversation.as_ref(),
             &tool_request(serde_json::json!({
-                "kinds": [HOST_EVENT_REBOOT],
+                "kinds": [HOST_EVENT_REBUILD_AND_RESTART],
                 "limit": 2,
                 "cursor": null,
                 "direction": null

@@ -8,10 +8,11 @@ use http::{
     header::{CONNECTION, HOST, HeaderMap, HeaderName, HeaderValue},
 };
 use std::collections::{HashMap, HashSet};
+pub mod session;
 pub mod vault;
 pub const PLACEHOLDER_PREFIX: &str = "exo_egress_";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EgressIdentity {
     pub sandbox_id: String,
     pub scope: crate::ResourceScope,
@@ -184,7 +185,7 @@ pub(crate) async fn substitute_credentials(
             let value = resolver
                 .resolve(identity, &binding.config.name, destination)
                 .await
-                .map_err(|_| anyhow!("credential is unavailable or not authorized"))?;
+                .context("credential is unavailable or not authorized")?;
             replacement = replacement.replace(&binding.placeholder, &value);
             credentials.push((binding.config.name.clone(), value));
         }
@@ -300,7 +301,161 @@ impl CredentialBindings {
         identity: &EgressIdentity,
         resolver: &dyn EgressCredentialResolver,
     ) -> Result<()> {
-        substitute_credentials(&self.bindings, headers, destination, identity, resolver).await?;
+        self.substitute_tracked(headers, destination, identity, resolver)
+            .await?;
         Ok(())
+    }
+
+    /// The substituted values let the proxy refresh only credentials rejected by the upstream.
+    pub async fn substitute_tracked(
+        &self,
+        headers: &mut HeaderMap,
+        destination: &EgressDestination,
+        identity: &EgressIdentity,
+        resolver: &dyn EgressCredentialResolver,
+    ) -> Result<Vec<(String, String)>> {
+        substitute_credentials(&self.bindings, headers, destination, identity, resolver).await
+    }
+}
+
+/// Only policy rejections receive 403; I/O and corrupt stored state remain errors.
+#[derive(Debug, thiserror::Error)]
+#[error("egress request denied")]
+pub struct EgressDenied;
+pub fn denied(error: impl Into<anyhow::Error>) -> anyhow::Error {
+    error.into().context(EgressDenied)
+}
+
+pub fn credential_fingerprint(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+/// Canonical HTTP destination shared by transparent and platform interception.
+pub fn http_destination(url: &url::Url, method: Method) -> Result<EgressDestination> {
+    ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.fragment().is_none(),
+        "invalid HTTP destination"
+    );
+    let host = crate::types::canonical_egress_host(url.host_str().context("missing hostname")?)?;
+    let port = url
+        .port_or_known_default()
+        .context("missing destination port")?;
+    ensure!(
+        matches!((url.scheme(), port), ("http", 80) | ("https", 443)),
+        "only standard HTTP ports are supported"
+    );
+    Ok(EgressDestination {
+        host,
+        port,
+        method,
+        path: url[url::Position::BeforePath..url::Position::AfterQuery].into(),
+    })
+}
+
+/// Compiled network rules used by native listeners and hosted interception.
+pub(crate) struct NetworkPolicy {
+    hosts: HashSet<String>,
+    unrestricted: bool,
+    enabled: bool,
+    ports: Option<Vec<u16>>,
+}
+impl NetworkPolicy {
+    pub(crate) fn new(policy: &crate::EgressPolicy) -> Result<Self> {
+        ensure!(
+            policy
+                .allowed_tcp_ports
+                .as_ref()
+                .is_none_or(|ports| !ports.contains(&0)),
+            "policy.allowed_tcp_ports cannot contain port zero"
+        );
+        let hosts = match &policy.networking {
+            crate::SandboxNetworkPolicy::Limited { allowed_hosts } => {
+                crate::types::canonical_egress_hosts(allowed_hosts)?
+            }
+            _ => HashSet::new(),
+        };
+        Ok(Self {
+            hosts,
+            unrestricted: policy.networking == crate::SandboxNetworkPolicy::Unrestricted,
+            enabled: policy.networking_enabled(),
+            ports: policy.allowed_tcp_ports.clone(),
+        })
+    }
+    #[cfg(feature = "basic-backend")]
+    pub(crate) fn hosts(&self) -> &HashSet<String> {
+        &self.hosts
+    }
+    #[cfg(feature = "basic-backend")]
+    pub(crate) fn unrestricted(&self) -> bool {
+        self.unrestricted
+    }
+    pub(crate) fn permits_host(&self, host: &str) -> bool {
+        self.enabled && (self.unrestricted || self.hosts.contains(host))
+    }
+    pub(crate) fn check_port(&self, port: u16) -> Result<()> {
+        ensure!(
+            port != 0
+                && self
+                    .ports
+                    .as_ref()
+                    .is_none_or(|ports| ports.contains(&port)),
+            "TCP port is not allowed"
+        );
+        Ok(())
+    }
+    pub(crate) fn authorize(&self, destination: &EgressDestination) -> Result<()> {
+        self.check_port(destination.port)?;
+        ensure!(
+            self.permits_host(&destination.host),
+            "network destination denied"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) async fn rewrite_headers(
+    bindings: &[Binding],
+    headers: &mut HeaderMap,
+    destination: &EgressDestination,
+    tls: bool,
+    identity: &EgressIdentity,
+    resolver: &dyn EgressCredentialResolver,
+) -> Result<Vec<(String, String)>> {
+    if headers.contains_key(http::header::UPGRADE) {
+        return Err(denied(anyhow!("protocol upgrades are not supported")));
+    }
+    if destination.method == Method::CONNECT {
+        return Err(denied(anyhow!("CONNECT is not supported")));
+    }
+    validate_credentials(bindings, headers, destination, tls).map_err(denied)?;
+    strip_hop_headers(headers).map_err(denied)?;
+    let credentials =
+        substitute_credentials(bindings, headers, destination, identity, resolver).await?;
+    headers.remove(HOST);
+    headers.remove("content-length");
+    Ok(credentials)
+}
+impl CredentialBindings {
+    pub async fn rewrite_headers(
+        &self,
+        headers: &mut HeaderMap,
+        destination: &EgressDestination,
+        tls: bool,
+        identity: &EgressIdentity,
+        resolver: &dyn EgressCredentialResolver,
+    ) -> Result<Vec<(String, String)>> {
+        rewrite_headers(
+            &self.bindings,
+            headers,
+            destination,
+            tls,
+            identity,
+            resolver,
+        )
+        .await
     }
 }

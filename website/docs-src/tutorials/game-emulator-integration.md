@@ -379,11 +379,11 @@ entirely on its own.
 Everything above builds a **new** agent harness: `harness.ts` is its own
 module, registered with `agent create`. But the harness contract — hooks
 that return data (message lists, tool registrations) — means you can also
-graft the game layer onto an agent you already run, by composition. The
-canonical Exo agent exports its two hooks for exactly this:
+graft the game layer onto an agent you already run, by composition. The shared turn loop provides a default tool registry and instructions you can
+combine with the game layer:
 
 ```ts
-// exo-gameboy-harness.ts — the Exo agent, decorated with the game layer
+// gameboy-harness.ts — the default tools plus the game layer
 import {
   defineHarness,
   registerLibraryTools,
@@ -392,8 +392,11 @@ import {
   type TurnContext,
 } from "@exo/harness";
 
-import { runResponsesHarnessTurn } from "@exo/model-runtime/turn-loop";
-import { exoInstructions, registerExoTools } from "../../../../exo/harness";
+import {
+  basicHarnessInstructions,
+  createDefaultToolRegistry,
+  runResponsesHarnessTurn,
+} from "@exo/model-runtime/turn-loop";
 import { EmulatorClient, describeState } from "./emulator-client";
 import { gameboyTools } from "./game-tools";
 
@@ -404,17 +407,18 @@ const emulator = new EmulatorClient(
 export default defineHarness({
   async runTurn(context) {
     await runResponsesHarnessTurn(context, {
-      // Exo's tools + the game tools, one registry.
+      // The default tools + the game tools, one registry.
       async registerTools(tools: HarnessToolRegistry, ctx: TurnContext) {
-        await registerExoTools(tools, ctx);
+        const defaults = await createDefaultToolRegistry(ctx);
+        for (const tool of defaults.instances()) tools.register(tool);
         await registerLibraryTools(tools, ctx, gameboyTools(emulator));
       },
 
-      // Exo's identity/memory/skills prompt + the live screen each round.
+      // The agent instructions + the live screen each round.
       async instructions(ctx: TurnContext): Promise<Message[]> {
         const frame = await emulator.frame();
         return [
-          ...(await exoInstructions(ctx)),
+          ...basicHarnessInstructions(ctx),
           {
             role: "user",
             content: [
@@ -436,8 +440,8 @@ export default defineHarness({
 });
 ```
 
-Point your **existing** agent record at the wrapper and it keeps its memory,
-artifacts, skills, and every conversation — it just gains a live view of the emulator, and tooling to press buttons:
+Point your **existing** agent record at the wrapper and it keeps its instructions,
+artifacts, and every conversation — it just gains a live view of the emulator, and tooling to press buttons:
 
 Set `harness` to the wrapper module path in the agent definition, then apply it
 with `exo agent update exo.md`. You can continue the existing thread.

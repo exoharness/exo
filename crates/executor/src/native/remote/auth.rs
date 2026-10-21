@@ -190,7 +190,7 @@ impl AuthServer {
         };
         ensure!(!value.is_empty(), "OIDC client secret is empty");
         let oidc = Oidc::discover(&config, value).await?;
-        let store = Arc::new(Store::open(vault, &config).await?);
+        let store = Arc::new(Store::open(vault, &config, harness.as_ref()).await?);
         Ok(Self {
             config,
             oidc,

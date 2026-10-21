@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 AGENT_SLUG = "harbor-eval"
-HARNESS_MODULE = "exo/harness.ts"
+HARNESS_MODULE = "examples/self-improving-agent/harness.ts"
 
 
 def trial_conversation_slug(trial_id: str) -> str:

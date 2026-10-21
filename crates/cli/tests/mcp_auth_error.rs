@@ -43,9 +43,30 @@ async fn chat_shows_one_line_for_auth_errors_unless_full_verbosity_is_requested(
             assert!(stderr.contains("selected vaults: [global]"), "{stderr}");
             assert!(stderr.contains("Auth required"), "{stderr}");
         } else {
+            let root = temp.path().join("state");
+            let config = temp.path().join("config");
+            let key = temp.path().join("master-key");
+            let setup = shlex::try_join([
+                "exo",
+                "--root",
+                root.to_str().unwrap(),
+                "--config-dir",
+                config.to_str().unwrap(),
+                "vault",
+                "secret",
+                "create",
+                "--secret-backend",
+                "file",
+                "--master-key-path",
+                key.to_str().unwrap(),
+                "--from-agent",
+                agent.to_str().unwrap(),
+            ])?;
             assert_eq!(
                 stderr.split_once("Error: ").expect("CLI error").1,
-                "connecting MCP server github. Add a secret for this MCP server URL to a selected vault, or attach the vault containing it, then start a new thread.\n"
+                format!(
+                    "connecting MCP server github. No credential was selected. Run `{setup}`, then start a new thread.\n"
+                )
             );
         }
     }

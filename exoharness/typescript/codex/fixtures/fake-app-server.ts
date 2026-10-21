@@ -12,12 +12,19 @@ export class FakeCodexAppServer {
   private stdout!: ReadableStreamDefaultController<string>;
   private turns = new Map<string, Record<string, unknown>[]>();
   private nextTurn = 1;
+  private closed = false;
 
   constructor(
     private readonly options: {
       resumeAvailable: boolean;
       reused?: boolean;
       oldTurn?: Record<string, unknown>;
+      completedItems?: (id: string) => Record<string, unknown>[];
+      onTurn?: (
+        threadId: string,
+        turnId: string,
+        emit: (value: unknown) => void,
+      ) => Promise<void>;
     },
   ) {
     this.turns.set("old-thread", [
@@ -37,6 +44,10 @@ export class FakeCodexAppServer {
     const stderr = new ReadableStream<string>({
       start: (controller) => controller.close(),
     });
+    let exited!: (code: number) => void;
+    const exit = new Promise<number>((resolve) => {
+      exited = resolve;
+    });
     this.process = {
       reused: options.reused ?? false,
       sandboxId: "sandbox-1",
@@ -46,13 +57,17 @@ export class FakeCodexAppServer {
       writeStdin: async (data) => {
         const request = JSON.parse(data) as Request;
         this.requests.push(request);
-        this.respond(request);
+        await this.respond(request);
       },
       closeStdin: async () => {},
       close: async () => {
-        this.stdout.close();
+        if (!this.closed) {
+          this.closed = true;
+          this.stdout.close();
+          exited(0);
+        }
       },
-      wait: () => new Promise<number | null>(() => {}),
+      wait: () => exit,
     };
   }
 
@@ -60,7 +75,7 @@ export class FakeCodexAppServer {
     this.stdout.enqueue(`${JSON.stringify(value)}\n`);
   }
 
-  private respond(request: Request): void {
+  private async respond(request: Request): Promise<void> {
     if (request.id === undefined) return;
     const params = request.params ?? {};
     const threadId = String(params.threadId);
@@ -77,6 +92,7 @@ export class FakeCodexAppServer {
           });
           return;
         }
+        if (!this.turns.has(threadId)) this.turns.set(threadId, []);
         this.emit({ id: request.id, result: { thread: { id: threadId } } });
         return;
       case "thread/start":
@@ -97,11 +113,14 @@ export class FakeCodexAppServer {
           id,
           status: "completed",
           itemsView: "full",
-          items: [{ id: `answer-${id}`, type: "agentMessage", text: "done" }],
+          items: this.options.completedItems?.(id) ?? [
+            { id: `answer-${id}`, type: "agentMessage", text: "done" },
+          ],
           error: null,
         };
         this.turns.get(threadId)?.push(turn);
         this.emit({ id: request.id, result: { turn: { id } } });
+        await this.options.onTurn?.(threadId, id, (value) => this.emit(value));
         this.emit({ method: "turn/completed", params: { threadId, turn } });
         return;
       }
