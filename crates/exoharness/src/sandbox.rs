@@ -156,6 +156,8 @@ impl SnapshotFormat {
     /// Reference to an immutable bundle in a Firecracker host's private root.
     pub const FirecrackerHostRef: Self = Self::from_static("firecracker-host-ref");
     pub const FirecrackerFilesystemRef: Self = Self::from_static("firecracker-filesystem-ref-v1");
+    pub const FirecrackerLazyFilesystemRef: Self =
+        Self::from_static("firecracker-lazy-filesystem-ref-v1");
 
     pub const fn from_static(format: &'static str) -> Self {
         Self(Cow::Borrowed(format))
@@ -294,6 +296,17 @@ pub trait ManagedSandboxHandle: Send + Sync {
 
     async fn connect_tcp(&self, _port: u16) -> Result<Option<BoxSandboxTcpStream>> {
         Ok(None)
+    }
+
+    fn live_resource_ceiling(&self) -> Option<crate::SandboxResourceShape> {
+        None
+    }
+
+    async fn expand_resources(
+        &self,
+        _resources: crate::SandboxResourceShape,
+    ) -> Result<crate::SandboxResourceShape> {
+        bail!("sandbox handle does not support live resource expansion")
     }
 
     async fn stop(&self) -> Result<()>;

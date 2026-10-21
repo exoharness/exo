@@ -4,6 +4,7 @@ use tokio::net::UnixListener;
 
 fn test_host_runtime() -> FirecrackerHostFingerprint {
     FirecrackerHostFingerprint {
+        memory_ceiling_mib: None,
         architecture: "x86_64".to_string(),
         protocol_version: PROTOCOL_VERSION,
         firecracker_version: "v1.16.1".to_string(),
@@ -17,7 +18,7 @@ fn test_host_runtime() -> FirecrackerHostFingerprint {
     }
 }
 
-fn test_runtime() -> FirecrackerRuntimeFingerprint {
+pub(super) fn test_runtime() -> FirecrackerRuntimeFingerprint {
     test_host_runtime().for_resources(SandboxResourceShape::default())
 }
 
@@ -870,6 +871,7 @@ fn test_shared(
         capacity_gate: Mutex::new(()),
         starting_machines: Arc::new(StdMutex::new(HashSet::new())),
         base_image_digests: StdMutex::new(HashMap::new()),
+        filesystem_disks: StdMutex::new(HashMap::new()),
     }))
 }
 

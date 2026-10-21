@@ -1617,6 +1617,7 @@ fn snapshot_capture_provider(format: &SnapshotFormat) -> Option<SandboxProvider>
         Some(SandboxProvider::Smolvm)
     } else if *format == SnapshotFormat::FirecrackerHostRef
         || *format == SnapshotFormat::FirecrackerFilesystemRef
+        || *format == SnapshotFormat::FirecrackerLazyFilesystemRef
     {
         Some(SandboxProvider::Firecracker)
     } else {

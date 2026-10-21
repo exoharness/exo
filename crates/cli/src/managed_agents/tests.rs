@@ -286,16 +286,19 @@ async fn saved_definition_and_turn_history_survive_reopening_without_source() ->
     let artifacts = saved.list_artifacts().await?;
     let artifact = artifacts
         .iter()
-        .find(|artifact| artifact.path == "managed-agents/agent.md")
+        .find(|artifact| artifact.path == managed::AGENT_DEFINITION_PATH)
         .unwrap();
-    let markdown = saved
+    let artifact = saved
         .read_artifact(ReadArtifactRequest {
             artifact_id: artifact.artifact_id,
             version: Some(artifact.version),
         })
         .await?
         .unwrap();
-    assert_eq!(markdown.contents, SOURCE.as_bytes());
+    assert_eq!(
+        AgentDefinition::from_json(&artifact.contents)?.to_json()?,
+        definition.to_json()?
+    );
     let (agent, thread) =
         open_configured_thread(runtime.as_ref(), None, &thread_args("support")).await?;
     let thread_slug = thread.record().slug.clone();

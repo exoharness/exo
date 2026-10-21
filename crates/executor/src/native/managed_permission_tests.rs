@@ -44,7 +44,8 @@ async fn resumed_threads_use_updated_agent_permissions() -> Result<()> {
         agent
             .write_artifact(WriteArtifactRequest {
                 path: managed::AGENT_DEFINITION_PATH.into(),
-                contents: source.replace("always_allow", name).into_bytes(),
+                contents: AgentDefinition::parse(source.replace("always_allow", name))?
+                    .to_json()?,
             })
             .await?;
         let resumed = runtime

@@ -97,6 +97,10 @@ impl HttpExoHarness {
         self
     }
 
+    pub fn agent_from_record(&self, record: AgentRecord) -> Arc<dyn AgentHandle> {
+        Arc::new(HttpAgentHandle::new(self.clone(), record))
+    }
+
     pub fn endpoint(&self) -> &Url {
         self.transport.endpoint()
     }

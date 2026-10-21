@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use exo_mcp::McpServerConfig;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::AgentDefinition;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum McpServerDefinition {
     Url {

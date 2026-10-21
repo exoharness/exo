@@ -127,6 +127,19 @@ impl RuntimeClient {
             .await
     }
 
+    pub async fn create_managed_agent(
+        &self,
+        request: &CreateManagedAgentBody,
+    ) -> Result<exoharness::AgentRecord> {
+        self.http
+            .json(
+                self.http
+                    .request(Method::POST, "agent/managed")?
+                    .json(request),
+            )
+            .await
+    }
+
     pub async fn get_agent(&self, id: AgentId) -> Result<Option<exoharness::AgentRecord>> {
         self.http
             .json(self.http.request(Method::GET, &format!("agent/{id}"))?)
@@ -200,6 +213,20 @@ impl RuntimeClient {
                 self.http
                     .request(Method::POST, &format!("agent/{id}/artifact"))?
                     .json(request),
+            )
+            .await
+    }
+
+    pub async fn write_agent_definition(
+        &self,
+        id: AgentId,
+        definition: &crate::AgentDefinition,
+    ) -> Result<exoharness::ArtifactVersion> {
+        self.http
+            .json(
+                self.http
+                    .request(Method::PUT, &format!("agent/{id}/definition"))?
+                    .json(definition),
             )
             .await
     }

@@ -7,7 +7,7 @@ pub mod permissions;
 pub mod vaults;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
@@ -20,13 +20,13 @@ use serde::{Deserialize, Serialize};
 
 /// An empty latest artifact means no saved definition, allowing a rejected first
 /// upload to be rolled back without deleting artifact history.
-pub const AGENT_DEFINITION_PATH: &str = "managed-agents/agent.md";
+pub const AGENT_DEFINITION_PATH: &str = "managed-agents/agent.json";
 
 fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, bound(deserialize = "R: Deserialize<'de>"))]
 pub struct AgentFrontmatter<R = exoharness::resources::ResourceDefinition> {
     #[serde(default)]
@@ -48,7 +48,7 @@ pub struct AgentFrontmatter<R = exoharness::resources::ResourceDefinition> {
     pub adapters: Vec<adapters::AdapterDefinition>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentModelConfig {
     pub braintrust: Option<BraintrustTracingConfig>,
@@ -61,11 +61,14 @@ pub struct AgentModelConfig {
     pub max_tool_round_trips: Option<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentDefinition {
     pub frontmatter: AgentFrontmatter,
     pub instructions: String,
-    source: String,
+    #[serde(skip)]
+    source: OnceLock<String>,
+    #[serde(skip)]
     path: Option<PathBuf>,
 }
 
@@ -91,24 +94,40 @@ impl AgentDefinition {
         // Markdown file, including its first line.
         let frontmatter = frontmatter::parse(&normalized[..4 + yaml_end])?;
         let instructions = contents[body_start..].trim().to_string();
+        let definition = Self {
+            frontmatter,
+            instructions,
+            source: OnceLock::from(source),
+            path: None,
+        };
+        definition.validate()?;
+        Ok(definition)
+    }
+
+    pub fn validate(&self) -> Result<()> {
         for (field, value) in [
-            ("harness", frontmatter.harness.as_str()),
-            ("model.name", frontmatter.model.name.as_str()),
-            ("instructions", instructions.as_str()),
+            ("harness", self.frontmatter.harness.as_str()),
+            ("model.name", self.frontmatter.model.name.as_str()),
+            ("instructions", self.instructions.as_str()),
         ] {
             if value.trim().is_empty() {
                 bail!("agent {field} must not be empty");
             }
         }
-        mcp::validate_servers(&frontmatter.mcp_servers)?;
-        exoharness::resources::validate_resources(&frontmatter.resources)?;
-        adapters::validate(&frontmatter.adapters)?;
-        Ok(Self {
-            frontmatter,
-            instructions,
-            source,
-            path: None,
-        })
+        mcp::validate_servers(&self.frontmatter.mcp_servers)?;
+        exoharness::resources::validate_resources(&self.frontmatter.resources)?;
+        adapters::validate(&self.frontmatter.adapters)?;
+        Ok(())
+    }
+
+    pub fn from_json(contents: &[u8]) -> Result<Self> {
+        let definition: Self = serde_json::from_slice(contents)?;
+        definition.validate()?;
+        Ok(definition)
+    }
+
+    pub fn to_json(&self) -> Result<Vec<u8>> {
+        Ok(serde_json::to_vec(self)?)
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -125,13 +144,52 @@ impl AgentDefinition {
     }
 
     pub fn source(&self) -> &str {
-        &self.source
+        self.source.get_or_init(|| {
+            let yaml = serde_yaml_ng::to_string(&self.frontmatter)
+                .expect("agent frontmatter is serializable");
+            format!("---\n{yaml}---\n\n{}\n", self.instructions)
+        })
     }
 }
 
 #[async_trait]
 pub trait AgentBackend: Send + Sync {
     fn exoharness(&self) -> Arc<dyn ExoHarness>;
+
+    async fn create_managed_agent(
+        &self,
+        definition: &AgentDefinition,
+        name: &str,
+        slug: &str,
+    ) -> Result<Arc<dyn AgentHandle>> {
+        let agent = self
+            .exoharness()
+            .new_agent(NewAgentRequest {
+                vaults: vec![],
+                slug: slug.to_string(),
+                name: name.to_string(),
+            })
+            .await?;
+        let saved: Result<()> = async {
+            self.configure_agent(&agent, definition).await?;
+            agent
+                .write_artifact(WriteArtifactRequest {
+                    path: AGENT_DEFINITION_PATH.to_string(),
+                    contents: definition.to_json()?,
+                })
+                .await?;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = &saved {
+            self.exoharness()
+                .delete_agent(&agent.record().id)
+                .await
+                .with_context(|| format!("saving agent failed ({error:#}); cleanup also failed"))?;
+        }
+        saved?;
+        Ok(agent)
+    }
 
     async fn configure_agent(
         &self,
@@ -186,34 +244,7 @@ pub async fn create_agent(
     if slug.trim().is_empty() {
         bail!("saved agent slug must not be empty");
     }
-    let agent = backend
-        .exoharness()
-        .new_agent(NewAgentRequest {
-            vaults: vec![],
-            slug: slug.to_string(),
-            name: name.to_string(),
-        })
-        .await?;
-    let saved: Result<()> = async {
-        backend.configure_agent(&agent, definition).await?;
-        agent
-            .write_artifact(WriteArtifactRequest {
-                path: AGENT_DEFINITION_PATH.to_string(),
-                contents: definition.source.as_bytes().to_vec(),
-            })
-            .await?;
-        Ok(())
-    }
-    .await;
-    if let Err(error) = &saved {
-        backend
-            .exoharness()
-            .delete_agent(&agent.record().id)
-            .await
-            .with_context(|| format!("saving agent failed ({error:#}); cleanup also failed"))?;
-    }
-    saved?;
-    Ok(agent)
+    backend.create_managed_agent(definition, name, slug).await
 }
 
 pub async fn load_definition(agent: &dyn AgentHandle) -> Result<Option<AgentDefinition>> {
@@ -246,7 +277,7 @@ pub async fn load_definition_version(
     if artifact.contents.is_empty() {
         return Ok(None);
     }
-    AgentDefinition::parse(String::from_utf8(artifact.contents)?)
+    AgentDefinition::from_json(&artifact.contents)
         .map(Some)
         .with_context(|| format!("invalid saved definition for agent {}", agent.record().slug))
 }

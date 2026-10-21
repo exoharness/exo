@@ -162,9 +162,27 @@ impl HttpProvider {
     }
 }
 
+#[async_trait]
 impl AgentBackend for HttpProvider {
     fn exoharness(&self) -> Arc<dyn ExoHarness> {
         Arc::new(self.state.clone())
+    }
+    async fn create_managed_agent(
+        &self,
+        definition: &exo_managed_agents::AgentDefinition,
+        name: &str,
+        slug: &str,
+    ) -> Result<Arc<dyn exoharness::AgentHandle>> {
+        let record = self
+            .transport
+            .client
+            .create_managed_agent(&CreateManagedAgentBody {
+                name: name.to_owned(),
+                slug: slug.to_owned(),
+                definition: definition.clone(),
+            })
+            .await?;
+        Ok(self.state.agent_from_record(record))
     }
 }
 
@@ -346,9 +364,19 @@ impl ExoHttpTransport for RuntimeTransport {
             Request::AgentReadArtifact { agent_id, request } => Ok(Response::Artifact {
                 artifact: self.client.read_agent_artifact(agent_id, &request).await?,
             }),
-            Request::AgentWriteArtifact { agent_id, request } => Ok(Response::ArtifactVersion {
-                artifact: self.client.write_agent_artifact(agent_id, &request).await?,
-            }),
+            Request::AgentWriteArtifact { agent_id, request } => {
+                anyhow::ensure!(
+                    request.path == exo_managed_agents::AGENT_DEFINITION_PATH,
+                    "only the managed-agent definition can be written through this provider"
+                );
+                let definition = exo_managed_agents::AgentDefinition::from_json(&request.contents)?;
+                Ok(Response::ArtifactVersion {
+                    artifact: self
+                        .client
+                        .write_agent_definition(agent_id, &definition)
+                        .await?,
+                })
+            }
             Request::CreateVault { name } => Ok(Response::Vault {
                 vault: Some(self.client.create_vault(&name).await?),
             }),
