@@ -153,6 +153,49 @@ struct DockerInspectConfiguration {
     labels: HashMap<String, String>,
 }
 
+/// One entry of `docker ps ... --format '{{json .}}'` output.
+#[derive(Debug, Deserialize)]
+struct DockerPsListItem {
+    #[serde(rename = "ID")]
+    id: String,
+    #[serde(rename = "Names", default)]
+    names: DockerPsNames,
+}
+
+/// `Names` is emitted as a plain string by current docker CLI versions but as
+/// an array by older ones, so accept both shapes.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(untagged)]
+enum DockerPsNames {
+    #[default]
+    None,
+    Single(String),
+    Many(Vec<String>),
+}
+
+impl DockerPsNames {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::None => Vec::new(),
+            Self::Single(name) => vec![name],
+            Self::Many(names) => names,
+        }
+    }
+}
+
+fn parse_docker_ps_items(stdout: &[u8]) -> Result<Vec<DockerPsListItem>> {
+    // With `--format '{{json .}}'` docker emits one JSON object per line.
+    let text = String::from_utf8_lossy(stdout);
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .with_context(|| format!("failed to parse docker ps output line: {line}"))
+        })
+        .collect()
+}
+
 async fn inspect_running_docker_container(
     container_bin: &Path,
     container_id: &str,
@@ -1178,7 +1221,15 @@ async fn find_sandbox_containers_for_id(
             let output = run_container_admin_command(
                 container_bin,
                 WARM_SANDBOX_CLEANUP_TIMEOUT,
-                ["ps", "-aq", "--no-trunc", "--filter", id_filter.as_str()],
+                [
+                    "ps",
+                    "-a",
+                    "--no-trunc",
+                    "--filter",
+                    id_filter.as_str(),
+                    "--format",
+                    "{{json .}}",
+                ],
             )
             .await?;
             if !output.status.success() {
@@ -1187,11 +1238,9 @@ async fn find_sandbox_containers_for_id(
                     String::from_utf8_lossy(&output.stderr).trim()
                 ));
             }
-            Ok(String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(ToOwned::to_owned)
+            Ok(parse_docker_ps_items(&output.stdout)?
+                .into_iter()
+                .map(|item| item.id)
                 .collect())
         }
     }
@@ -1253,7 +1302,7 @@ async fn find_running_docker_warm_sandbox(
             "--filter",
             "status=running",
             "--format",
-            "{{.Names}}",
+            "{{json .}}",
         ],
     )
     .await?;
@@ -1264,11 +1313,14 @@ async fn find_running_docker_warm_sandbox(
         ));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|name| !name.is_empty())
-        .map(ToOwned::to_owned))
+    Ok(parse_docker_ps_items(&output.stdout)?
+        .into_iter()
+        .find_map(|item| {
+            item.names
+                .into_vec()
+                .into_iter()
+                .find(|name| !name.is_empty())
+        }))
 }
 
 async fn ensure_warm_sandbox_ready(
@@ -1760,10 +1812,12 @@ async fn reap_orphaned_docker_warm_sandboxes(container_bin: &Path) -> Result<()>
         WARM_SANDBOX_CLEANUP_TIMEOUT,
         [
             "ps",
-            "-aq",
+            "-a",
             "--no-trunc",
             "--filter",
             "label=exo.sandbox.key",
+            "--format",
+            "{{json .}}",
         ],
     )
     .await?;
@@ -1774,11 +1828,9 @@ async fn reap_orphaned_docker_warm_sandboxes(container_bin: &Path) -> Result<()>
         ));
     }
 
-    let ids = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(ToOwned::to_owned)
+    let ids = parse_docker_ps_items(&output.stdout)?
+        .into_iter()
+        .map(|item| item.id)
         .collect::<Vec<_>>();
     if ids.is_empty() {
         return Ok(());
@@ -2089,6 +2141,25 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 mod tests {
     use super::*;
 
+    #[test]
+    fn parse_docker_ps_items_reads_one_json_object_per_line() -> Result<()> {
+        let stdout = concat!(
+            r#"{"Command":"sleep","ID":"abc123","Names":["warm-a"]}"#,
+            "\n",
+            r#"{"Command":"sleep","ID":"def456","Names":"warm-b","State":"running"}"#,
+            "\n",
+        );
+        let items = parse_docker_ps_items(stdout.as_bytes())?;
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "abc123");
+        assert_eq!(items[0].names.clone().into_vec(), ["warm-a".to_string()]);
+        assert_eq!(items[1].id, "def456");
+        assert_eq!(items[1].names.clone().into_vec(), ["warm-b".to_string()]);
+        assert!(parse_docker_ps_items(b"\n").is_ok());
+        assert!(parse_docker_ps_items(b"not json\n").is_err());
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn container_admin_commands_have_their_own_process_group() -> Result<()> {
@@ -2369,7 +2440,7 @@ mod tests {
         fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\n{{\n  for arg in \"$@\"; do\n    printf '%s\\n' \"$arg\"\n  done\n}} > '{}'\nprintf 'warm-name\\n'\n",
+                "#!/bin/sh\n{{\n  for arg in \"$@\"; do\n    printf '%s\\n' \"$arg\"\n  done\n}} > '{}'\nprintf '%s\\n' '{{\"ID\":\"docker-container-id\",\"Names\":\"warm-name\"}}'\n",
                 args_path.display()
             ),
         )
@@ -2424,7 +2495,7 @@ mod tests {
                 "--filter",
                 "status=running",
                 "--format",
-                "{{.Names}}",
+                "{{json .}}",
             ]
         );
     }
@@ -2441,7 +2512,7 @@ mod tests {
         fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\nfor arg in \"$@\"; do\n  printf '%s\\n' \"$arg\" >> '{}'\ndone\nprintf '%s\\n' '---' >> '{}'\ncase \"$1\" in\n  ps)\n    printf 'docker-container-id\\n'\n    ;;\n  inspect)\n    printf '%s\\n' '[{{\"Id\":\"docker-container-id\",\"Config\":{{\"Labels\":{{\"{}\":\"conversation:conversation:sandbox\"}}}},\"State\":{{\"Status\":\"running\",\"StartedAt\":\"2024-01-01T00:00:00Z\"}}}}]'\n    ;;\n  rm)\n    ;;\nesac\n",
+                "#!/bin/sh\nfor arg in \"$@\"; do\n  printf '%s\\n' \"$arg\" >> '{}'\ndone\nprintf '%s\\n' '---' >> '{}'\ncase \"$1\" in\n  ps)\n    printf '%s\\n' '{{\"ID\":\"docker-container-id\",\"Names\":\"docker-container\"}}'\n    ;;\n  inspect)\n    printf '%s\\n' '[{{\"Id\":\"docker-container-id\",\"Config\":{{\"Labels\":{{\"{}\":\"conversation:conversation:sandbox\"}}}},\"State\":{{\"Status\":\"running\",\"StartedAt\":\"2024-01-01T00:00:00Z\"}}}}]'\n    ;;\n  rm)\n    ;;\nesac\n",
                 args_path.display(),
                 args_path.display(),
                 WARM_SANDBOX_KEY_LABEL,
@@ -2493,10 +2564,12 @@ mod tests {
             args.lines().collect::<Vec<_>>(),
             vec![
                 "ps",
-                "-aq",
+                "-a",
                 "--no-trunc",
                 "--filter",
                 "label=exo.sandbox.key",
+                "--format",
+                "{{json .}}",
                 "---",
                 "inspect",
                 "docker-container-id",
