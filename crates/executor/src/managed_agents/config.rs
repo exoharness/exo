@@ -284,14 +284,13 @@ pub fn agent_config_with_modules(
         .and_then(Path::parent)
         .unwrap_or(Path::new("."));
     let (kind, mut module, preset) = resolve_harness(
-        harness.unwrap_or(&definition.frontmatter.harness),
+        harness.unwrap_or(&definition.harness),
         if harness.is_some() {
             Path::new(".")
         } else {
             base
         },
         definition
-            .frontmatter
             .model
             .module
             .as_deref()
@@ -299,7 +298,7 @@ pub fn agent_config_with_modules(
             .as_deref(),
         modules,
     )?;
-    if !definition.frontmatter.tools.is_empty() {
+    if !definition.tools.is_empty() {
         let module = module
             .as_mut()
             .context("tool modules require a TypeScript harness")?;
@@ -308,7 +307,6 @@ pub fn agent_config_with_modules(
             .and_then(Path::parent)
             .unwrap_or(Path::new("."));
         module.tool_module_paths = definition
-            .frontmatter
             .tools
             .iter()
             .map(|path| {
@@ -323,11 +321,11 @@ pub fn agent_config_with_modules(
             })
             .collect::<Result<_>>()?;
     }
-    let model = model.unwrap_or(&definition.frontmatter.model.name);
+    let model = model.unwrap_or(&definition.model.name);
     if model.trim().is_empty() {
         bail!("model must not be empty");
     }
-    if let Some(effort) = definition.frontmatter.model.reasoning_effort.as_deref() {
+    if let Some(effort) = definition.model.reasoning_effort.as_deref() {
         if preset != Some(TypeScriptHarnessPreset::Codex) {
             bail!("model.reasoning_effort is only supported by the codex harness");
         }
@@ -340,7 +338,7 @@ pub fn agent_config_with_modules(
         resources: Vec::new(),
         harness: kind,
         typescript: module,
-        enable_agent_tool_creation: definition.frontmatter.tool_creation,
+        enable_agent_tool_creation: definition.tool_creation,
         instructions: vec![crate::harness_helpers::system_message(
             &definition.instructions,
         )],
@@ -352,11 +350,11 @@ pub fn agent_config_with_modules(
             enable_networking: true,
         },
         model: model.into(),
-        credential: definition.frontmatter.model.credential.clone(),
-        base_url: definition.frontmatter.model.base_url.clone(),
-        reasoning_effort: definition.frontmatter.model.reasoning_effort.clone(),
-        max_output_tokens: definition.frontmatter.model.max_output_tokens,
-        max_tool_round_trips: definition.frontmatter.model.max_tool_round_trips,
-        braintrust: definition.frontmatter.model.braintrust.clone(),
+        credential: definition.model.credential.clone(),
+        base_url: definition.model.base_url.clone(),
+        reasoning_effort: definition.model.reasoning_effort.clone(),
+        max_output_tokens: definition.model.max_output_tokens,
+        max_tool_round_trips: definition.model.max_tool_round_trips,
+        braintrust: definition.model.braintrust.clone(),
     })
 }

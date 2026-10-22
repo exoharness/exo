@@ -328,16 +328,14 @@ const policy = (origin) => ({
   injection_location: { header: true },
 });
 const definition = (ask, harness = "basic") => ({
-  frontmatter: {
-    name: "Test Agent",
-    harness,
-    model: {
-      name: "test-model",
-      base_url: "https://model.example/v1",
-      credential: "OPENAI_API_KEY",
-    },
-    permission_policy: { type: ask ? "always_ask" : "always_allow" },
+  name: "Test Agent",
+  harness,
+  model: {
+    name: "test-model",
+    base_url: "https://model.example/v1",
+    credential: "OPENAI_API_KEY",
   },
+  permission_policy: { type: ask ? "always_ask" : "always_allow" },
   instructions: "Use shell to print Linux, then finish.",
 });
 async function create(ask = false, harness = "basic") {
@@ -1352,7 +1350,7 @@ test("MCP uses vault OAuth refresh, shared filtering and basic tool execution", 
     name: "MCP test",
   });
   const source = definition(false);
-  source.frontmatter.mcp_servers = [
+  source.mcp_servers = [
     {
       type: "url",
       name: "fixture",
@@ -1401,7 +1399,7 @@ test("Codex receives MCP configuration and Git resources through shared sandbox 
     name: "Codex resources",
   });
   const source = definition(false, "codex");
-  source.frontmatter.resources = [
+  source.resources = [
     {
       name: "repo",
       type: "git",
@@ -1410,7 +1408,7 @@ test("Codex receives MCP configuration and Git resources through shared sandbox 
       mount_path: "/workspace",
     },
   ];
-  source.frontmatter.mcp_servers = [
+  source.mcp_servers = [
     {
       type: "url",
       name: "fixture",
@@ -1453,8 +1451,7 @@ test("Codex receives MCP configuration and Git resources through shared sandbox 
   assert.deepEqual(fixture.enabled_tools, ["echo"]);
   assert.match(environment[fixture.bearer_token_env_var], /^exo_egress_/);
 
-  source.frontmatter.resources[0].url =
-    "https://github.com/example/disk-full.git";
+  source.resources[0].url = "https://github.com/example/disk-full.git";
   await api(`agent/${agent.id}/definition`, "PUT", source);
   const failed = await api(`agent/${agent.id}/thread`, "POST", {
     vaults: [vault.id],

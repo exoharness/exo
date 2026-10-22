@@ -78,7 +78,7 @@ impl IdentityRegistry {
                         exo_managed_agents::load_definition(agent.as_ref()).await?
                     {
                         ensure!(
-                            !definition.frontmatter.adapters.iter().any(|adapter| adapter
+                            !definition.adapters.iter().any(|adapter| adapter
                                 .vault()
                                 .is_some_and(|reference| reference == vault.record().name
                                     || reference == vault.record().id.to_string())),

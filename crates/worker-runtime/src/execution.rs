@@ -46,7 +46,7 @@ pub(crate) fn worker_agent_config(
     definition: &AgentDefinition,
     sandbox: SandboxProvider,
 ) -> Result<AgentConfig> {
-    let f = &definition.frontmatter;
+    let f = definition;
     ensure!(
         matches!(f.harness.as_str(), "basic" | "codex"),
         "this Worker supports basic and codex harnesses"

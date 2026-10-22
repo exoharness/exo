@@ -45,7 +45,7 @@ impl AgentNameArgs {
         let name = self
             .name
             .as_deref()
-            .or(definition.frontmatter.name.as_deref())
+            .or(definition.name.as_deref())
             .map(str::to_owned)
             .or_else(|| definition.path()?.file_stem()?.to_str().map(str::to_owned))
             .context("agent file has no filename; provide --name")?;
@@ -145,7 +145,6 @@ impl ThreadArgs {
 
 pub fn harness_selection(definition: &AgentDefinition) -> Result<HarnessSelection> {
     let mut selection = definition
-        .frontmatter
         .harness
         .parse::<HarnessSelection>()
         .map_err(|error| anyhow!(error))?;

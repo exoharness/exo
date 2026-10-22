@@ -38,6 +38,17 @@ suggest a workaround.
 The following sections walk through the various ways to configure an agent, which belong in its frontmatter. The text below
 that contains system instructions sent to the agent.
 
+Provider APIs and saved definition artifacts use a flat JSON object. The Markdown reader combines the frontmatter fields
+with the body as `instructions`; the Markdown writer separates them again. The JSON has no `frontmatter` or `config` wrapper:
+
+```json
+{
+  "harness": "codex",
+  "model": { "name": "gpt-6.1-sol", "credential": "openai" },
+  "instructions": "Help investigate issues."
+}
+```
+
 ### Harness and model
 
 A **harness** accepts messages and produces events, deciding how to call the model, use tools, manage context, etc. Exo supports

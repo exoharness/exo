@@ -27,28 +27,6 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, bound(deserialize = "R: Deserialize<'de>"))]
-pub struct AgentFrontmatter<R = exoharness::resources::ResourceDefinition> {
-    #[serde(default)]
-    pub resources: Vec<R>,
-    pub name: Option<String>,
-    pub harness: String,
-    pub model: AgentModelConfig,
-    #[serde(default)]
-    pub permission_policy: permissions::PermissionPolicy,
-    #[serde(default)]
-    pub tool_policies: std::collections::BTreeMap<String, permissions::PermissionPolicy>,
-    #[serde(default)]
-    pub mcp_servers: Vec<McpServerDefinition>,
-    #[serde(default)]
-    pub tools: Vec<PathBuf>,
-    #[serde(default)]
-    pub tool_creation: bool,
-    #[serde(default)]
-    pub adapters: Vec<adapters::AdapterDefinition>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentModelConfig {
     pub braintrust: Option<BraintrustTracingConfig>,
@@ -64,7 +42,23 @@ pub struct AgentModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentDefinition {
-    pub frontmatter: AgentFrontmatter,
+    #[serde(default)]
+    pub resources: Vec<exoharness::resources::ResourceDefinition>,
+    pub name: Option<String>,
+    pub harness: String,
+    pub model: AgentModelConfig,
+    #[serde(default)]
+    pub permission_policy: permissions::PermissionPolicy,
+    #[serde(default)]
+    pub tool_policies: std::collections::BTreeMap<String, permissions::PermissionPolicy>,
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerDefinition>,
+    #[serde(default)]
+    pub tools: Vec<PathBuf>,
+    #[serde(default)]
+    pub tool_creation: bool,
+    #[serde(default)]
+    pub adapters: Vec<adapters::AdapterDefinition>,
     pub instructions: String,
     #[serde(skip)]
     source: OnceLock<String>,
@@ -94,34 +88,45 @@ impl AgentDefinition {
         // Markdown file, including its first line.
         let frontmatter = frontmatter::parse(&normalized[..4 + yaml_end])?;
         let instructions = contents[body_start..].trim().to_string();
-        let definition = Self {
-            frontmatter,
-            instructions,
-            source: OnceLock::from(source),
-            path: None,
-        };
+        let mut definition = frontmatter.into_definition(instructions);
+        definition.source = OnceLock::from(source);
         definition.validate()?;
         Ok(definition)
     }
 
     pub fn validate(&self) -> Result<()> {
         for (field, value) in [
-            ("harness", self.frontmatter.harness.as_str()),
-            ("model.name", self.frontmatter.model.name.as_str()),
+            ("harness", self.harness.as_str()),
+            ("model.name", self.model.name.as_str()),
             ("instructions", self.instructions.as_str()),
         ] {
             if value.trim().is_empty() {
                 bail!("agent {field} must not be empty");
             }
         }
-        mcp::validate_servers(&self.frontmatter.mcp_servers)?;
-        exoharness::resources::validate_resources(&self.frontmatter.resources)?;
-        adapters::validate(&self.frontmatter.adapters)?;
+        mcp::validate_servers(&self.mcp_servers)?;
+        exoharness::resources::validate_resources(&self.resources)?;
+        adapters::validate(&self.adapters)?;
         Ok(())
     }
 
     pub fn from_json(contents: &[u8]) -> Result<Self> {
-        let definition: Self = serde_json::from_slice(contents)?;
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum StoredDefinition {
+            Flat(AgentDefinition),
+            Nested {
+                frontmatter: frontmatter::AgentFrontmatter,
+                instructions: String,
+            },
+        }
+        let definition = match serde_json::from_slice(contents)? {
+            StoredDefinition::Flat(definition) => definition,
+            StoredDefinition::Nested {
+                frontmatter,
+                instructions,
+            } => frontmatter.into_definition(instructions),
+        };
         definition.validate()?;
         Ok(definition)
     }
@@ -145,8 +150,7 @@ impl AgentDefinition {
 
     pub fn source(&self) -> &str {
         self.source.get_or_init(|| {
-            let yaml = serde_yaml_ng::to_string(&self.frontmatter)
-                .expect("agent frontmatter is serializable");
+            let yaml = frontmatter::serialize(self);
             format!("---\n{yaml}---\n\n{}\n", self.instructions)
         })
     }

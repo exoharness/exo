@@ -4,14 +4,11 @@ use super::*;
 fn resource_declarations_validate_sources_and_mounts() -> Result<()> {
     let source = SOURCE.replace("model:\n", "resources:\n  - name: code\n    type: git\n    url: https://github.com/exoharness/exo\n    checkout: main\n    credential: github\n    mount_path: /workspace\n  - name: data\n    type: directory\n    path: ./fixtures\n    mount_path: /data\n    mode: ro\nmodel:\n");
     let definition = AgentDefinition::parse(source.clone())?;
-    assert_eq!(definition.frontmatter.resources.len(), 2);
+    assert_eq!(definition.resources.len(), 2);
     let default_mount = AgentDefinition::parse(source.replace("    mount_path: /workspace\n", ""))?;
-    assert_eq!(
-        default_mount.frontmatter.resources[0].mount_path(),
-        "/workspace/code"
-    );
+    assert_eq!(default_mount.resources[0].mount_path(), "/workspace/code");
     let prepared = exoharness::resources::PreparedResource {
-        definition: default_mount.frontmatter.resources[0].clone(),
+        definition: default_mount.resources[0].clone(),
         snapshot: None,
     };
     let mut explicit_mount = prepared.clone();
@@ -188,8 +185,8 @@ fn parses_frontmatter_and_preserves_the_original_document() -> Result<()> {
         format!("\u{feff}{}", SOURCE.replace('\n', "\r\n")),
     ] {
         let definition = AgentDefinition::parse(source.clone())?;
-        assert_eq!(definition.frontmatter.harness, "codex");
-        assert_eq!(definition.frontmatter.model.name, "gpt-6.1-sol");
+        assert_eq!(definition.harness, "codex");
+        assert_eq!(definition.model.name, "gpt-6.1-sol");
         assert_eq!(
             definition.instructions,
             "Investigate tickets.\n\n---\nCite each ticket."
@@ -431,6 +428,10 @@ fn structured_definitions_validate_and_export_markdown_without_transporting_sour
     let value: serde_json::Value = serde_json::from_slice(&bytes)?;
     assert!(value.get("source").is_none());
     assert!(value.get("path").is_none());
+    assert!(value.get("frontmatter").is_none());
+    assert!(value.get("config").is_none());
+    assert_eq!(value["harness"], "codex");
+    assert_eq!(value["model"]["name"], "gpt-6.1-sol");
     let decoded = AgentDefinition::from_json(&bytes)?;
     assert!(decoded.path().is_none());
     assert_eq!(decoded.to_json()?, bytes);
@@ -442,7 +443,23 @@ fn structured_definitions_validate_and_export_markdown_without_transporting_sour
     invalid["instructions"] = "".into();
     assert!(AgentDefinition::from_json(&serde_json::to_vec(&invalid)?).is_err());
     invalid["instructions"] = "Instructions".into();
-    invalid["frontmatter"]["unexpected"] = true.into();
+    invalid["unexpected"] = true.into();
     assert!(AgentDefinition::from_json(&serde_json::to_vec(&invalid)?).is_err());
+    Ok(())
+}
+
+#[test]
+fn stored_nested_definitions_are_read_and_exported_as_flat_json() -> Result<()> {
+    let saved = serde_json::json!({
+        "frontmatter": {"harness": "codex", "model": {"name": "gpt-5-mini"}},
+        "instructions": "Help investigate issues.",
+    });
+    let definition = AgentDefinition::from_json(&serde_json::to_vec(&saved)?)?;
+    assert_eq!(definition.harness, "codex");
+    assert_eq!(definition.instructions, "Help investigate issues.");
+    let flat: serde_json::Value = serde_json::from_slice(&definition.to_json()?)?;
+    assert!(flat.get("frontmatter").is_none());
+    assert_eq!(flat["harness"], "codex");
+    assert!(serde_json::from_value::<AgentDefinition>(saved).is_err());
     Ok(())
 }

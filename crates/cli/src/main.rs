@@ -2339,7 +2339,7 @@ async fn diagnose_agent(
         "The saved definition loads".into(),
         None,
     )];
-    for adapter in &definition.frontmatter.adapters {
+    for adapter in &definition.adapters {
         let AdapterDefinition::Slack(slack) = adapter;
         let name = format!("slack adapter {}", adapter.name());
         let vault = match exo_managed_agents::vaults::find_vault(

@@ -69,10 +69,9 @@ impl PermissionPolicies {
 impl crate::AgentDefinition {
     pub fn permissions(&self) -> PermissionPolicies {
         PermissionPolicies {
-            permission_policy: self.frontmatter.permission_policy,
-            tool_policies: self.frontmatter.tool_policies.clone(),
+            permission_policy: self.permission_policy,
+            tool_policies: self.tool_policies.clone(),
             mcp_servers: self
-                .frontmatter
                 .mcp_servers
                 .iter()
                 .map(|server| (server.name().to_owned(), server.permissions().clone()))

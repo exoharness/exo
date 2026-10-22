@@ -40,17 +40,15 @@ impl AgentBackend for LocalProvider {
         agent: &Arc<dyn AgentHandle>,
         definition: &AgentDefinition,
     ) -> Result<()> {
-        if let Some(caller) = self.state.caller() {
-            let frontmatter = &definition.frontmatter;
-            if !matches!(
-                frontmatter.harness.as_str(),
+        if let Some(caller) = self.state.caller()
+            && (!matches!(
+                definition.harness.as_str(),
                 "basic" | "rlm" | "codex" | "claude-code" | "cursor" | "cursor-sdk" | "pi"
-            ) || !frontmatter.tools.is_empty()
-                || frontmatter.tool_creation
-                || !frontmatter.adapters.is_empty()
-            {
-                caller.policy.check_operator(&caller.principal).await?;
-            }
+            ) || !definition.tools.is_empty()
+                || definition.tool_creation
+                || !definition.adapters.is_empty())
+        {
+            caller.policy.check_operator(&caller.principal).await?;
         }
         let mut config = match &self.managed.agent {
             Some(config) => config.clone(),
@@ -59,7 +57,7 @@ impl AgentBackend for LocalProvider {
         config.instructions = vec![crate::harness_helpers::system_message(
             &definition.instructions,
         )];
-        let mut resources = definition.frontmatter.resources.clone();
+        let mut resources = definition.resources.clone();
         let base = definition
             .path()
             .and_then(Path::parent)

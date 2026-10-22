@@ -360,7 +360,7 @@ impl AdapterService {
                     continue;
                 }
             };
-            for definition in definition.frontmatter.adapters.iter().cloned() {
+            for definition in definition.adapters.iter().cloned() {
                 let id = AdapterStore::deployment(agent.record().id, definition.name());
                 desired.insert(
                     id,
@@ -1438,7 +1438,6 @@ impl AdapterService {
             }
         };
         let adapter = definition
-            .frontmatter
             .adapters
             .iter()
             .find(|adapter| adapter.name() == name)

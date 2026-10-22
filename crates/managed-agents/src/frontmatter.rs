@@ -1,14 +1,72 @@
-use super::AgentFrontmatter;
+use super::{AgentDefinition, AgentModelConfig, adapters, mcp, permissions};
 use anyhow::{Context, Result, ensure};
 use exoharness::{
     FileSystemMountMode,
     resources::{ResourceDefinition, ResourceSource},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
     path::{Path, PathBuf},
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, bound(deserialize = "R: Deserialize<'de>"))]
+pub(super) struct AgentFrontmatter<R = exoharness::resources::ResourceDefinition> {
+    #[serde(default)]
+    pub(super) resources: Vec<R>,
+    pub(super) name: Option<String>,
+    pub(super) harness: String,
+    pub(super) model: AgentModelConfig,
+    #[serde(default)]
+    pub(super) permission_policy: permissions::PermissionPolicy,
+    #[serde(default)]
+    pub(super) tool_policies: std::collections::BTreeMap<String, permissions::PermissionPolicy>,
+    #[serde(default)]
+    pub(super) mcp_servers: Vec<mcp::McpServerDefinition>,
+    #[serde(default)]
+    pub(super) tools: Vec<PathBuf>,
+    #[serde(default)]
+    pub(super) tool_creation: bool,
+    #[serde(default)]
+    pub(super) adapters: Vec<adapters::AdapterDefinition>,
+}
+
+impl AgentFrontmatter {
+    pub(super) fn into_definition(self, instructions: String) -> AgentDefinition {
+        AgentDefinition {
+            resources: self.resources,
+            name: self.name,
+            harness: self.harness,
+            model: self.model,
+            permission_policy: self.permission_policy,
+            tool_policies: self.tool_policies,
+            mcp_servers: self.mcp_servers,
+            tools: self.tools,
+            tool_creation: self.tool_creation,
+            adapters: self.adapters,
+            instructions,
+            source: std::sync::OnceLock::new(),
+            path: None,
+        }
+    }
+}
+
+pub(super) fn serialize(definition: &AgentDefinition) -> String {
+    let frontmatter = AgentFrontmatter {
+        resources: definition.resources.clone(),
+        name: definition.name.clone(),
+        harness: definition.harness.clone(),
+        model: definition.model.clone(),
+        permission_policy: definition.permission_policy,
+        tool_policies: definition.tool_policies.clone(),
+        mcp_servers: definition.mcp_servers.clone(),
+        tools: definition.tools.clone(),
+        tool_creation: definition.tool_creation,
+        adapters: definition.adapters.clone(),
+    };
+    serde_yaml_ng::to_string(&frontmatter).expect("agent frontmatter is serializable")
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -42,7 +42,7 @@ fn agent_identity_uses_explicit_name_then_frontmatter_then_filename() -> Result<
             ("My agent", "triage"),
         ),
     ] {
-        definition.frontmatter.name = frontmatter.map(str::to_owned);
+        definition.name = frontmatter.map(str::to_owned);
         let args = AgentNameArgs {
             name: name.map(str::to_owned),
             slug: slug.map(str::to_owned),

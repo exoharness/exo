@@ -47,7 +47,6 @@ impl AccessPolicy for AdapterPolicy {
             .await?
             .ok_or_else(|| anyhow::anyhow!("adapter agent definition is missing"))?;
         let config = definition
-            .frontmatter
             .adapters
             .iter()
             .find_map(|definition| match definition {
@@ -144,7 +143,7 @@ impl AccessPolicy for AdapterPolicy {
             .load(agent.as_ref())
             .await?
             .ok_or_else(|| anyhow::anyhow!("adapter agent definition is missing"))?;
-        let allowed = definition.frontmatter.adapters.iter().any(|adapter| {
+        let allowed = definition.adapters.iter().any(|adapter| {
             let exo_managed_agents::adapters::AdapterDefinition::Slack(config) = adapter;
             adapter.name() == self.authority.adapter
                 && config.vault != record.name

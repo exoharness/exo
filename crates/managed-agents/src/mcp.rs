@@ -90,8 +90,8 @@ impl AgentDefinition {
         &self,
         resolver: &dyn McpServerResolver,
     ) -> Result<Vec<McpServerConfig>> {
-        let servers = futures::future::try_join_all(self.frontmatter.mcp_servers.iter().map(
-            |server| async move {
+        let servers =
+            futures::future::try_join_all(self.mcp_servers.iter().map(|server| async move {
                 let url =
                     match server {
                         McpServerDefinition::Url { url, .. } => url.clone(),
@@ -101,9 +101,8 @@ impl AgentDefinition {
                             .with_context(|| format!("resolving MCP server {}", server.name()))?,
                     };
                 Ok::<_, anyhow::Error>(server.with_url(url))
-            },
-        ))
-        .await?;
+            }))
+            .await?;
         exo_mcp::validate_servers(&servers)?;
         Ok(servers)
     }

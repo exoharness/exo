@@ -187,7 +187,7 @@ impl Fixture {
             slack_morphism::hyper_tokio::SlackClientHyperConnector::with_connector(connector)
                 .with_slack_api_url(&format!("{}/api", slack.uri())),
         ));
-        let AdapterDefinition::Slack(config) = definition.frontmatter.adapters[0].clone();
+        let AdapterDefinition::Slack(config) = definition.adapters[0].clone();
         let id = AdapterStore::deployment(agent.record().id, "slack");
         let connection = slack::SlackConnection::connect_with_client(
             &service,
@@ -200,7 +200,7 @@ impl Fixture {
         let deployment = Deployment {
             id: id.clone(),
             agent: agent.record().id,
-            definition: definition.frontmatter.adapters[0].clone(),
+            definition: definition.adapters[0].clone(),
             fingerprint: "test".into(),
             connection,
         };
@@ -663,7 +663,7 @@ async fn invalid_definition_does_not_hide_other_agents_and_cache_tracks_updates(
         .await?;
     let updated = all.definitions.load(agent.as_ref()).await?.unwrap();
     assert!(!Arc::ptr_eq(&first, &updated));
-    let AdapterDefinition::Slack(config) = &updated.frontmatter.adapters[0];
+    let AdapterDefinition::Slack(config) = &updated.adapters[0];
     assert!(!config.use_sender_vault);
     agent
         .write_artifact(exoharness::WriteArtifactRequest {
@@ -858,7 +858,7 @@ async fn removing_sender_access_closes_the_existing_stream_even_if_inbox_save_fa
             contents: {
                 let mut updated = definition.clone();
                 let exo_managed_agents::adapters::AdapterDefinition::Slack(adapter) =
-                    &mut updated.frontmatter.adapters[0];
+                    &mut updated.adapters[0];
                 adapter.allowed_users = Some(vec![]);
                 updated.to_json()?
             },
@@ -1078,10 +1078,7 @@ async fn configured_execution_vaults_are_available_and_revocable() -> Result<()>
             contents: AgentDefinition::parse(source.clone())?.to_json()?,
         })
         .await?;
-    f.deployment.definition = AgentDefinition::parse(source)?
-        .frontmatter
-        .adapters
-        .remove(0);
+    f.deployment.definition = AgentDefinition::parse(source)?.adapters.remove(0);
     let message = f.input("UUNKNOWN", "1.0");
     f.service
         .accept(&f.deployment, message.clone(), None)

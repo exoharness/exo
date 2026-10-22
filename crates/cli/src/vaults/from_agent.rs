@@ -17,12 +17,11 @@ pub(super) async fn create(
     let mut definition = AgentDefinition::load(path)?;
     if let Some(name) = name {
         definition
-            .frontmatter
             .mcp_servers
             .retain(|server| server.name() == name);
     }
     ensure!(
-        !definition.frontmatter.mcp_servers.is_empty(),
+        !definition.mcp_servers.is_empty(),
         "{}",
         match name {
             Some(name) => format!("agent has no MCP server named {name}"),
