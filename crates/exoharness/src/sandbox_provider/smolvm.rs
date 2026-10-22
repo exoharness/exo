@@ -73,9 +73,10 @@ const INTERCEPTOR_FLAG: &str = "--egress-interceptor";
 const HOST_PATTERN_FLAG: &str = "--allow-host-pattern";
 const EXACT_HOST_POLICY_LABEL: &str = "exo.sandbox.exact-host-policy";
 const TCP_FORWARD_LABEL_PREFIX: &str = "exo.sandbox.tcp-forward.";
-static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 2] = [
+static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 3] = [
     SnapshotFormat::SmolvmMachinePack,
     SnapshotFormat::SmolvmFilesystemRef,
+    SnapshotFormat::SmolvmBranchRef,
 ];
 
 /// What the installed smolvm supports. Probed once per backend.
@@ -89,6 +90,8 @@ struct Capabilities {
     host_patterns: bool,
     #[cfg(unix)]
     filesystem_snapshots: bool,
+    /// `machine branch --from`.
+    branches: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -388,6 +391,7 @@ impl SmolvmSandboxBackend {
                     host_patterns: self
                         .probe_flag("machine", "create", HOST_PATTERN_FLAG)
                         .await,
+                    branches: self.probe_flag("machine", "branch", "--from").await,
                 }
             })
             .await)
@@ -557,9 +561,13 @@ impl SmolvmSandboxBackend {
             stop_machine(self.binary().await?, name).await?;
         }
 
+        let caps = self.capabilities().await?;
         let started = async {
             let mut start = Command::new(binary);
             start.arg("machine").arg("start").arg("--name").arg(name);
+            if caps.branches {
+                start.arg("--branchable");
+            }
             if let Some(egress) = &egress {
                 egress.proxy.configure(&mut start);
             }
@@ -575,7 +583,8 @@ impl SmolvmSandboxBackend {
                 #[cfg(unix)]
                 snapshot_root: self.snapshot_root.clone(),
                 #[cfg(unix)]
-                filesystem_snapshots: self.capabilities().await?.filesystem_snapshots,
+                filesystem_snapshots: caps.filesystem_snapshots,
+                branches: caps.branches,
                 id: format!("smolvm:{name}"),
                 binary: binary.clone(),
                 machine: name.to_owned(),
@@ -622,6 +631,10 @@ impl SmolvmSandboxBackend {
             );
         }
 
+        if payload.format == SnapshotFormat::SmolvmBranchRef {
+            let manifest = BranchManifest::parse(&payload)?;
+            return self.restore_from_branch(request, &manifest.machine).await;
+        }
         let (pack_path, capture) = if payload.format == SnapshotFormat::SmolvmFilesystemRef {
             let manifest = filesystem::Manifest::parse(&payload)?;
             let root = self.snapshot_root.clone();
@@ -721,6 +734,156 @@ impl SmolvmSandboxBackend {
         }
         let handle = handle?;
         self.invalidate_tcp_forwards(&request.sandbox_id);
+        Ok(crate::with_process_management(handle))
+    }
+
+    /// Stop and delete; a branch base with live children is retired instead.
+    async fn retire_branch(&self, machine: &str) -> Result<()> {
+        let binary = self.binary().await?;
+        let _ = stop_machine(binary, machine).await;
+        let output = Command::new(binary)
+            .args(["machine", "delete", "--name", machine, "--force"])
+            .output()
+            .await
+            .context("spawn smolvm machine delete")?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if cli_says::no_such_machine(&stderr) {
+            return Ok(());
+        }
+        if cli_says::is_branch_base(&stderr) {
+            #[cfg(unix)]
+            {
+                let root = self.snapshot_root.clone();
+                let machine = machine.to_owned();
+                tokio::task::spawn_blocking(move || retired_branches::add(&root, &machine))
+                    .await??;
+            }
+            return Ok(());
+        }
+        bail!("smolvm machine delete failed: {}", stderr.trim())
+    }
+
+    async fn reap_retired_branches(&self) {
+        #[cfg(unix)]
+        {
+            let Ok(binary) = self.binary().await else {
+                return;
+            };
+            let root = self.snapshot_root.clone();
+            let Ok(Ok(names)) =
+                tokio::task::spawn_blocking(move || retired_branches::list(&root)).await
+            else {
+                return;
+            };
+            let mut still_retired = Vec::new();
+            for name in names {
+                let output = Command::new(binary)
+                    .args(["machine", "delete", "--name", &name, "--force"])
+                    .output()
+                    .await;
+                let gone = match &output {
+                    Ok(output) if output.status.success() => true,
+                    Ok(output) => {
+                        cli_says::no_such_machine(&String::from_utf8_lossy(&output.stderr))
+                    }
+                    Err(_) => false,
+                };
+                if !gone {
+                    still_retired.push(name);
+                }
+            }
+            let root = self.snapshot_root.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                retired_branches::replace(&root, &still_retired)
+            })
+            .await;
+        }
+    }
+
+    /// Branch the held snapshot machine into the requested sandbox's machine.
+    async fn restore_from_branch(
+        &self,
+        request: SandboxRequest,
+        snapshot_machine: &str,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        ensure!(
+            request.spec.tcp_ports.is_empty(),
+            "smolvm branch snapshots do not publish TCP ports yet; restore a sandbox without tcp_ports"
+        );
+        let binary = self.binary().await?;
+        let machine = machine_name(request.sandbox_id.as_str());
+        let mut status = Command::new(binary);
+        status.args(["machine", "status", "--name", &machine, "--json"]);
+        let status = status.output().await?;
+        if status.status.success() {
+            let status: MachineStatus = serde_json::from_slice(&status.stdout)?;
+            ensure!(
+                status.state == "stopped",
+                "snapshot restore target is still running"
+            );
+            self.delete_machine_if_present(&machine).await?;
+        } else {
+            ensure!(
+                cli_says::no_such_machine(&String::from_utf8_lossy(&status.stderr)),
+                "snapshot restore target cannot be inspected"
+            );
+        }
+        self.branch_into(snapshot_machine, request).await
+    }
+
+    /// `smolvm machine branch` of `source_machine` into `target`'s machine.
+    async fn branch_into(
+        &self,
+        source_machine: &str,
+        target: SandboxRequest,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        let caps = self.capabilities().await?;
+        let binary = self.binary().await?.clone();
+        let target_machine = machine_name(&target.sandbox_id);
+        #[cfg(unix)]
+        let _guard = filesystem::lock_machine(&self.snapshot_root, &target_machine).await?;
+        let handle = self
+            .egress
+            .acquire_with_proxy(
+                crate::egress::AcquisitionMode::Acquire,
+                target.clone(),
+                self.external_proxy.as_ref(),
+                SmolvmProxy::start,
+                |egress| async {
+                    let mut branch = Command::new(&binary);
+                    branch
+                        .args(["machine", "branch", "--from", source_machine])
+                        .args(["--name", &target_machine, "--branchable"]);
+                    if let Some(egress) = &egress {
+                        egress.proxy.configure(&mut branch);
+                    }
+                    run_checked(branch, "smolvm machine branch").await?;
+                    let mut handle = SmolvmWarmHandle {
+                        #[cfg(unix)]
+                        snapshot_root: self.snapshot_root.clone(),
+                        #[cfg(unix)]
+                        filesystem_snapshots: caps.filesystem_snapshots,
+                        branches: caps.branches,
+                        id: format!("smolvm:{target_machine}"),
+                        binary: binary.clone(),
+                        machine: target_machine.clone(),
+                        request: target.clone(),
+                        egress: None,
+                        host_ports: BTreeMap::new(),
+                    };
+                    if let Some(egress) = egress {
+                        egress.initialize_trust(&handle).await?;
+                        handle.egress = Some(egress);
+                    }
+                    Ok(handle)
+                },
+                self.delete_machine_if_present(&target_machine),
+            )
+            .await?;
+        self.invalidate_tcp_forwards(&target.sandbox_id);
         Ok(crate::with_process_management(handle))
     }
 
@@ -958,14 +1121,14 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
         self.invalidate_tcp_forwards(&request.sandbox_id);
         let machine = machine_name(&request.sandbox_id);
-        #[cfg(unix)]
-        let _guard = filesystem::lock_machine(&self.snapshot_root, &machine).await?;
-        self.egress
-            .terminate(
-                &request.sandbox_id,
-                self.delete_machine_if_present(&machine),
-            )
-            .await?;
+        {
+            #[cfg(unix)]
+            let _guard = filesystem::lock_machine(&self.snapshot_root, &machine).await?;
+            self.egress
+                .terminate(&request.sandbox_id, self.retire_branch(&machine))
+                .await?;
+        }
+        self.reap_retired_branches().await;
         Ok(())
     }
 
@@ -1034,6 +1197,12 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
 
     #[cfg(unix)]
     async fn delete_snapshot(&self, payload: SnapshotPayload) -> Result<()> {
+        if payload.format == SnapshotFormat::SmolvmBranchRef {
+            let manifest = BranchManifest::parse(&payload)?;
+            self.retire_branch(&manifest.machine).await?;
+            self.reap_retired_branches().await;
+            return Ok(());
+        }
         let root = self.snapshot_root.clone();
         tokio::task::spawn_blocking(move || filesystem::delete(&root, &payload)).await?
     }
@@ -1090,12 +1259,83 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         bail!("smolvm sandboxes cannot be attached")
     }
 
+    /// Hold a branch of the running machine, then stop it.
     async fn suspend(
         &self,
-        _request: SandboxRequest,
-        _kind: crate::SnapshotKind,
+        request: SandboxRequest,
+        kind: crate::SnapshotKind,
     ) -> Result<SnapshotPayload> {
-        bail!("smolvm sandbox backend does not support suspension")
+        ensure!(
+            kind == crate::SnapshotKind::Full,
+            "smolvm suspension captures full execution state; request SnapshotKind::Full"
+        );
+        ensure!(
+            self.resolve_mode(&request).await == SmolvmExecutionMode::Warm,
+            "smolvm suspension requires a warm sandbox"
+        );
+        ensure!(
+            self.capabilities().await?.branches,
+            "smolvm suspension requires `machine branch --from`; update smolvm"
+        );
+        let binary = self.binary().await?.clone();
+        let machine = machine_name(&request.sandbox_id);
+        let payload = {
+            #[cfg(unix)]
+            let _guard = filesystem::lock_machine(&self.snapshot_root, &machine).await?;
+            hold_branch_snapshot(&binary, &machine, &request.sandbox_id).await?
+        };
+        self.stop_machine(&request.sandbox_id).await?;
+        Ok(payload)
+    }
+
+    async fn fork_sandbox(
+        &self,
+        source: SandboxRequest,
+        target: SandboxRequest,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        source.spec.policy.validate_basic("smolvm fork source")?;
+        target.spec.policy.validate_basic("smolvm fork target")?;
+        ensure!(
+            source.sandbox_id != target.sandbox_id,
+            "smolvm fork source and target must be different sandboxes"
+        );
+        ensure!(
+            source.spec == target.spec,
+            "smolvm fork source and target specifications must match"
+        );
+        ensure!(
+            target.spec.tcp_ports.is_empty(),
+            "smolvm fork does not publish TCP ports yet; fork a sandbox without tcp_ports"
+        );
+        self.require_capabilities(&target).await?;
+        ensure!(
+            self.resolve_mode(&target).await == SmolvmExecutionMode::Warm,
+            "smolvm fork requires warm sandboxes"
+        );
+        ensure!(
+            self.capabilities().await?.branches,
+            "smolvm fork requires `machine branch --from`; update smolvm"
+        );
+        let binary = self.binary().await?.clone();
+        let source_machine = machine_name(&source.sandbox_id);
+        let mut status = Command::new(&binary);
+        status.args(["machine", "status", "--name", &source_machine, "--json"]);
+        let status = status
+            .output()
+            .await
+            .context("spawn smolvm machine status")?;
+        ensure!(
+            status.status.success(),
+            "smolvm fork source is not available: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        );
+        let status: MachineStatus = serde_json::from_slice(&status.stdout)?;
+        ensure!(
+            status.state == "running",
+            "smolvm fork source must be running (state: {})",
+            status.state
+        );
+        self.branch_into(&source_machine, target).await
     }
 
     #[cfg(unix)]
@@ -1189,6 +1429,7 @@ struct SmolvmWarmHandle {
     snapshot_root: PathBuf,
     #[cfg(unix)]
     filesystem_snapshots: bool,
+    branches: bool,
     id: String,
     binary: PathBuf,
     machine: String,
@@ -1333,10 +1574,15 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
 
     #[cfg(unix)]
     async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "smolvm does not support full execution snapshots"
-        );
+        if kind == crate::SnapshotKind::Full {
+            ensure!(
+                self.branches,
+                "full execution snapshots require `smolvm machine branch --from`; update smolvm"
+            );
+            let _guard = filesystem::lock_machine(&self.snapshot_root, &self.machine).await?;
+            return hold_branch_snapshot(&self.binary, &self.machine, &self.request.sandbox_id)
+                .await;
+        }
         ensure!(
             self.request.lifecycle.idle_ttl.is_some(),
             "filesystem capture requires a managed lifecycle"
@@ -1389,6 +1635,97 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
             result
         })
         .await?
+    }
+}
+
+/// `smolvm-branch-ref-v1` payload: the held snapshot machine, by name.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct BranchManifest {
+    key: String,
+    machine: String,
+}
+
+impl BranchManifest {
+    fn parse(payload: &SnapshotPayload) -> Result<Self> {
+        ensure!(
+            payload.format == SnapshotFormat::SmolvmBranchRef,
+            "payload is not a smolvm branch snapshot ({})",
+            payload.format
+        );
+        serde_json::from_slice(&payload.bytes).context("parse smolvm branch snapshot manifest")
+    }
+}
+
+async fn hold_branch_snapshot(binary: &Path, machine: &str, key: &str) -> Result<SnapshotPayload> {
+    let snapshot = format!("exo-snap-{}", uuid::Uuid::new_v4().simple());
+    let snapshot = snapshot[..24].to_string();
+    let mut branch = Command::new(binary);
+    branch.args(["machine", "branch", "--from", machine]).args([
+        "--name",
+        &snapshot,
+        "--branchable",
+    ]);
+    run_checked(branch, "smolvm machine branch (snapshot)").await?;
+    let manifest = BranchManifest {
+        key: key.to_owned(),
+        machine: snapshot,
+    };
+    Ok(SnapshotPayload {
+        format: SnapshotFormat::SmolvmBranchRef,
+        bytes: bytes::Bytes::from(serde_json::to_vec(&manifest)?),
+    })
+}
+
+/// Stopped branch bases awaiting their last dependent, one name per line.
+#[cfg(unix)]
+mod retired_branches {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+
+    use anyhow::{Context, Result};
+
+    fn path(root: &Path) -> PathBuf {
+        root.with_extension("retired-branches")
+    }
+
+    pub(super) fn list(root: &Path) -> Result<Vec<String>> {
+        match std::fs::read_to_string(path(root)) {
+            Ok(text) => Ok(text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error).context("read retired smolvm branches"),
+        }
+    }
+
+    pub(super) fn add(root: &Path, machine: &str) -> Result<()> {
+        if let Some(parent) = path(root).parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path(root))
+            .context("open retired smolvm branches")?;
+        writeln!(file, "{machine}")?;
+        Ok(())
+    }
+
+    pub(super) fn replace(root: &Path, machines: &[String]) -> Result<()> {
+        let target = path(root);
+        if machines.is_empty() {
+            return match std::fs::remove_file(&target) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error).context("remove retired smolvm branches"),
+            };
+        }
+        let mut body = machines.join("\n");
+        body.push('\n');
+        std::fs::write(&target, body).context("write retired smolvm branches")
     }
 }
 
@@ -1590,6 +1927,10 @@ mod cli_says {
     pub fn no_such_machine(stderr: &str) -> bool {
         stderr.contains("not found") || stderr.contains("does not exist")
     }
+
+    pub fn is_branch_base(stderr: &str) -> bool {
+        stderr.contains("fork base for") || stderr.contains("branch base for")
+    }
 }
 
 /// The version reported by `smolvm --version`; `None` means "assume old".
@@ -1724,6 +2065,7 @@ mod tests {
             snapshot_root: snapshot_dir(),
             #[cfg(unix)]
             filesystem_snapshots: false,
+            branches: false,
             id: "smolvm:test".into(),
             binary: PathBuf::from("smolvm"),
             machine: "test".into(),
@@ -2446,6 +2788,7 @@ esac"#,
             Arc::new(SmolvmWarmHandle {
                 snapshot_root: root.path().join("captures"),
                 filesystem_snapshots: true,
+                branches: false,
                 id: "smolvm:test".into(),
                 binary: binary.clone(),
                 machine: "test".into(),

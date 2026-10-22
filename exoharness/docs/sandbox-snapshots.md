@@ -132,6 +132,7 @@ format name includes a version when its wire representation can evolve.
 | `sprites-ref`                   | Sprites                           | Sprites                            |
 | `smolvm-machine-pack`           | SmolVM (legacy)                   | SmolVM                             |
 | `smolvm-filesystem-ref-v1`      | SmolVM                            | SmolVM                             |
+| `smolvm-branch-ref-v1`          | SmolVM (full, live branch)        | SmolVM                             |
 | `firecracker-host-ref`          | Firecracker                       | Firecracker, Firecracker-over-Lima |
 | `firecracker-filesystem-ref-v1` | Firecracker                       | Firecracker, Firecracker-over-Lima |
 | `workspace-chunks-v1`           | reserved for workspace durability | none yet                           |
