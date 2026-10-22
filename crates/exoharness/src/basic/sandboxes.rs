@@ -345,8 +345,9 @@ impl<'a> BasicScopedSandboxHandle<'a> {
     ) -> Result<SandboxId> {
         self.harness.check(self.owner).await?;
         self.ensure_full_sandbox_scope("restore_sandbox")?;
-        let payload =
-            load_snapshot_payload(self.harness, &self.owner_dir, request.snapshot_id).await?;
+        let (payload, source_provider) =
+            load_snapshot_payload_with_provider(self.harness, &self.owner_dir, request.snapshot_id)
+                .await?;
         let prepared = prepare_sandbox_request(self.harness, self.owner, request.sandbox).await?;
         let sandbox_id = format!("sandbox-{}", Uuid7::now());
         let mut sandbox = prepared.stored_sandbox(sandbox_id.clone());
@@ -356,7 +357,14 @@ impl<'a> BasicScopedSandboxHandle<'a> {
             .inner
             .sandbox_backend_for_provider(sandbox.provider.clone())
             .await?;
-        ensure_snapshot_format_supported(backend.as_ref(), &sandbox.provider, &payload.format)?;
+        let payload = migrate_snapshot_for_backend(
+            self.harness,
+            source_provider.as_ref(),
+            backend.as_ref(),
+            &sandbox.provider,
+            payload,
+        )
+        .await?;
         let sandbox_handle = backend
             .acquire_from_snapshot(
                 sandbox_request(self.owner, &sandbox_id, &sandbox, None),
@@ -1526,7 +1534,14 @@ pub(super) async fn start_sandbox_side_effect(
         .inner
         .sandbox_backend_for_provider(sandbox.provider.clone())
         .await?;
-    ensure_snapshot_format_supported(backend.as_ref(), &sandbox.provider, &payload.format)?;
+    let payload = migrate_snapshot_for_backend(
+        harness,
+        Some(&previous_provider),
+        backend.as_ref(),
+        &sandbox.provider,
+        payload,
+    )
+    .await?;
 
     // Two orders, chosen by whether the restore changes providers:
     //   - Cross-provider (teleport): make-before-break. Boot the new sandbox
@@ -1674,6 +1689,19 @@ pub(super) async fn load_snapshot_payload(
     owner_dir: &Path,
     snapshot_id: SnapshotId,
 ) -> Result<SnapshotPayload> {
+    load_snapshot_payload_with_provider(harness, owner_dir, snapshot_id)
+        .await
+        .map(|(payload, _)| payload)
+}
+
+/// Load a snapshot payload together with the provider that captured it, so a
+/// cross-provider restore can ask the source backend to export a portable
+/// format when the target cannot consume the payload directly.
+pub(super) async fn load_snapshot_payload_with_provider(
+    harness: &BasicExoHarness,
+    owner_dir: &Path,
+    snapshot_id: SnapshotId,
+) -> Result<(SnapshotPayload, Option<SandboxProvider>)> {
     // Load immutable snapshot metadata without holding the harness write lock;
     // payloads may live in a remote object store.
     let snapshot_dir = owner_dir.join("snapshots").join(snapshot_id.to_string());
@@ -1688,10 +1716,58 @@ pub(super) async fn load_snapshot_payload(
         .await
         .with_context(|| format!("loading snapshot payload for {snapshot_id}"))?
         .with_context(|| format!("snapshot {snapshot_id} has no payload"))?;
-    Ok(SnapshotPayload {
-        format: manifest.format,
-        bytes: Bytes::from(payload_bytes),
-    })
+    Ok((
+        SnapshotPayload {
+            format: manifest.format,
+            bytes: Bytes::from(payload_bytes),
+        },
+        manifest.provider,
+    ))
+}
+
+/// Make `payload` restorable on `target`. Already-supported formats pass
+/// through unchanged. Otherwise — cross-provider migration — ask the source
+/// backend to export a portable format (e.g. a `daytona-ref` snapshot exported
+/// as a `docker-image-tar` for the local Docker backend) before falling back
+/// to the unsupported-format error.
+async fn migrate_snapshot_for_backend(
+    harness: &BasicExoHarness,
+    source_provider: Option<&SandboxProvider>,
+    target: &dyn ManagedSandboxBackend,
+    target_provider: &SandboxProvider,
+    payload: SnapshotPayload,
+) -> Result<SnapshotPayload> {
+    if target
+        .consumable_snapshot_formats()
+        .contains(&payload.format)
+    {
+        return Ok(payload);
+    }
+    let format = payload.format.clone();
+    if let Some(source_provider) = source_provider {
+        let source = harness
+            .inner
+            .sandbox_backend_for_provider(source_provider.clone())
+            .await;
+        if let Ok(source) = source {
+            match source.export_portable_snapshot(payload).await {
+                Ok(portable) => {
+                    ensure_snapshot_format_supported(target, target_provider, &portable.format)?;
+                    return Ok(portable);
+                }
+                Err(export_error) => {
+                    tracing::debug!(
+                        %format,
+                        source = %source_provider,
+                        error = %export_error,
+                        "portable snapshot export unavailable for cross-provider restore"
+                    );
+                }
+            }
+        }
+    }
+    ensure_snapshot_format_supported(target, target_provider, &format)?;
+    unreachable!("ensure_snapshot_format_supported bails for unsupported formats")
 }
 
 async fn snapshot_payload_bytes_if_exists(

@@ -7,7 +7,9 @@
 //! snapshot in Daytona's registry, not the bytes themselves. A
 //! [`SnapshotFormat::DockerImageTar`] payload (the Docker backend's snapshot
 //! format) can also be restored here, which is how a sandbox teleports from
-//! local Docker up to Daytona.
+//! local Docker up to Daytona. The reverse leg works too: `export_portable_snapshot`
+//! pulls a Daytona snapshot's image back down as a `docker save` tarball, so a
+//! Daytona sandbox can teleport onto any OCI-speaking backend (local Docker).
 
 const DEFAULT_DAYTONA_IMAGE: &str = "daytonaio/sandbox:0.8.0";
 
@@ -314,6 +316,39 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         _kind: crate::SnapshotKind,
     ) -> Result<SnapshotPayload> {
         bail!("Daytona sandbox backend does not support suspension")
+    }
+
+    async fn export_portable_snapshot(&self, payload: SnapshotPayload) -> Result<SnapshotPayload> {
+        ensure!(
+            payload.format == SnapshotFormat::DaytonaRef,
+            "the Daytona backend can only export its own {} snapshots, not {}",
+            SnapshotFormat::DaytonaRef,
+            payload.format
+        );
+        let manifest: DaytonaSnapshotManifest =
+            serde_json::from_slice(&payload.bytes).context("decoding Daytona snapshot manifest")?;
+        let handle = self.handle_backend();
+        let info = handle
+            .get_snapshot(&manifest.snapshot_name)
+            .await?
+            .with_context(|| {
+                format!(
+                    "Daytona snapshot {} disappeared before it could be exported",
+                    manifest.snapshot_name
+                )
+            })?;
+        let image_name = info
+            .image_name
+            .filter(|name| !name.trim().is_empty())
+            .with_context(|| {
+                format!(
+                    "Daytona snapshot {} exposes no imageName to export; \
+                     only snapshots registered from an image can migrate to \
+                     a Docker-compatible backend",
+                    manifest.snapshot_name
+                )
+            })?;
+        export_image_as_docker_image_tar(&handle, &image_name).await
     }
 
     async fn acquire_from_snapshot(
@@ -1195,11 +1230,7 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
             String::from_utf8_lossy(&load.stderr)
         );
     }
-    let image_ref = String::from_utf8_lossy(&load.stdout)
-        .lines()
-        .find_map(|line| line.strip_prefix("Loaded image: ").map(str::trim))
-        .map(str::to_string)
-        .context("could not parse an image ref from `docker load` output")?;
+    let image_ref = parse_docker_load_image_ref(&String::from_utf8_lossy(&load.stdout))?;
 
     let push_access = backend.get_registry_push_access().await?;
     let remote_ref = format!(
@@ -1218,7 +1249,18 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
         );
     }
 
-    let push_result = docker_push_with_credentials(&push_access, &remote_ref).await;
+    // The temp docker config dir keeps the (1-hour, Daytona-issued) registry
+    // credentials out of the host user's docker config; removed after the push.
+    let config_dir = std::env::temp_dir().join(format!("exo-docker-config-{}", Uuid::new_v4()));
+    tokio::fs::create_dir_all(&config_dir)
+        .await
+        .with_context(|| format!("creating temp docker config {}", config_dir.display()))?;
+    let push_result = async {
+        docker_login_with_credentials(&config_dir, &push_access).await?;
+        docker_push_with_credentials(&config_dir, &remote_ref).await
+    }
+    .await;
+    let _ = tokio::fs::remove_dir_all(&config_dir).await;
     for image in [&image_ref, &remote_ref] {
         let _ = tokio::process::Command::new("docker")
             .args(["image", "rm", image])
@@ -1234,76 +1276,157 @@ async fn import_docker_image_tar(backend: &DaytonaBackendHandle, tar: &[u8]) -> 
     Ok(snapshot_name)
 }
 
-/// `docker login` + `docker push` against an isolated `--config` directory:
-/// the temp registry credentials are fed over stdin and written only to the
-/// throwaway config, never to the host user's docker config or process argv.
-async fn docker_push_with_credentials(
+/// `docker login` against an isolated `--config` directory: the registry
+/// credentials are fed over stdin and written only to the throwaway config,
+/// never to the host user's docker config or process argv. The caller owns the
+/// config-dir lifecycle.
+async fn docker_login_with_credentials(
+    config_dir: &std::path::Path,
     push_access: &DaytonaRegistryPushAccess,
+) -> Result<()> {
+    use tokio::process::Command;
+
+    let mut login = Command::new("docker")
+        .arg("--config")
+        .arg(config_dir)
+        .args([
+            "login",
+            &push_access.registry_url,
+            "--username",
+            &push_access.username,
+            "--password-stdin",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("running `docker login` for the Daytona transient registry")?;
+    let mut stdin = login
+        .stdin
+        .take()
+        .context("opening stdin for `docker login`")?;
+    stdin
+        .write_all(push_access.secret.as_bytes())
+        .await
+        .context("writing registry credentials to `docker login`")?;
+    drop(stdin);
+    let login = login.wait_with_output().await.context("`docker login`")?;
+    if !login.status.success() {
+        bail!(
+            "docker login to {} failed: {}",
+            push_access.registry_url,
+            String::from_utf8_lossy(&login.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// `docker push` against an isolated `--config` directory prepared by
+/// [`docker_login_with_credentials`].
+async fn docker_push_with_credentials(
+    config_dir: &std::path::Path,
     remote_ref: &str,
 ) -> Result<()> {
     use tokio::process::Command;
 
-    // We create a temp docker config dir so that the credentials are not written to the host
-    // user's docker config. The temp dir is removed after the push. Note, these are the (1-hour
-    // temporary) credentials provided by the Daytona backend, not the host user's docker credentials.
+    let push = Command::new("docker")
+        .arg("--config")
+        .arg(config_dir)
+        .args(["push", remote_ref])
+        .output()
+        .await
+        .context("running `docker push` to the Daytona transient registry")?;
+    if !push.status.success() {
+        bail!(
+            "docker push {remote_ref} failed: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// `docker pull` against an isolated `--config` directory prepared by
+/// [`docker_login_with_credentials`].
+async fn docker_pull_with_credentials(config_dir: &std::path::Path, image: &str) -> Result<()> {
+    use tokio::process::Command;
+
+    let pull = Command::new("docker")
+        .arg("--config")
+        .arg(config_dir)
+        .args(["pull", image])
+        .output()
+        .await
+        .context("running `docker pull` from the Daytona transient registry")?;
+    if !pull.status.success() {
+        bail!(
+            "docker pull {image} failed: {}",
+            String::from_utf8_lossy(&pull.stderr)
+        );
+    }
+    Ok(())
+}
+
+/// Pull the snapshot's image from Daytona's transient registry with the same
+/// short-lived robot-account credentials the push bridge uses, then capture it
+/// as a `docker save` tarball — the portable format the local Docker backend
+/// (and any OCI-speaking backend) restores from. Disk/filesystem state only:
+/// not CRIU (no memory/process state).
+async fn export_image_as_docker_image_tar(
+    backend: &DaytonaBackendHandle,
+    image_name: &str,
+) -> Result<SnapshotPayload> {
+    let access = backend.get_registry_push_access().await?;
     let config_dir = std::env::temp_dir().join(format!("exo-docker-config-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&config_dir)
         .await
         .with_context(|| format!("creating temp docker config {}", config_dir.display()))?;
 
     let result = async {
-        let mut login = Command::new("docker")
-            .arg("--config")
-            .arg(&config_dir)
-            .args([
-                "login",
-                &push_access.registry_url,
-                "--username",
-                &push_access.username,
-                "--password-stdin",
-            ])
-            .stdin(std::process::Stdio::piped())
+        docker_login_with_credentials(&config_dir, &access).await?;
+        docker_pull_with_credentials(&config_dir, image_name).await?;
+
+        let save = tokio::process::Command::new("docker")
+            .args(["save", image_name])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .spawn()
-            .context("running `docker login` for the Daytona transient registry")?;
-        let mut stdin = login
-            .stdin
-            .take()
-            .context("opening stdin for `docker login`")?;
-        stdin
-            .write_all(push_access.secret.as_bytes())
-            .await
-            .context("writing registry credentials to `docker login`")?;
-        drop(stdin);
-        let login = login.wait_with_output().await.context("`docker login`")?;
-        if !login.status.success() {
-            bail!(
-                "docker login to {} failed: {}",
-                push_access.registry_url,
-                String::from_utf8_lossy(&login.stderr)
-            );
-        }
-
-        let push = Command::new("docker")
-            .arg("--config")
-            .arg(&config_dir)
-            .args(["push", remote_ref])
             .output()
             .await
-            .context("running `docker push` to the Daytona transient registry")?;
-        if !push.status.success() {
+            .context("running `docker save`")?;
+        if !save.status.success() {
             bail!(
-                "docker push {remote_ref} failed: {}",
-                String::from_utf8_lossy(&push.stderr)
+                "docker save {image_name} failed: {}",
+                String::from_utf8_lossy(&save.stderr)
             );
         }
-        Ok(())
+        Ok(SnapshotPayload {
+            format: SnapshotFormat::DockerImageTar,
+            bytes: Bytes::from(save.stdout),
+        })
     }
     .await;
 
+    let _ = tokio::process::Command::new("docker")
+        .args(["image", "rm", image_name])
+        .output()
+        .await;
     let _ = tokio::fs::remove_dir_all(&config_dir).await;
     result
+}
+
+/// Parse the named-tag image reference out of `docker load` output
+/// (`Loaded image: <ref>`); falls back to the bare image-ID line.
+fn parse_docker_load_image_ref(stdout: &str) -> Result<String> {
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Loaded image: ") {
+            return Ok(rest.trim().to_string());
+        }
+    }
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Loaded image ID: ") {
+            return Ok(rest.trim().to_string());
+        }
+    }
+    bail!("docker load completed but no image reference found in output: {stdout}")
 }
 
 fn reject_unsupported_mounts(request: &SandboxRequest) -> Result<()> {
@@ -1577,6 +1700,11 @@ struct DaytonaSnapshotRequest {
 struct DaytonaSnapshotInfo {
     #[serde(default)]
     state: String,
+    /// The transient-registry image the snapshot was built from; this is what
+    /// the export bridge pulls to produce a portable `docker save` tarball.
+    /// Absent (or empty) for snapshots Daytona created by other means.
+    #[serde(default, rename = "imageName")]
+    image_name: Option<String>,
 }
 
 /// Temporary robot-account credentials for the transient registry; expire
@@ -1660,6 +1788,8 @@ impl DaytonaSandbox {
 #[cfg(test)]
 mod tests {
     use super::valid_utf8_prefix_len;
+    use super::*;
+    use futures::FutureExt as _;
 
     #[test]
     fn utf8_prefix_waits_for_split_multibyte_character() {
@@ -1676,6 +1806,73 @@ mod tests {
         let error = valid_utf8_prefix_len(&[0xff]).unwrap_err();
         assert!(
             format!("{error:#}").contains("invalid UTF-8"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn snapshot_info_decodes_image_name_for_export() {
+        let info: DaytonaSnapshotInfo = serde_json::from_str(
+            r#"{"state":"active","imageName":"registry.example.com/project/exo-bridge-abc:1"}"#,
+        )
+        .expect("decode snapshot info");
+        assert_eq!(info.state, "active");
+        assert_eq!(
+            info.image_name.as_deref(),
+            Some("registry.example.com/project/exo-bridge-abc:1")
+        );
+    }
+
+    #[test]
+    fn snapshot_info_tolerates_missing_image_name() {
+        let info: DaytonaSnapshotInfo =
+            serde_json::from_str(r#"{"state":"active"}"#).expect("decode snapshot info");
+        assert_eq!(info.image_name, None);
+    }
+
+    #[test]
+    fn export_rejects_non_daytona_ref_payloads() {
+        let backend = DaytonaSandboxBackend::new(DaytonaConfig {
+            api_key: "test-key".into(),
+            api_url: "http://127.0.0.1:1/api".into(),
+            toolbox_url: "http://127.0.0.1:1".into(),
+            target: None,
+            organization_id: None,
+        })
+        .expect("backend");
+        let error = ManagedSandboxBackend::export_portable_snapshot(
+            &backend,
+            SnapshotPayload {
+                format: SnapshotFormat::DockerImageTar,
+                bytes: Bytes::new(),
+            },
+        )
+        .now_or_never()
+        .expect("format rejection completes without awaiting")
+        .expect_err("non-DaytonaRef payloads must be rejected");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("daytona-ref"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn docker_load_image_ref_parses_named_tag_and_image_id() {
+        let named = super::parse_docker_load_image_ref(
+            "Loaded image: exo-snap-abc:latest\nLoaded image ID: sha256:deadbeef\n",
+        )
+        .expect("parse named tag");
+        assert_eq!(named, "exo-snap-abc:latest");
+
+        let image_id = super::parse_docker_load_image_ref("Loaded image ID: sha256:deadbeef\n")
+            .expect("parse image id");
+        assert_eq!(image_id, "sha256:deadbeef");
+
+        let error = super::parse_docker_load_image_ref("nothing useful\n")
+            .expect_err("unparseable output must fail");
+        assert!(
+            format!("{error:#}").contains("no image reference"),
             "unexpected error: {error:#}"
         );
     }

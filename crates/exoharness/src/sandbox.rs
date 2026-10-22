@@ -388,6 +388,16 @@ pub trait ManagedSandboxBackend: Send + Sync {
     /// Formats this backend can consume in `acquire_from_snapshot`.
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat];
 
+    /// Convert a backend-private snapshot reference into a portable payload
+    /// (e.g. [`SnapshotFormat::DockerImageTar`]) that other backends can
+    /// restore, so a sandbox can migrate between providers. Only
+    /// reference-style payloads need exporting: tarball and chunk payloads
+    /// are already portable, and backends that cannot export simply keep the
+    /// default, which fails the restore with the unsupported-format error.
+    async fn export_portable_snapshot(&self, _payload: SnapshotPayload) -> Result<SnapshotPayload> {
+        bail!("sandbox backend cannot export snapshots to a portable format")
+    }
+
     async fn resolve_image(&self, _image: &str) -> Result<ResolvedSandboxImage> {
         bail!("sandbox backend does not expose image configuration")
     }

@@ -3232,3 +3232,274 @@ async fn local_process_sandbox_rejects_disabled_networking() {
             .contains("policy.networking.disabled")
     );
 }
+
+/// Cross-provider migration (issue #19): a snapshot captured as a
+/// backend-private reference (`daytona-ref`) is restored on a provider that
+/// only consumes the portable `docker-image-tar` format. The harness routes
+/// the payload through the source backend's `export_portable_snapshot` before
+/// handing it to the target.
+struct SnapshotMigrationSourceBackend {
+    exports: Arc<AsyncMutex<Vec<SnapshotFormat>>>,
+}
+
+impl SnapshotMigrationSourceBackend {
+    fn new() -> (Self, Arc<AsyncMutex<Vec<SnapshotFormat>>>) {
+        let exports = Arc::new(AsyncMutex::new(Vec::new()));
+        (
+            Self {
+                exports: Arc::clone(&exports),
+            },
+            exports,
+        )
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for SnapshotMigrationSourceBackend {
+    fn is_local(&self) -> bool {
+        false
+    }
+
+    fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
+        static FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::DaytonaRef];
+        &FORMATS
+    }
+
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(SnapshotMigrationSourceHandle))
+    }
+
+    async fn attach(
+        &self,
+        _request: SandboxRequest,
+        _attachment: SandboxAttachment,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("snapshot-migration source backend does not support attachment")
+    }
+
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> crate::Result<SnapshotPayload> {
+        bail!("snapshot-migration source backend does not support suspension")
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("snapshot-migration source backend does not support restore")
+    }
+
+    async fn export_portable_snapshot(
+        &self,
+        payload: SnapshotPayload,
+    ) -> crate::Result<SnapshotPayload> {
+        self.exports.lock().await.push(payload.format.clone());
+        Ok(SnapshotPayload {
+            format: SnapshotFormat::DockerImageTar,
+            bytes: bytes::Bytes::from_static(b"exported-image-tar"),
+        })
+    }
+}
+
+struct SnapshotMigrationSourceHandle;
+
+#[async_trait]
+impl ManagedSandboxHandle for SnapshotMigrationSourceHandle {
+    fn id(&self) -> &str {
+        "snapshot-migration-source"
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("snapshot-migration source handle does not support exec")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        bail!("snapshot-migration source handle does not support start_process")
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn detach(&self) -> crate::Result<SandboxAttachment> {
+        bail!("snapshot-migration source handle does not support detachment")
+    }
+
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
+        // The shape of a Daytona snapshot: a JSON manifest naming the
+        // provider-side snapshot, not the bytes themselves.
+        Ok(SnapshotPayload {
+            format: SnapshotFormat::DaytonaRef,
+            bytes: bytes::Bytes::from_static(br#"{"snapshot_name":"exo-snap-test"}"#),
+        })
+    }
+}
+
+/// Restores the migration test's target backend received: (format, bytes).
+type RestoredSnapshots = Arc<AsyncMutex<Vec<(SnapshotFormat, Vec<u8>)>>>;
+
+/// Stand-in for the local Docker backend: consumes only `docker-image-tar`
+/// payloads and records the bytes it is asked to restore from.
+struct SnapshotMigrationTargetBackend {
+    restored: RestoredSnapshots,
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for SnapshotMigrationTargetBackend {
+    fn is_local(&self) -> bool {
+        true
+    }
+
+    fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
+        static FORMATS: [SnapshotFormat; 1] = [SnapshotFormat::DockerImageTar];
+        &FORMATS
+    }
+
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("snapshot-migration target backend does not support acquire")
+    }
+
+    async fn attach(
+        &self,
+        _request: SandboxRequest,
+        _attachment: SandboxAttachment,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("snapshot-migration target backend does not support attachment")
+    }
+
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> crate::Result<SnapshotPayload> {
+        bail!("snapshot-migration target backend does not support suspension")
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        self.restored
+            .lock()
+            .await
+            .push((payload.format, payload.bytes.to_vec()));
+        Ok(Arc::new(SnapshotMigrationTargetHandle))
+    }
+}
+
+struct SnapshotMigrationTargetHandle;
+
+#[async_trait]
+impl ManagedSandboxHandle for SnapshotMigrationTargetHandle {
+    fn id(&self) -> &str {
+        "snapshot-migration-target"
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("snapshot-migration target handle does not support exec")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        bail!("snapshot-migration target handle does not support start_process")
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn detach(&self) -> crate::Result<SandboxAttachment> {
+        bail!("snapshot-migration target handle does not support detachment")
+    }
+
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
+        bail!("snapshot-migration target handle does not support snapshots")
+    }
+}
+
+fn snapshot_migration_create_request(provider: SandboxProvider) -> CreateSandboxRequest {
+    CreateSandboxRequest {
+        tcp_ports: vec![],
+        name: None,
+        provider,
+        image: "migration-image".to_string(),
+        resources: Default::default(),
+        default_workdir: Some("/".to_string()),
+        file_system_mounts: None,
+        durable_file_systems: None,
+        policy: None,
+        enable_networking: Some(true),
+        idle_seconds: Some(60),
+    }
+}
+
+#[tokio::test]
+async fn cross_provider_restore_exports_the_snapshot_through_the_source_backend()
+-> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let (source, exports) = SnapshotMigrationSourceBackend::new();
+    let target = SnapshotMigrationTargetBackend {
+        restored: Arc::new(AsyncMutex::new(Vec::new())),
+    };
+    let restored = Arc::clone(&target.restored);
+    let mut config = local_test_config(temp.path());
+    config.sandbox_backends = vec![
+        SandboxBackendRegistration::from_backend(SandboxProvider::Daytona, Arc::new(source)),
+        SandboxBackendRegistration::from_backend(SandboxProvider::Docker, Arc::new(target)),
+    ];
+    config.sandbox_default = SandboxProvider::Daytona;
+    let harness = BasicExoHarness::new(config).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "migration".into(),
+            name: "Migration".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let thread = agent.new_conversation(Default::default()).await?;
+
+    // Capture a snapshot on the "Daytona" source backend.
+    let sandbox_id = thread
+        .create_sandbox(snapshot_migration_create_request(SandboxProvider::Daytona))
+        .await?;
+    let snapshot_id = thread
+        .snapshot_sandbox(sandbox_id.clone(), crate::SnapshotKind::Filesystem)
+        .await?;
+
+    // Teleport to the "Docker" target: the harness must ask the source
+    // backend for a portable export before the restore.
+    thread
+        .start_sandbox(StartSandboxRequest {
+            id: sandbox_id.clone(),
+            snapshot_id: Some(snapshot_id),
+            idle_seconds: None,
+            provider: Some(SandboxProvider::Docker),
+        })
+        .await?;
+
+    assert_eq!(
+        exports.lock().await.as_slice(),
+        &[SnapshotFormat::DaytonaRef],
+        "the source backend should export exactly once, from the DaytonaRef payload"
+    );
+    let restored = restored.lock().await;
+    assert_eq!(
+        restored.as_slice(),
+        &[(
+            SnapshotFormat::DockerImageTar,
+            b"exported-image-tar".to_vec()
+        )],
+        "the target backend should receive the exported portable payload"
+    );
+    Ok(())
+}
