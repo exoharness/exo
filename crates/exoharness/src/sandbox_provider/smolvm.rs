@@ -8,8 +8,8 @@
 //! signal the Docker backend already uses for warm reuse: warm holds a named
 //! machine and can snapshot, one-shot boots an ephemeral VM per exec and leaves
 //! durable state to the host mounts.
-//! Warm machines are stopped by the owning CLI session or explicit harness
-//! lifecycle operations, never by an independent backend idle timer.
+//! Warm handles report idle expiry through `is_running`, like Firecracker.
+//! Owners stop expired machines; the backend has no independent shutdown timer.
 //!
 //! Snapshots are bytes-by-reference like E2B/Daytona: the payload is a manifest
 //! pointing at a `.smolmachine` pack on disk.
@@ -28,8 +28,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, TcpListener};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
@@ -163,6 +163,7 @@ pub struct SmolvmSandboxBackend {
     /// TCP access does not acquire lifecycle ownership or egress credentials.
     /// One inspection per sandbox, shared even across concurrent connections.
     tcp_forwards: Arc<Mutex<HashMap<String, TcpPortsCell>>>,
+    idle_leases: Arc<Mutex<HashMap<String, Weak<Mutex<Instant>>>>>,
     egress: Arc<EgressRuntime<SmolvmWarmHandle, SmolvmProxy>>,
 }
 
@@ -267,6 +268,7 @@ impl SmolvmSandboxBackend {
             image_cache: config.image_cache,
             capabilities: Arc::new(OnceCell::new()),
             tcp_forwards: Arc::new(Mutex::new(HashMap::new())),
+            idle_leases: Arc::new(Mutex::new(HashMap::new())),
             egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
         }
     }
@@ -582,6 +584,7 @@ impl SmolvmSandboxBackend {
                 request,
                 egress: None,
                 host_ports,
+                last_used: self.idle_lease(name),
             };
             if let Some(egress) = egress {
                 egress.initialize_trust(&handle).await?;
@@ -598,6 +601,20 @@ impl SmolvmSandboxBackend {
             };
         }
         started
+    }
+
+    fn idle_lease(&self, machine: &str) -> Arc<Mutex<Instant>> {
+        let mut leases = self
+            .idle_leases
+            .lock()
+            .expect("smolvm idle leases poisoned");
+        leases.retain(|_, lease| lease.strong_count() > 0);
+        if let Some(lease) = leases.get(machine).and_then(Weak::upgrade) {
+            return lease;
+        }
+        let lease = Arc::new(Mutex::new(Instant::now()));
+        leases.insert(machine.to_owned(), Arc::downgrade(&lease));
+        lease
     }
 
     #[cfg(unix)]
@@ -720,6 +737,7 @@ impl SmolvmSandboxBackend {
             .await?;
         }
         let handle = handle?;
+        handle.touch();
         self.invalidate_tcp_forwards(&request.sandbox_id);
         Ok(crate::with_process_management(handle))
     }
@@ -1028,6 +1046,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 self.delete_machine_if_present(&machine),
             )
             .await?;
+        handle.touch();
         self.invalidate_tcp_forwards(&request.sandbox_id);
         Ok(crate::with_process_management(handle))
     }
@@ -1195,6 +1214,7 @@ struct SmolvmWarmHandle {
     request: SandboxRequest,
     egress: Option<Arc<SandboxEgress<SmolvmProxy>>>,
     host_ports: BTreeMap<u16, u16>,
+    last_used: Arc<Mutex<Instant>>,
 }
 
 async fn connect_published_tcp(
@@ -1213,6 +1233,10 @@ async fn connect_published_tcp(
 }
 
 impl SmolvmWarmHandle {
+    fn touch(&self) {
+        *self.last_used.lock().expect("smolvm idle lease poisoned") = Instant::now();
+    }
+
     fn build(&self, command: &SandboxCommand, cwd: &str, interactive: bool, tty: bool) -> Command {
         let mut process = Command::new(&self.binary);
         process
@@ -1268,7 +1292,9 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
         let process = self.build(command, &cwd, false, false);
-        run_command(process, &with_backstop_timeout(command), cwd).await
+        let result = run_command(process, &with_backstop_timeout(command), cwd).await;
+        self.touch();
+        result
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
@@ -1276,7 +1302,9 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
         let process = self.build(command, &cwd, true, false);
-        spawn_sandbox_process(process, command).await
+        let process = spawn_sandbox_process(process, command).await?;
+        self.touch();
+        Ok(process)
     }
 
     #[cfg(unix)]
@@ -1287,12 +1315,20 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
     ) -> Result<crate::SandboxTerminalParts> {
         let command = SandboxEgress::prepare_command(self.egress.as_deref(), command)?;
         let cwd = resolve_cwd(&command, &self.request.spec);
-        terminal::spawn(self.build(&command, &cwd, true, true), size)
+        let terminal = terminal::spawn(self.build(&command, &cwd, true, true), size)?;
+        self.touch();
+        Ok(terminal)
     }
 
     async fn is_running(&self) -> Result<Option<bool>> {
-        if self.egress.is_none() {
-            return Ok(None);
+        if self.request.lifecycle.idle_ttl.is_some_and(|ttl| {
+            self.last_used
+                .lock()
+                .expect("smolvm idle lease poisoned")
+                .elapsed()
+                >= ttl
+        }) {
+            return Ok(Some(false));
         }
         let mut status = Command::new(&self.binary);
         status.args(["machine", "status", "--name", &self.machine, "--json"]);
@@ -1682,6 +1718,242 @@ mod tests {
     use MachineSource::Image;
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn warm_machine_idle_ttl_expires_without_polling_the_vm() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let binary = root.path().join("smolvm");
+        write_test_binary(
+            &binary,
+            r#"
+case "$1 $2" in
+  '--version ') printf 'smolvm 1.20.0\n';;
+  'machine status') touch "$(dirname "$0")/polled"; printf '{"state":"running"}\n';;
+esac"#,
+        );
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(binary),
+            mode: SmolvmExecutionMode::Warm,
+            snapshot_root: Some(root.path().join("captures")),
+            ..Default::default()
+        });
+        let handle = backend
+            .ensure_machine_started(
+                "test",
+                test_request(Some(Duration::ZERO)),
+                Image("alpine"),
+                None,
+            )
+            .await?;
+        assert_eq!(handle.is_running().await?, Some(false));
+        assert!(!root.path().join("polled").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn warm_idle_lease_tracks_operations_without_tcp_or_poll_renewals() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let binary = root.path().join("smolvm");
+        write_test_binary(
+            &binary,
+            r#"
+case "$1 $2" in
+  '--version ') printf 'smolvm 1.20.0\n';;
+  'machine status') printf '{"state":"running"}\n';;
+  'machine exec') printf 'ready\n';;
+esac"#,
+        );
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(binary),
+            snapshot_root: Some(root.path().join("captures")),
+            ..Default::default()
+        });
+        let mut handle = backend
+            .ensure_machine_started(
+                "test",
+                test_request(Some(Duration::from_secs(60))),
+                Image("alpine"),
+                None,
+            )
+            .await?;
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+        handle
+            .host_ports
+            .insert(20_000, listener.local_addr()?.port());
+        let last_used = Instant::now() - Duration::from_secs(30);
+        *handle.last_used.lock().unwrap() = last_used;
+        assert_eq!(handle.is_running().await?, Some(true));
+        assert_eq!(handle.is_running().await?, Some(true));
+        let _connection = handle.connect_tcp(20_000).await?;
+        let _server = listener.accept().await?;
+        assert_eq!(*handle.last_used.lock().unwrap(), last_used);
+
+        let expired = Instant::now() - Duration::from_secs(60);
+        *handle.last_used.lock().unwrap() = expired;
+        assert_eq!(handle.is_running().await?, Some(false));
+        let clone = handle.clone();
+        let command = SandboxCommand {
+            argv: vec!["true".into()],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: None,
+        };
+        assert!(clone.exec(&command).await?.ok);
+        assert_eq!(handle.is_running().await?, Some(true));
+
+        *handle.last_used.lock().unwrap() = expired;
+        let process = handle.start_process(&command).await?;
+        assert_eq!(clone.is_running().await?, Some(true));
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), process.wait).await??,
+            0
+        );
+
+        *handle.last_used.lock().unwrap() = expired;
+        let terminal = handle
+            .start_terminal(&command, crate::SandboxTerminalSize { rows: 24, cols: 80 })
+            .await?;
+        assert_eq!(clone.is_running().await?, Some(true));
+        drop(terminal);
+
+        handle.request.lifecycle.idle_ttl = None;
+        *handle.last_used.lock().unwrap() = expired;
+        assert_eq!(handle.is_running().await?, Some(true));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires SmolVM and a Node.js EXO_SMOLVM_TEST_IMAGE"]
+    async fn live_idle_expiry_with_an_open_exec_server_connection() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let root = tempfile::tempdir()?;
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            mode: SmolvmExecutionMode::Warm,
+            snapshot_root: Some(root.path().join("captures")),
+            ..Default::default()
+        });
+        let mut request = test_request(Some(Duration::from_secs(5)));
+        request.sandbox_id = format!("idle-lease-test-{}", crate::Uuid7::now());
+        request.spec.image = std::env::var("EXO_SMOLVM_TEST_IMAGE")?;
+        request.spec.tcp_ports = vec![25_023];
+        let result = async {
+            let handle = backend.acquire(request.clone()).await?;
+            assert_eq!(handle.is_running().await?, Some(true));
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let process = handle
+                .start_process(&SandboxCommand {
+                    argv: vec![
+                        "node".into(),
+                        "-e".into(),
+                        "require('net').createServer(s=>s.pipe(s)).listen(25023,'0.0.0.0')".into(),
+                    ],
+                    env: HashMap::new(),
+                    display_argv: None,
+                    cwd: None,
+                    timeout: None,
+                })
+                .await?;
+            let mut connection = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let attempt = async {
+                        let mut connection = handle
+                            .connect_tcp(25_023)
+                            .await?
+                            .context("test VM did not expose its TCP port")?;
+                        connection.write_all(b"ready").await?;
+                        connection.flush().await?;
+                        let mut echoed = [0; 5];
+                        connection.read_exact(&mut echoed).await?;
+                        ensure!(&echoed == b"ready", "unexpected TCP server response");
+                        Ok::<_, anyhow::Error>(connection)
+                    };
+                    if let Ok(Ok(connection)) =
+                        tokio::time::timeout(Duration::from_millis(500), attempt).await
+                    {
+                        break connection;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await?;
+            assert!(
+                handle
+                    .exec(&SandboxCommand {
+                        argv: vec!["true".into()],
+                        env: HashMap::new(),
+                        display_argv: None,
+                        cwd: None,
+                        timeout: None,
+                    })
+                    .await?
+                    .ok
+            );
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            assert_eq!(handle.is_running().await?, Some(true));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while handle.is_running().await? != Some(false) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await??;
+            connection
+                .write_all(b"still connected")
+                .await
+                .context("writing after idle expiry")?;
+            connection
+                .flush()
+                .await
+                .context("flushing after idle expiry")?;
+            let mut echoed = [0; 15];
+            tokio::time::timeout(Duration::from_secs(2), connection.read_exact(&mut echoed))
+                .await?
+                .context("reading after idle expiry")?;
+            assert_eq!(&echoed, b"still connected");
+            drop(connection);
+            drop(process);
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        backend.terminate(request).await?;
+        result
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reacquiring_a_warm_machine_renews_existing_handles() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let binary = root.path().join("smolvm");
+        write_test_binary(
+            &binary,
+            r#"
+case "$1 $2" in
+  '--version ') printf 'smolvm 1.20.0\n';;
+  'machine status') printf '{"state":"running"}\n';;
+esac"#,
+        );
+        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
+            binary: Some(binary),
+            mode: SmolvmExecutionMode::Warm,
+            snapshot_root: Some(root.path().join("captures")),
+            ..Default::default()
+        });
+        let mut request = test_request(Some(Duration::from_secs(60)));
+        request.spec.image = root.path().display().to_string();
+        let first = backend.acquire(request.clone()).await?;
+        let lease = backend.idle_lease(&machine_name(&request.sandbox_id));
+        *lease.lock().unwrap() = Instant::now() - Duration::from_secs(60);
+        assert_eq!(first.is_running().await?, Some(false));
+        let second = backend.clone().acquire(request).await?;
+        assert_eq!(first.is_running().await?, Some(true));
+        assert_eq!(second.is_running().await?, Some(true));
+        Ok(())
+    }
+
+    #[cfg(unix)]
     #[test]
     fn capture_roots_are_absolute_when_the_backend_is_constructed() {
         for (config, expected) in [
@@ -1733,6 +2005,7 @@ mod tests {
                 (20_000, first.local_addr()?.port()),
                 (20_001, second.local_addr()?.port()),
             ]),
+            last_used: Arc::new(Mutex::new(Instant::now())),
         };
         assert!(handle.supports_tcp());
         assert!(handle.connect_tcp(20_000).await?.is_some());
@@ -2452,6 +2725,7 @@ esac"#,
                 request: test_request(Some(Duration::from_secs(60))),
                 egress: None,
                 host_ports: BTreeMap::new(),
+                last_used: Arc::new(Mutex::new(Instant::now())),
             })
         };
         let first_handle = handle();
