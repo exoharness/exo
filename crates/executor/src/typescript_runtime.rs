@@ -750,6 +750,11 @@ fn sandbox_process_event_to_runtime_event(
             process_id,
             exit_code: None,
         },
+        SandboxProcessEvent::Truncated { dropped_bytes, .. } => RuntimeEvent::Output {
+            process_id,
+            stream: SandboxProcessStream::Stderr,
+            data: format!("[{dropped_bytes} bytes of output were dropped]\n"),
+        },
     }
 }
 
