@@ -116,23 +116,7 @@ impl ExplicitProxy {
                 )
             })
             .collect();
-        for variable in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-            environment.insert(variable.into(), proxy_url.clone());
-        }
-        for variable in ["NO_PROXY", "no_proxy"] {
-            environment.insert(variable.into(), "localhost,127.0.0.1,::1".into());
-        }
-        environment.insert("NODE_USE_ENV_PROXY".into(), "1".into());
-        for variable in [
-            "SSL_CERT_FILE",
-            "CODEX_CA_CERTIFICATE",
-            "REQUESTS_CA_BUNDLE",
-            "NODE_EXTRA_CA_CERTS",
-            "CURL_CA_BUNDLE",
-            "GIT_SSL_CAINFO",
-        ] {
-            environment.insert(variable.into(), ca_path.clone());
-        }
+        environment.extend(guest_proxy_environment(&proxy_url, &ca_path));
         let cancel = CancellationToken::new();
         let task = tokio::spawn(serve_explicit(
             listener,

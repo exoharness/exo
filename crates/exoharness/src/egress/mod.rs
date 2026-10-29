@@ -35,6 +35,7 @@ use crate::types::canonical_egress_host;
 use crate::{EgressPolicy, SandboxEgressProxy};
 
 mod external;
+pub(crate) use external::DirectExternalProxy;
 pub use external::ExternalProxyConfig;
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
@@ -552,7 +553,7 @@ pub(crate) fn public_ipv4(ip: IpAddr) -> bool {
 // https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.1
 // Proxy authentication is scoped to its proxy (sections 11.7.1/11.7.2); framing
 // and trailers are handled by the HTTP stacks on either side of this proxy.
-fn tls_configuration(hosts: Vec<String>) -> Result<(String, TlsAcceptor)> {
+pub(crate) fn tls_configuration(hosts: Vec<String>) -> Result<(String, TlsAcceptor)> {
     let mut ca = CertificateParams::new(Vec::<String>::new())?;
     ca.distinguished_name
         .push(DnType::CommonName, "Exo sandbox egress CA");
@@ -824,10 +825,41 @@ pub(super) const PREPARE_TRUST: &str = r#"set -eu
 umask 077
 bundle=$(mktemp "$EXO_EGRESS_CA_PATH.XXXXXX")
 trap 'rm -f "$bundle"' EXIT
-cat /etc/ssl/certs/ca-certificates.crt > "$bundle"
+for system in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/pki/tls/certs/ca-bundle.crt; do
+  if [ -f "$system" ]; then
+    cat "$system" > "$bundle"
+    break
+  fi
+done
 printf '\n%s\n' "$EXO_EGRESS_CA_PEM" >> "$bundle"
 mv -f "$bundle" "$EXO_EGRESS_CA_PATH"
 "#;
+
+pub(crate) const TRUST_VARIABLES: [&str; 6] = [
+    "SSL_CERT_FILE",
+    "CODEX_CA_CERTIFICATE",
+    "REQUESTS_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+];
+
+/// Environment that routes a guest's HTTP clients through `proxy_url` and makes
+/// them trust the CA bundle installed at `ca_path`.
+pub(crate) fn guest_proxy_environment(proxy_url: &str, ca_path: &str) -> HashMap<String, String> {
+    let mut environment = HashMap::with_capacity(TRUST_VARIABLES.len() + 7);
+    for variable in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+        environment.insert(variable.into(), proxy_url.into());
+    }
+    for variable in ["NO_PROXY", "no_proxy"] {
+        environment.insert(variable.into(), "localhost,127.0.0.1,::1".into());
+    }
+    environment.insert("NODE_USE_ENV_PROXY".into(), "1".into());
+    for variable in TRUST_VARIABLES {
+        environment.insert(variable.into(), ca_path.into());
+    }
+    environment
+}
 
 struct TimedResolver<'a>(&'a dyn EgressCredentialResolver);
 #[async_trait]

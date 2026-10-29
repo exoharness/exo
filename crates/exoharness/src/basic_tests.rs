@@ -649,6 +649,106 @@ async fn firecracker_sandbox_contract_long_running_process_and_workdir_survive_s
     .expect("Firecracker sandbox long-running process and workdir contract");
 }
 
+const DOCKER_NODE_IMAGE: &str = "docker.io/library/node:22-slim";
+
+fn test_external_proxy() -> crate::egress::ExternalProxyConfig {
+    let (ca_pem, _) = crate::egress::tls_configuration(vec!["proxy.test".into()]).expect("test CA");
+    crate::egress::ExternalProxyConfig {
+        url: "http://127.0.0.1:3128".parse().expect("proxy url"),
+        username: "sandbox".into(),
+        password: "capability-token".into(),
+        ca_pem,
+        environment: std::collections::HashMap::from([("GH_TOKEN".into(), "placeholder".into())]),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_installs_direct_external_proxy() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let proxy = test_external_proxy();
+    let backend = crate::LocalProcessSandboxBackend::new()
+        .with_external_proxy(proxy.clone())
+        .expect("external proxy backend");
+    let handle = backend
+        .acquire(provider_contract_request(
+            "local-process",
+            "external-proxy",
+            "local-process".to_string(),
+            &tempdir.path().display().to_string(),
+        ))
+        .await
+        .expect("acquire local process sandbox");
+    let environment = handle
+        .command_environment()
+        .await
+        .expect("command environment");
+    assert_eq!(
+        environment["HTTPS_PROXY"],
+        "http://sandbox:capability-token@127.0.0.1:3128/"
+    );
+    assert_eq!(environment["GH_TOKEN"], "placeholder");
+    let bundle = std::fs::read_to_string(&environment["SSL_CERT_FILE"]).expect("trust bundle");
+    assert!(bundle.contains(proxy.ca_pem.trim()));
+    let output = handle
+        .exec(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '%s' \"$https_proxy\"".into(),
+            ],
+            env: std::collections::HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(10)),
+        })
+        .await
+        .expect("exec with proxy environment");
+    assert_eq!(output.stdout, environment["HTTPS_PROXY"]);
+    crate::contract_tests::sandbox_handle_exposes_external_proxy_environment(handle, &proxy)
+        .await
+        .expect("local process external proxy contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Docker sandbox whose image provides node; run this test explicitly"]
+async fn docker_sandbox_contract_connect_tcp_round_trip() {
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::CliContainerSandboxBackend::docker());
+    let handle = backend
+        .acquire(provider_contract_request(
+            "docker",
+            "connect-tcp",
+            env_or("DOCKER_NODE_IMAGE", DOCKER_NODE_IMAGE),
+            "/tmp",
+        ))
+        .await
+        .expect("acquire Docker sandbox");
+    crate::contract_tests::sandbox_handle_connect_tcp_round_trip(handle)
+        .await
+        .expect("Docker connect_tcp contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Docker sandbox; run this test explicitly"]
+async fn docker_sandbox_contract_external_proxy_environment() {
+    let proxy = test_external_proxy();
+    let backend = crate::CliContainerSandboxBackend::docker()
+        .with_external_proxy(proxy.clone())
+        .expect("external proxy backend");
+    let handle = backend
+        .acquire(provider_contract_request(
+            "docker",
+            "external-proxy",
+            env_or("DOCKER_IMAGE", &crate::default_docker_image()),
+            "/tmp",
+        ))
+        .await
+        .expect("acquire Docker sandbox");
+    crate::contract_tests::sandbox_handle_exposes_external_proxy_environment(handle, &proxy)
+        .await
+        .expect("Docker external proxy contract");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn local_process_sandbox_rejects_durable_file_systems() {
     let tempdir = TempDir::new().expect("tempdir");

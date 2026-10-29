@@ -3,8 +3,10 @@ use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -13,12 +15,14 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::Deserialize;
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
+use crate::egress::{DirectExternalProxy, ExternalProxyConfig};
 use crate::{DurableFileSystem, SandboxAttachment, SandboxId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,13 +188,14 @@ async fn inspect_running_docker_container(
     Ok(container.id)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CliContainerSandboxBackend {
     cli: ContainerCliFlavor,
     container_bin: PathBuf,
     durable_file_system_root: Option<PathBuf>,
-    system_started: Mutex<bool>,
-    network_created: Mutex<bool>,
+    external_proxy: Option<ExternalProxyConfig>,
+    system_started: Arc<Mutex<bool>>,
+    network_created: Arc<Mutex<bool>>,
     warm_sandboxes: Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 }
 
@@ -215,10 +220,35 @@ impl CliContainerSandboxBackend {
             cli,
             container_bin: PathBuf::from(cli.default_binary()),
             durable_file_system_root: None,
-            system_started: Mutex::new(false),
-            network_created: Mutex::new(false),
+            external_proxy: None,
+            system_started: Arc::new(Mutex::new(false)),
+            network_created: Arc::new(Mutex::new(false)),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn direct_proxy(&self, sandbox_id: &str) -> Option<DirectExternalProxy> {
+        self.external_proxy.clone().map(|proxy| {
+            DirectExternalProxy::new(
+                proxy,
+                format!("/tmp/exo-egress-{}.pem", stable_fnv1a_hex(sandbox_id)),
+            )
+        })
+    }
+
+    async fn warm_handle(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        let handle = WarmSandboxHandle {
+            id: format!("warm:{}", request.sandbox_id.as_str()),
+            cli: self.cli,
+            container_bin: self.container_bin.clone(),
+            egress: self.direct_proxy(request.sandbox_id.as_str()),
+            request,
+            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+        };
+        if let Some(egress) = &handle.egress {
+            egress.install(&handle).await?;
+        }
+        Ok(crate::with_process_management(Arc::new(handle)))
     }
 
     async fn ensure_system_started(&self) -> Result<()> {
@@ -375,8 +405,26 @@ impl Drop for CliContainerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for CliContainerSandboxBackend {
+    fn with_external_proxy(
+        &self,
+        proxy: ExternalProxyConfig,
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
+        proxy.validate()?;
+        let mut backend = self.clone();
+        backend.external_proxy = Some(proxy);
+        Ok(Arc::new(backend))
+    }
+
     fn is_local(&self) -> bool {
         true
+    }
+
+    fn capabilities(&self) -> SandboxBackendCapabilities {
+        SandboxBackendCapabilities {
+            durable_file_systems: true,
+            default_workdir: None,
+            networking_always_enabled: false,
+        }
     }
 
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
@@ -388,6 +436,10 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("container sandbox")?;
+        ensure!(
+            request.lifecycle.idle_ttl.is_some() || self.external_proxy.is_none(),
+            "external proxies require a warm sandbox lifecycle (set idle_ttl)"
+        );
         let request = self.prepare_request(request).await?;
 
         if request.lifecycle.idle_ttl.is_none() {
@@ -402,24 +454,17 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
 
         self.reap_expired_warm_sandboxes().await;
 
-        let replaced = {
+        let (reuse, replaced) = {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             match warm_sandboxes.get(request.sandbox_id.as_str()) {
-                Some(entry) if entry.request.spec == request.spec => {
-                    return Ok(crate::with_process_management(Arc::new(
-                        WarmSandboxHandle {
-                            id: format!("warm:{}", request.sandbox_id.as_str()),
-                            cli: self.cli,
-                            container_bin: self.container_bin.clone(),
-                            request,
-                            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-                        },
-                    )));
-                }
-                Some(_) => warm_sandboxes.remove(request.sandbox_id.as_str()),
-                None => None,
+                Some(entry) if entry.request.spec == request.spec => (true, None),
+                Some(_) => (false, warm_sandboxes.remove(request.sandbox_id.as_str())),
+                None => (false, None),
             }
         };
+        if reuse {
+            return self.warm_handle(request).await;
+        }
         if let Some(entry) = replaced
             && entry.owned
         {
@@ -448,15 +493,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             );
         }
 
-        Ok(crate::with_process_management(Arc::new(
-            WarmSandboxHandle {
-                id: format!("warm:{}", request.sandbox_id.as_str()),
-                cli: self.cli,
-                container_bin: self.container_bin.clone(),
-                request,
-                warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-            },
-        )))
+        self.warm_handle(request).await
     }
 
     async fn attach(
@@ -475,14 +512,17 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         let SandboxAttachment::DockerContainer { container_id } = attachment;
         let container_id =
             inspect_running_docker_container(&self.container_bin, &container_id).await?;
-        Ok(crate::with_process_management(Arc::new(
-            BorrowedDockerSandboxHandle {
-                id: format!("borrowed-docker:{container_id}"),
-                container_bin: self.container_bin.clone(),
-                container_id,
-                spec: request.spec,
-            },
-        )))
+        let handle = BorrowedDockerSandboxHandle {
+            id: format!("borrowed-docker:{container_id}"),
+            container_bin: self.container_bin.clone(),
+            container_id,
+            egress: self.direct_proxy(request.sandbox_id.as_str()),
+            spec: request.spec,
+        };
+        if let Some(egress) = &handle.egress {
+            egress.install(&handle).await?;
+        }
+        Ok(crate::with_process_management(Arc::new(handle)))
     }
 
     async fn suspend(
@@ -539,15 +579,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             );
         }
 
-        Ok(crate::with_process_management(Arc::new(
-            WarmSandboxHandle {
-                id: format!("warm:{}", request.sandbox_id.as_str()),
-                cli: self.cli,
-                container_bin: self.container_bin.clone(),
-                request,
-                warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-            },
-        )))
+        self.warm_handle(request).await
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
@@ -576,6 +608,7 @@ struct BorrowedDockerSandboxHandle {
     id: String,
     container_bin: PathBuf,
     container_id: String,
+    egress: Option<DirectExternalProxy>,
     spec: SandboxSpec,
 }
 
@@ -585,14 +618,43 @@ impl ManagedSandboxHandle for BorrowedDockerSandboxHandle {
         &self.id
     }
 
+    async fn command_environment(&self) -> Result<HashMap<String, String>> {
+        DirectExternalProxy::environment_of(self.egress.as_ref())
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
+        let command = DirectExternalProxy::prepare_command(self.egress.as_ref(), command)?;
         inspect_running_docker_container(&self.container_bin, &self.container_id).await?;
-        exec_warm(&self.container_bin, &self.container_id, &self.spec, command).await
+        exec_warm(
+            &self.container_bin,
+            &self.container_id,
+            &self.spec,
+            &command,
+        )
+        .await
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
+        let command = DirectExternalProxy::prepare_command(self.egress.as_ref(), command)?;
         inspect_running_docker_container(&self.container_bin, &self.container_id).await?;
-        start_warm_process(&self.container_bin, &self.container_id, &self.spec, command).await
+        start_warm_process(
+            &self.container_bin,
+            &self.container_id,
+            &self.spec,
+            &command,
+        )
+        .await
+    }
+
+    fn supports_tcp(&self) -> bool {
+        true
+    }
+
+    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
+        inspect_running_docker_container(&self.container_bin, &self.container_id).await?;
+        docker_exec_tunnel(&self.container_bin, &self.container_id, port)
+            .await
+            .map(Some)
     }
 
     async fn stop(&self) -> Result<()> {
@@ -661,8 +723,23 @@ struct WarmSandboxHandle {
     id: String,
     cli: ContainerCliFlavor,
     container_bin: PathBuf,
+    egress: Option<DirectExternalProxy>,
     request: SandboxRequest,
     warm_sandboxes: Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
+}
+
+impl WarmSandboxHandle {
+    async fn ready(&self) -> Result<String> {
+        let name = ensure_warm_sandbox_ready(
+            &self.container_bin,
+            self.cli,
+            &self.request,
+            &self.warm_sandboxes,
+        )
+        .await?;
+        touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
+        Ok(name)
+    }
 }
 
 #[async_trait]
@@ -675,30 +752,36 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
         Some(self.request.spec.image.clone())
     }
 
+    async fn command_environment(&self) -> Result<HashMap<String, String>> {
+        DirectExternalProxy::environment_of(self.egress.as_ref())
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
-        let name = ensure_warm_sandbox_ready(
-            &self.container_bin,
-            self.cli,
-            &self.request,
-            &self.warm_sandboxes,
-        )
-        .await?;
-        touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
-        let output = exec_warm(&self.container_bin, &name, &self.request.spec, command).await;
+        let command = DirectExternalProxy::prepare_command(self.egress.as_ref(), command)?;
+        let name = self.ready().await?;
+        let output = exec_warm(&self.container_bin, &name, &self.request.spec, &command).await;
         touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
         output
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        let name = ensure_warm_sandbox_ready(
-            &self.container_bin,
-            self.cli,
-            &self.request,
-            &self.warm_sandboxes,
-        )
-        .await?;
-        touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
-        start_warm_process(&self.container_bin, &name, &self.request.spec, command).await
+        let command = DirectExternalProxy::prepare_command(self.egress.as_ref(), command)?;
+        let name = self.ready().await?;
+        start_warm_process(&self.container_bin, &name, &self.request.spec, &command).await
+    }
+
+    fn supports_tcp(&self) -> bool {
+        self.cli == ContainerCliFlavor::Docker
+    }
+
+    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
+        if self.cli != ContainerCliFlavor::Docker {
+            return Ok(None);
+        }
+        let name = self.ready().await?;
+        docker_exec_tunnel(&self.container_bin, &name, port)
+            .await
+            .map(Some)
     }
 
     async fn stop(&self) -> Result<()> {
@@ -781,19 +864,39 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct LocalProcessSandboxBackend;
+#[derive(Debug, Clone, Default)]
+pub struct LocalProcessSandboxBackend {
+    external_proxy: Option<ExternalProxyConfig>,
+}
 
 impl LocalProcessSandboxBackend {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
 #[async_trait]
 impl ManagedSandboxBackend for LocalProcessSandboxBackend {
+    fn with_external_proxy(
+        &self,
+        proxy: ExternalProxyConfig,
+    ) -> Result<Arc<dyn ManagedSandboxBackend>> {
+        proxy.validate()?;
+        Ok(Arc::new(Self {
+            external_proxy: Some(proxy),
+        }))
+    }
+
     fn is_local(&self) -> bool {
         true
+    }
+
+    fn capabilities(&self) -> SandboxBackendCapabilities {
+        SandboxBackendCapabilities {
+            durable_file_systems: false,
+            default_workdir: None,
+            networking_always_enabled: true,
+        }
     }
 
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
@@ -809,12 +912,26 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         if !request.spec.durable_file_systems.is_empty() {
             bail!("local-process sandbox backend does not support durable file systems");
         }
-        Ok(crate::with_process_management(Arc::new(
-            LocalProcessSandboxHandle {
-                id: format!("local:{}", request.sandbox_id.as_str()),
-                request,
-            },
-        )))
+        let handle = LocalProcessSandboxHandle {
+            id: format!("local:{}", request.sandbox_id.as_str()),
+            egress: self.external_proxy.clone().map(|proxy| {
+                DirectExternalProxy::new(
+                    proxy,
+                    std::env::temp_dir()
+                        .join(format!(
+                            "exo-egress-{}.pem",
+                            stable_fnv1a_hex(request.sandbox_id.as_str())
+                        ))
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            }),
+            request,
+        };
+        if let Some(egress) = &handle.egress {
+            egress.install(&handle).await?;
+        }
+        Ok(crate::with_process_management(Arc::new(handle)))
     }
 
     async fn attach(
@@ -849,7 +966,21 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
 
 struct LocalProcessSandboxHandle {
     id: String,
+    egress: Option<DirectExternalProxy>,
     request: SandboxRequest,
+}
+
+impl LocalProcessSandboxHandle {
+    fn process(&self, command: &SandboxCommand, cwd: &str) -> Command {
+        let mut process = Command::new(&command.argv[0]);
+        process.args(&command.argv[1..]);
+        process.envs(&command.env);
+        if let Some(workdir) = resolve_local_workdir(&self.request.spec, cwd) {
+            process.current_dir(workdir);
+        }
+        process.kill_on_drop(true);
+        process
+    }
 }
 
 #[async_trait]
@@ -858,40 +989,32 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
         &self.id
     }
 
+    async fn command_environment(&self) -> Result<HashMap<String, String>> {
+        DirectExternalProxy::environment_of(self.egress.as_ref())
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         if command.argv.is_empty() {
             bail!("sandbox command requires at least one argv entry");
         }
+        let command = DirectExternalProxy::prepare_command(self.egress.as_ref(), command)?;
         let cwd = command
             .cwd
             .clone()
             .unwrap_or_else(|| self.request.spec.default_workdir.clone());
-        let mut process = Command::new(&command.argv[0]);
-        process.args(&command.argv[1..]);
-        process.envs(&command.env);
-        if let Some(workdir) = resolve_local_workdir(&self.request.spec, &cwd) {
-            process.current_dir(workdir);
-        }
-        process.kill_on_drop(true);
-        run_command(process, command, cwd).await
+        run_command(self.process(&command, &cwd), &command, cwd).await
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
         if command.argv.is_empty() {
             bail!("sandbox command requires at least one argv entry");
         }
+        let command = DirectExternalProxy::prepare_command(self.egress.as_ref(), command)?;
         let cwd = command
             .cwd
             .clone()
             .unwrap_or_else(|| self.request.spec.default_workdir.clone());
-        let mut process = Command::new(&command.argv[0]);
-        process.args(&command.argv[1..]);
-        process.envs(&command.env);
-        if let Some(workdir) = resolve_local_workdir(&self.request.spec, &cwd) {
-            process.current_dir(workdir);
-        }
-        process.kill_on_drop(true);
-        spawn_sandbox_process(process, command).await
+        spawn_sandbox_process(self.process(&command, &cwd), &command).await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -1486,6 +1609,100 @@ async fn start_warm_process(
     process.kill_on_drop(true);
 
     spawn_sandbox_process(process, command).await
+}
+
+// Relays a guest TCP port over the stdio of a `node` process inside the
+// container, so the image must provide `node`. Connection failures surface as
+// end of stream, which callers handshaking over the stream already retry.
+const TCP_TUNNEL_SCRIPT: &str = r#"
+const net = require("node:net");
+const socket = net.connect({ host: "127.0.0.1", port: Number(process.argv[1]) });
+socket.on("connect", () => {
+  process.stdin.pipe(socket);
+  socket.pipe(process.stdout, { end: false });
+});
+socket.on("close", () => process.stdout.write("", () => process.exit(0)));
+socket.on("error", (error) => {
+  process.stderr.write(`${error.message}\n`);
+  process.exit(1);
+});
+"#;
+
+async fn docker_exec_tunnel(
+    container_bin: &Path,
+    container: &str,
+    port: u16,
+) -> Result<BoxSandboxTcpStream> {
+    let mut command = Command::new(container_bin);
+    command.args([
+        "exec",
+        "--interactive",
+        container,
+        "node",
+        "-e",
+        TCP_TUNNEL_SCRIPT,
+        &port.to_string(),
+    ]);
+    spawn_tunnel(command).await
+}
+
+async fn spawn_tunnel(mut command: Command) -> Result<BoxSandboxTcpStream> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().context("starting sandbox TCP tunnel")?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("sandbox TCP tunnel did not expose stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("sandbox TCP tunnel did not expose stdout"))?;
+    Ok(Box::pin(ChildTunnel {
+        _child: child,
+        stdout,
+        stdin,
+    }))
+}
+
+struct ChildTunnel {
+    _child: Child,
+    stdout: ChildStdout,
+    stdin: ChildStdin,
+}
+
+impl AsyncRead for ChildTunnel {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ChildTunnel {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stdin).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_shutdown(cx)
+    }
 }
 
 pub(crate) async fn run_command(
@@ -2088,6 +2305,75 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn child_tunnel_relays_bytes_and_closes_with_the_peer() -> Result<()> {
+        if Command::new("node")
+            .arg("--version")
+            .output()
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut buf = [0u8; 5];
+            socket.read_exact(&mut buf).await?;
+            socket.write_all(&buf).await?;
+            Ok::<_, anyhow::Error>(buf)
+        });
+        let mut command = Command::new("node");
+        command.args(["-e", TCP_TUNNEL_SCRIPT, &port.to_string()]);
+        let mut tunnel = spawn_tunnel(command).await?;
+        tunnel.write_all(b"hello").await?;
+        let mut echoed = [0u8; 5];
+        time::timeout(Duration::from_secs(10), tunnel.read_exact(&mut echoed)).await??;
+        assert_eq!(&echoed, b"hello");
+        assert_eq!(&server.await??, b"hello");
+        let mut rest = Vec::new();
+        time::timeout(Duration::from_secs(10), tunnel.read_to_end(&mut rest)).await??;
+        assert!(rest.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn container_backend_rejects_one_shot_external_proxies() -> Result<()> {
+        let (ca_pem, _) = crate::egress::tls_configuration(vec!["proxy.test".into()])?;
+        let backend =
+            CliContainerSandboxBackend::docker().with_external_proxy(ExternalProxyConfig {
+                url: "http://127.0.0.1:3128".parse()?,
+                username: "sandbox".into(),
+                password: "capability".into(),
+                ca_pem,
+                environment: HashMap::new(),
+            })?;
+        let Err(error) = backend
+            .acquire(SandboxRequest {
+                sandbox_id: "one-shot".into(),
+                scope: Default::default(),
+                spec: SandboxSpec {
+                    image: String::new(),
+                    resources: None,
+                    mounts: Vec::new(),
+                    durable_file_systems: Vec::new(),
+                    policy: SandboxNetworkPolicy::Unrestricted.into(),
+                    default_workdir: "/tmp".into(),
+                    tcp_ports: Vec::new(),
+                },
+                lifecycle: SandboxLifecycleConfig { idle_ttl: None },
+                provider_state: None,
+            })
+            .await
+        else {
+            panic!("one-shot sandboxes cannot carry an external proxy");
+        };
+        assert!(error.to_string().contains("warm sandbox lifecycle"));
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]
@@ -2338,6 +2624,7 @@ mod tests {
             },
         )])));
         let mut handle = WarmSandboxHandle {
+            egress: None,
             id: "test".into(),
             cli: ContainerCliFlavor::Docker,
             container_bin: binary,
@@ -2458,8 +2745,9 @@ mod tests {
             cli: ContainerCliFlavor::Docker,
             container_bin: script_path,
             durable_file_system_root: None,
-            system_started: Mutex::new(false),
-            network_created: Mutex::new(false),
+            external_proxy: None,
+            system_started: Arc::new(Mutex::new(false)),
+            network_created: Arc::new(Mutex::new(false)),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
@@ -2553,8 +2841,9 @@ esac
             cli: ContainerCliFlavor::AppleContainer,
             container_bin: script_path,
             durable_file_system_root: None,
-            system_started: Mutex::new(false),
-            network_created: Mutex::new(false),
+            external_proxy: None,
+            system_started: Arc::new(Mutex::new(false)),
+            network_created: Arc::new(Mutex::new(false)),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
@@ -2614,8 +2903,9 @@ esac
             cli: ContainerCliFlavor::AppleContainer,
             container_bin: missing_bin,
             durable_file_system_root: None,
-            system_started: Mutex::new(false),
-            network_created: Mutex::new(false),
+            external_proxy: None,
+            system_started: Arc::new(Mutex::new(false)),
+            network_created: Arc::new(Mutex::new(false)),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -2667,8 +2957,9 @@ esac
             cli: ContainerCliFlavor::Docker,
             container_bin: script_path,
             durable_file_system_root: None,
-            system_started: Mutex::new(false),
-            network_created: Mutex::new(false),
+            external_proxy: None,
+            system_started: Arc::new(Mutex::new(false)),
+            network_created: Arc::new(Mutex::new(false)),
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {

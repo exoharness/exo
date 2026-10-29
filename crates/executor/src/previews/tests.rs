@@ -12,7 +12,7 @@ impl ManagedSandboxBackend for TcpBackend {
         &[]
     }
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        exoharness::LocalProcessSandboxBackend
+        exoharness::LocalProcessSandboxBackend::new()
             .acquire(request)
             .await
     }
