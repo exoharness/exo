@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -14,10 +14,14 @@ use futures::{
     io::{AsyncReadExt, AsyncWriteExt},
 };
 use tokio::{
-    sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc},
+    io::{AsyncReadExt as TokioAsyncReadExt, AsyncWriteExt as TokioAsyncWriteExt},
+    sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
     time::Instant,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{
+    compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt},
+    sync::CancellationToken,
+};
 
 use crate::{
     BoxAsyncRead, BoxAsyncWrite, BoxSandboxTcpStream, GetSandboxProcessEventsResult,
@@ -30,6 +34,7 @@ use crate::{
 const OUTPUT_READ_BYTES: usize = 64 * 1024;
 const TRUNCATION_SUFFIX: &str = "... [truncated]";
 const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+const PIPE_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Bounds for the processes one sandbox handle manages. The defaults keep
 /// every event for the handle's lifetime, which suits a single-tenant host;
@@ -178,6 +183,180 @@ pub fn with_process_limits(
         handle,
         processes: ProcessRegistry::new(limits),
     })
+}
+
+/// Raw pipes over a managed process, for handles whose processes live behind
+/// an id-based API such as a remote worker. Output arrives through
+/// `next_process_events`, input goes through `write_process_input`, and closing
+/// or dropping stdin closes the process's stdin. Dropping `wait` before the
+/// process finishes cancels it.
+pub fn managed_process_parts(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    process_id: SandboxProcessId,
+) -> SandboxProcessParts {
+    let (stdout_writer, stdout) = tokio::io::duplex(PIPE_BUFFER_BYTES);
+    let (stderr_writer, stderr) = tokio::io::duplex(PIPE_BUFFER_BYTES);
+    let (stdin, stdin_reader) = tokio::io::duplex(PIPE_BUFFER_BYTES);
+    let (exit_sender, exit) = oneshot::channel();
+    let finished = Arc::new(AtomicBool::new(false));
+    let cleanup = ManagedProcessCleanup {
+        handle: Arc::clone(&handle),
+        process_id: process_id.clone(),
+        finished: Arc::clone(&finished),
+    };
+    tokio::spawn(forward_managed_input(
+        Arc::clone(&handle),
+        process_id.clone(),
+        stdin_reader,
+    ));
+    tokio::spawn(forward_managed_output(
+        handle,
+        process_id,
+        stdout_writer,
+        stderr_writer,
+        exit_sender,
+        finished,
+    ));
+    SandboxProcessParts {
+        stdout: Box::pin(stdout.compat()),
+        stderr: Box::pin(stderr.compat()),
+        stdin: Box::pin(stdin.compat_write()),
+        wait: Box::pin(async move {
+            let _cleanup = cleanup;
+            exit.await
+                .map_err(|_| anyhow!("sandbox process ended without a status"))?
+        }),
+    }
+}
+
+/// `managed_process_parts` for a terminal started with `start_managed_terminal`.
+pub fn managed_terminal_parts(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    process_id: SandboxProcessId,
+) -> SandboxTerminalParts {
+    let control = Arc::new(ManagedTerminalControl {
+        handle: Arc::clone(&handle),
+        process_id: process_id.clone(),
+    });
+    let parts = managed_process_parts(handle, process_id);
+    SandboxTerminalParts {
+        output: parts.stdout,
+        input: parts.stdin,
+        wait: parts.wait,
+        control,
+    }
+}
+
+struct ManagedTerminalControl {
+    handle: Arc<dyn ManagedSandboxHandle>,
+    process_id: SandboxProcessId,
+}
+
+#[async_trait]
+impl SandboxTerminalControl for ManagedTerminalControl {
+    async fn resize(&self, size: SandboxTerminalSize) -> Result<()> {
+        self.handle.resize_terminal(&self.process_id, size).await
+    }
+}
+
+struct ManagedProcessCleanup {
+    handle: Arc<dyn ManagedSandboxHandle>,
+    process_id: SandboxProcessId,
+    finished: Arc<AtomicBool>,
+}
+
+impl Drop for ManagedProcessCleanup {
+    fn drop(&mut self) {
+        if self.finished.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let handle = Arc::clone(&self.handle);
+        let process_id = std::mem::take(&mut self.process_id);
+        runtime.spawn(async move {
+            let _ = handle.cancel_process(&process_id).await;
+        });
+    }
+}
+
+async fn forward_managed_input(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    process_id: SandboxProcessId,
+    mut reader: tokio::io::DuplexStream,
+) {
+    let mut buffer = vec![0; 8192];
+    loop {
+        match TokioAsyncReadExt::read(&mut reader, &mut buffer).await {
+            Ok(0) | Err(_) => {
+                let _ = handle.close_process_input(&process_id).await;
+                return;
+            }
+            Ok(length) => {
+                if handle
+                    .write_process_input(&process_id, &buffer[..length])
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn forward_managed_output(
+    handle: Arc<dyn ManagedSandboxHandle>,
+    process_id: SandboxProcessId,
+    mut stdout: tokio::io::DuplexStream,
+    mut stderr: tokio::io::DuplexStream,
+    exit: oneshot::Sender<Result<i32>>,
+    finished: Arc<AtomicBool>,
+) {
+    let mut cursor = 0;
+    let mut truncated = false;
+    let result = loop {
+        let result = match handle.next_process_events(&process_id, cursor).await {
+            Ok(result) => result,
+            Err(error) => break Err(error),
+        };
+        let mut ended = None;
+        for event in result.events {
+            cursor = event.cursor();
+            match event {
+                SandboxProcessEvent::Stdout { data, .. } => {
+                    let _ = TokioAsyncWriteExt::write_all(&mut stdout, &data).await;
+                }
+                SandboxProcessEvent::Stderr { data, .. } => {
+                    let _ = TokioAsyncWriteExt::write_all(&mut stderr, &data).await;
+                }
+                SandboxProcessEvent::Truncated { .. } => truncated = true,
+                SandboxProcessEvent::Exit { exit_code, .. } => ended = Some(Ok(exit_code)),
+                SandboxProcessEvent::Error { message, .. } => ended = Some(Err(anyhow!(message))),
+                SandboxProcessEvent::Cancelled { .. } => {
+                    ended = Some(Err(anyhow!("sandbox process was cancelled")))
+                }
+            }
+        }
+        if let Some(ended) = ended {
+            break ended;
+        }
+        match result.status {
+            SandboxProcessStatus::Running => {}
+            SandboxProcessStatus::Exited { exit_code } => break Ok(exit_code),
+            SandboxProcessStatus::Failed { message } => break Err(anyhow!(message)),
+            SandboxProcessStatus::Cancelled => break Err(anyhow!("sandbox process was cancelled")),
+        }
+    };
+    finished.store(true, Ordering::Release);
+    drop(stdout);
+    drop(stderr);
+    let result = match result {
+        Ok(_) if truncated => Err(anyhow!("sandbox process output was truncated")),
+        result => result,
+    };
+    let _ = exit.send(result);
 }
 
 struct ProcessManagedSandbox {
@@ -1431,6 +1610,129 @@ mod tests {
         async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
             bail!("not supported")
         }
+    }
+
+    /// A handle that only offers the managed operations, like a remote worker.
+    struct ManagedOnly(Arc<dyn ManagedSandboxHandle>);
+
+    #[async_trait]
+    impl ManagedSandboxHandle for ManagedOnly {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
+            self.0.exec(command).await
+        }
+        async fn start_process(&self, command: &SandboxCommand) -> Result<SandboxProcessParts> {
+            let id = self
+                .0
+                .start_managed_process(command, SandboxProcessStdin::Open)
+                .await?;
+            Ok(managed_process_parts(Arc::clone(&self.0), id))
+        }
+        async fn start_managed_process(
+            &self,
+            command: &SandboxCommand,
+            stdin: SandboxProcessStdin,
+        ) -> Result<SandboxProcessId> {
+            self.0.start_managed_process(command, stdin).await
+        }
+        async fn write_process_input(&self, id: &str, data: &[u8]) -> Result<()> {
+            self.0.write_process_input(id, data).await
+        }
+        async fn close_process_input(&self, id: &str) -> Result<()> {
+            self.0.close_process_input(id).await
+        }
+        async fn process_events(
+            &self,
+            id: &str,
+            after: u64,
+        ) -> Result<GetSandboxProcessEventsResult> {
+            self.0.process_events(id, after).await
+        }
+        async fn next_process_events(
+            &self,
+            id: &str,
+            after: u64,
+        ) -> Result<GetSandboxProcessEventsResult> {
+            self.0.next_process_events(id, after).await
+        }
+        async fn wait_process(&self, id: &str) -> Result<SandboxProcessStatus> {
+            self.0.wait_process(id).await
+        }
+        async fn cancel_process(&self, id: &str) -> Result<SandboxProcessStatus> {
+            self.0.cancel_process(id).await
+        }
+        async fn stop(&self) -> Result<()> {
+            self.0.stop().await
+        }
+        async fn detach(&self) -> Result<SandboxAttachment> {
+            self.0.detach().await
+        }
+        async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+            self.0.snapshot(kind).await
+        }
+    }
+
+    async fn local_sandbox() -> Result<Arc<dyn ManagedSandboxHandle>> {
+        use crate::{
+            LocalProcessSandboxBackend, ManagedSandboxBackend, SandboxLifecycleConfig,
+            SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
+        };
+        LocalProcessSandboxBackend::new()
+            .acquire(SandboxRequest {
+                sandbox_id: Uuid7::now().to_string(),
+                scope: crate::ResourceScope::Global,
+                spec: SandboxSpec {
+                    tcp_ports: vec![],
+                    image: String::new(),
+                    resources: Default::default(),
+                    mounts: vec![],
+                    durable_file_systems: vec![],
+                    policy: SandboxNetworkPolicy::Unrestricted.into(),
+                    default_workdir: "/tmp".into(),
+                },
+                lifecycle: SandboxLifecycleConfig::default(),
+                provider_state: None,
+            })
+            .await
+    }
+
+    #[cfg(feature = "contract-tests")]
+    #[tokio::test]
+    async fn managed_process_parts_satisfy_the_raw_process_contracts() -> Result<()> {
+        let handle: Arc<dyn ManagedSandboxHandle> = Arc::new(ManagedOnly(local_sandbox().await?));
+        crate::contract_tests::sandbox_handle_start_process_supports_interactive_stdio_and_env(
+            Arc::clone(&handle),
+        )
+        .await?;
+        crate::contract_tests::sandbox_handle_start_process_supports_long_running_request_response_protocol(
+            handle,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn dropping_managed_wait_cancels_the_process() -> Result<()> {
+        let sandbox = local_sandbox().await?;
+        let id = sandbox
+            .start_managed_process(
+                &SandboxCommand {
+                    argv: vec!["/bin/sh".into(), "-c".into(), "sleep 30".into()],
+                    env: HashMap::new(),
+                    display_argv: None,
+                    cwd: None,
+                    timeout: None,
+                },
+                SandboxProcessStdin::None,
+            )
+            .await?;
+        let parts = managed_process_parts(Arc::clone(&sandbox), id.clone());
+        drop(parts);
+        let status =
+            tokio::time::timeout(Duration::from_secs(5), sandbox.wait_process(&id)).await??;
+        assert!(matches!(status, SandboxProcessStatus::Cancelled));
+        Ok(())
     }
 
     #[tokio::test]

@@ -58,8 +58,8 @@ pub use http_client::{AccessTokenProvider, HttpClient, HttpResponseError};
 pub use sandbox::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use sandbox_process::{
-    ProcessLimitReached, ProcessLimits, ProcessNotFound, ProcessOutputBudget, with_process_limits,
-    with_process_management,
+    ProcessLimitReached, ProcessLimits, ProcessNotFound, ProcessOutputBudget,
+    managed_process_parts, managed_terminal_parts, with_process_limits, with_process_management,
 };
 pub use sandbox_provider::*;
 pub use types::*;
