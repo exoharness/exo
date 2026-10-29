@@ -669,15 +669,28 @@ async fn local_process_sandbox_installs_direct_external_proxy() {
     let backend = crate::LocalProcessSandboxBackend::new()
         .with_external_proxy(proxy.clone())
         .expect("external proxy backend");
+    let mut request = provider_contract_request(
+        "local-process",
+        "external-proxy",
+        "local-process".to_string(),
+        &tempdir.path().display().to_string(),
+    );
+    request.spec.policy = SandboxNetworkPolicy::Limited {
+        allowed_hosts: vec!["github.com".into()],
+    }
+    .into();
+    request.spec.policy.credentials = vec![crate::EgressCredentialBinding {
+        name: "github-token".into(),
+        environment_variable: "GH_TOKEN".into(),
+        networking: crate::CredentialNetworkPolicy::Limited {
+            allowed_hosts: vec!["github.com".into()],
+        },
+        injection_location: crate::CredentialInjectionLocation { header: true },
+    }];
     let handle = backend
-        .acquire(provider_contract_request(
-            "local-process",
-            "external-proxy",
-            "local-process".to_string(),
-            &tempdir.path().display().to_string(),
-        ))
+        .acquire(request)
         .await
-        .expect("acquire local process sandbox");
+        .expect("a proxied local process accepts a limited policy with credentials");
     let environment = handle
         .command_environment()
         .await

@@ -317,6 +317,16 @@ impl CliContainerSandboxBackend {
     }
 
     async fn prepare_request(&self, request: SandboxRequest) -> Result<SandboxRequest> {
+        let mut request = request;
+        if self.external_proxy.is_some()
+            && matches!(
+                request.spec.policy.networking,
+                SandboxNetworkPolicy::Limited { .. }
+            )
+        {
+            // The external proxy limits egress; the container needs the network to reach it.
+            request.spec.policy.networking = SandboxNetworkPolicy::Unrestricted;
+        }
         validate_durable_file_system_mounts(
             &request.spec.mounts,
             &request.spec.durable_file_systems,
@@ -435,7 +445,9 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
+        if self.external_proxy.is_none() {
+            request.spec.policy.validate_basic("container sandbox")?;
+        }
         ensure!(
             request.lifecycle.idle_ttl.is_some() || self.external_proxy.is_none(),
             "external proxies require a warm sandbox lifecycle (set idle_ttl)"
@@ -501,9 +513,11 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         request: SandboxRequest,
         attachment: SandboxAttachment,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
+        if self.external_proxy.is_none() {
+            request.spec.policy.validate_basic("container sandbox")?;
+        }
         ensure!(
-            request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
+            request.spec.policy.networking != SandboxNetworkPolicy::Disabled,
             "Docker attachments cannot enforce policy.networking.disabled"
         );
         if self.cli != ContainerCliFlavor::Docker {
@@ -538,7 +552,9 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
+        if self.external_proxy.is_none() {
+            request.spec.policy.validate_basic("container sandbox")?;
+        }
         if request.lifecycle.idle_ttl.is_none() {
             bail!("restore-from-snapshot requires a warm sandbox lifecycle (idle_ttl must be set)");
         }
@@ -904,9 +920,11 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
     }
 
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("local process")?;
+        if self.external_proxy.is_none() {
+            request.spec.policy.validate_basic("local process")?;
+        }
         ensure!(
-            request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
+            request.spec.policy.networking != SandboxNetworkPolicy::Disabled,
             "local process does not support policy.networking.disabled"
         );
         if !request.spec.durable_file_systems.is_empty() {
