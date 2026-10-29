@@ -120,7 +120,7 @@ impl ManagedSandboxHandle for ProcessManagedSandbox {
         &self,
         port: u16,
         path: &str,
-    ) -> Result<Option<crate::SandboxWebSocketConnection>> {
+    ) -> Result<Option<crate::BoxSandboxWebSocket>> {
         self.handle.connect_websocket(port, path).await
     }
     async fn stop(&self) -> Result<()> {

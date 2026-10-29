@@ -993,6 +993,17 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
         DirectExternalProxy::environment_of(self.egress.as_ref())
     }
 
+    fn supports_tcp(&self) -> bool {
+        true
+    }
+
+    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
+        let stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .with_context(|| format!("connecting to local process port {port}"))?;
+        Ok(Some(Box::pin(stream)))
+    }
+
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         if command.argv.is_empty() {
             bail!("sandbox command requires at least one argv entry");

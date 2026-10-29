@@ -142,20 +142,22 @@ pub trait SandboxHandle: SnapshotHandle {
     ) -> Result<Option<crate::BoxSandboxTcpStream>> {
         Ok(None)
     }
-    /// Reach a WebSocket server on `port` inside the sandbox; see
-    /// `ManagedSandboxHandle::connect_websocket`. The default hands back the
-    /// TCP stream for the caller to handshake over.
+    /// Reach a WebSocket server on `port` inside the sandbox with the client
+    /// handshake done; see `ManagedSandboxHandle::connect_websocket`. The
+    /// default handshakes over the `connect_sandbox_tcp` stream.
     #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
     async fn connect_sandbox_websocket(
         &self,
         id: SandboxId,
         port: u16,
-        _path: &str,
-    ) -> Result<Option<crate::SandboxWebSocketConnection>> {
-        Ok(self
-            .connect_sandbox_tcp(id, port)
-            .await?
-            .map(crate::SandboxWebSocketConnection::Raw))
+        path: &str,
+    ) -> Result<Option<crate::BoxSandboxWebSocket>> {
+        let Some(stream) = self.connect_sandbox_tcp(id, port).await? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            crate::sandbox::websocket_over(stream, port, path).await?,
+        ))
     }
     /// Environment the backend injects into every process in the sandbox,
     /// such as proxy and credential placeholders; see

@@ -327,19 +327,20 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
-    /// Reach a WebSocket server listening on `port` inside the sandbox. The
-    /// default hands back the `connect_tcp` stream for the caller to handshake
-    /// over. Backends that can only proxy HTTP to guest ports perform the
-    /// upgrade themselves and return the upgraded stream.
+    /// Reach a WebSocket server listening on `port` inside the sandbox at
+    /// `path` and complete the client handshake. The default handshakes over
+    /// the `connect_tcp` stream; backends that can only proxy HTTP to guest
+    /// ports perform the upgrade themselves.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
     async fn connect_websocket(
         &self,
         port: u16,
-        _path: &str,
-    ) -> Result<Option<SandboxWebSocketConnection>> {
-        Ok(self
-            .connect_tcp(port)
-            .await?
-            .map(SandboxWebSocketConnection::Raw))
+        path: &str,
+    ) -> Result<Option<BoxSandboxWebSocket>> {
+        let Some(stream) = self.connect_tcp(port).await? else {
+            return Ok(None);
+        };
+        Ok(Some(websocket_over(stream, port, path).await?))
     }
 
     async fn stop(&self) -> Result<()>;
@@ -367,14 +368,50 @@ impl<T> SandboxTcpStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncW
 
 pub type BoxSandboxTcpStream = Pin<Box<dyn SandboxTcpStream>>;
 
-/// A connection to a WebSocket server inside a sandbox, in one of two states.
-pub enum SandboxWebSocketConnection {
-    /// A byte stream to the port; the caller performs the WebSocket client
-    /// handshake over it.
-    Raw(BoxSandboxTcpStream),
-    /// A stream on which the backend has already completed the WebSocket client
-    /// handshake; the caller frames messages directly.
-    Upgraded(BoxSandboxTcpStream),
+/// A WebSocket to a port inside the sandbox with the client handshake done.
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub trait SandboxWebSocket:
+    futures::Stream<
+        Item = std::result::Result<
+            tokio_tungstenite::tungstenite::Message,
+            tokio_tungstenite::tungstenite::Error,
+        >,
+    > + futures::Sink<
+        tokio_tungstenite::tungstenite::Message,
+        Error = tokio_tungstenite::tungstenite::Error,
+    > + Send
+    + Unpin
+{
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+impl<T> SandboxWebSocket for T where
+    T: futures::Stream<
+            Item = std::result::Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + futures::Sink<
+            tokio_tungstenite::tungstenite::Message,
+            Error = tokio_tungstenite::tungstenite::Error,
+        > + Send
+        + Unpin
+{
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub type BoxSandboxWebSocket = Pin<Box<dyn SandboxWebSocket>>;
+
+/// Complete a WebSocket client handshake over a stream to `port` at `path`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub(crate) async fn websocket_over(
+    stream: BoxSandboxTcpStream,
+    port: u16,
+    path: &str,
+) -> Result<BoxSandboxWebSocket> {
+    let (socket, _) =
+        tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}{path}"), stream).await?;
+    Ok(Box::pin(socket))
 }
 
 /// Whether a handle may still be used; see `ManagedSandboxHandle::validity`.

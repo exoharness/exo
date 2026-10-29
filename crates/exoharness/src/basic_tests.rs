@@ -750,6 +750,81 @@ async fn docker_sandbox_contract_external_proxy_environment() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_reaches_loopback_websockets() {
+    use anyhow::Context as _;
+    use futures::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind echo listener");
+    let port = listener.local_addr().expect("listener address").port();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut socket = tokio_tungstenite::accept_async(stream).await?;
+        let message = socket.next().await.context("client message")??;
+        socket.send(message).await?;
+        Ok::<_, anyhow::Error>(())
+    });
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::LocalProcessSandboxBackend::new());
+    let handle = backend
+        .acquire(provider_contract_request(
+            "local-process",
+            "loopback-websocket",
+            "local-process".to_string(),
+            &tempdir.path().display().to_string(),
+        ))
+        .await
+        .expect("acquire local process sandbox");
+    assert!(handle.supports_tcp());
+    let mut socket = handle
+        .connect_websocket(port, "/echo")
+        .await
+        .expect("connect websocket")
+        .expect("local process sandboxes reach loopback ports");
+    socket
+        .send(WsMessage::Text("ping".into()))
+        .await
+        .expect("send ping");
+    let echoed = timeout(Duration::from_secs(10), socket.next())
+        .await
+        .expect("echo before timeout")
+        .expect("echo message")
+        .expect("echo frame");
+    assert_eq!(echoed, WsMessage::Text("ping".into()));
+    server.await.expect("server task").expect("server echo");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_process_sandbox_contract_connect_tcp_round_trip() {
+    if tokio::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let tempdir = TempDir::new().expect("tempdir");
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::LocalProcessSandboxBackend::new());
+    let handle = backend
+        .acquire(provider_contract_request(
+            "local-process",
+            "connect-tcp",
+            "local-process".to_string(),
+            &tempdir.path().display().to_string(),
+        ))
+        .await
+        .expect("acquire local process sandbox");
+    crate::contract_tests::sandbox_handle_connect_tcp_round_trip(handle)
+        .await
+        .expect("local process connect_tcp contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn local_process_sandbox_rejects_durable_file_systems() {
     let tempdir = TempDir::new().expect("tempdir");
     let backend: Arc<dyn ManagedSandboxBackend> =
