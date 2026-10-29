@@ -750,6 +750,52 @@ async fn docker_sandbox_contract_external_proxy_environment() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn direct_external_proxy_backend_installs_trust_over_any_backend() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let proxy = test_external_proxy();
+    let backend = crate::DirectExternalProxyBackend::wrap(
+        Arc::new(crate::LocalProcessSandboxBackend::new()),
+        proxy.clone(),
+    )
+    .expect("wrapped backend");
+    let handle = backend
+        .acquire(provider_contract_request(
+            "local-process",
+            "wrapped-external-proxy",
+            "local-process".to_string(),
+            &tempdir.path().display().to_string(),
+        ))
+        .await
+        .expect("acquire wrapped sandbox");
+    let environment = handle
+        .command_environment()
+        .await
+        .expect("command environment");
+    assert_eq!(
+        environment["HTTPS_PROXY"],
+        "http://sandbox:capability-token@127.0.0.1:3128/"
+    );
+    let output = handle
+        .exec(&SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf '%s' \"$GH_TOKEN\"".into(),
+            ],
+            env: std::collections::HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(10)),
+        })
+        .await
+        .expect("exec with proxy environment");
+    assert_eq!(output.stdout, "placeholder");
+    crate::contract_tests::sandbox_handle_exposes_external_proxy_environment(handle, &proxy)
+        .await
+        .expect("wrapped external proxy contract");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn local_process_sandbox_reaches_loopback_websockets() {
     use anyhow::Context as _;
     use futures::{SinkExt as _, StreamExt as _};
