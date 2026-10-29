@@ -234,6 +234,37 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
+    /// Identity of the provider allocation backing this handle, for backends
+    /// that give one sandbox successive allocations. It is stable for the
+    /// allocation's life, distinct across allocations of the same sandbox, and
+    /// absent for backends without that notion. Fence per-allocation state on
+    /// this rather than on `id()`, which some backends derive from the sandbox
+    /// name and therefore repeat across allocations.
+    fn allocation_identity(&self) -> Option<String> {
+        None
+    }
+
+    /// The recovery point this handle was restored from, when the backend
+    /// restored filesystem state after the previous allocation was lost rather
+    /// than resuming it intact.
+    fn recovery_point(&self) -> Option<SandboxRecoveryPoint> {
+        None
+    }
+
+    /// Whether the backend prepared the sandbox's repositories before returning
+    /// this handle, so the caller must not clone them again.
+    fn prepared_repositories(&self) -> bool {
+        false
+    }
+
+    /// Whether operations on this handle may still be attempted. A handle is
+    /// invalidated by an error that requires reconnecting; validity belongs to
+    /// this handle instance only and says nothing about the sandbox's
+    /// authorization or lifecycle.
+    fn validity(&self) -> HandleValidity {
+        HandleValidity::Valid
+    }
+
     /// Keep this sandbox available during a turn. Backends whose lifecycle
     /// already covers turn activity do not need a separate guard.
     async fn activity(&self) -> Result<crate::SandboxActivity> {
@@ -296,6 +327,21 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
+    /// Reach a WebSocket server listening on `port` inside the sandbox. The
+    /// default hands back the `connect_tcp` stream for the caller to handshake
+    /// over. Backends that can only proxy HTTP to guest ports perform the
+    /// upgrade themselves and return the upgraded stream.
+    async fn connect_websocket(
+        &self,
+        port: u16,
+        _path: &str,
+    ) -> Result<Option<SandboxWebSocketConnection>> {
+        Ok(self
+            .connect_tcp(port)
+            .await?
+            .map(SandboxWebSocketConnection::Raw))
+    }
+
     async fn stop(&self) -> Result<()>;
 
     /// Relinquish lifecycle ownership without stopping the sandbox and return
@@ -321,6 +367,43 @@ impl<T> SandboxTcpStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncW
 
 pub type BoxSandboxTcpStream = Pin<Box<dyn SandboxTcpStream>>;
 
+/// A connection to a WebSocket server inside a sandbox, in one of two states.
+pub enum SandboxWebSocketConnection {
+    /// A byte stream to the port; the caller performs the WebSocket client
+    /// handshake over it.
+    Raw(BoxSandboxTcpStream),
+    /// A stream on which the backend has already completed the WebSocket client
+    /// handshake; the caller frames messages directly.
+    Upgraded(BoxSandboxTcpStream),
+}
+
+/// Whether a handle may still be used; see `ManagedSandboxHandle::validity`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandleValidity {
+    Valid,
+    Invalidated { reason: String },
+}
+
+/// Where a restored sandbox's filesystem came from; see
+/// `ManagedSandboxHandle::recovery_point`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxRecoveryPoint {
+    pub captured_at_millis: u64,
+    pub description: String,
+}
+
+/// Facts about a backend that generic callers need before acquiring from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxBackendCapabilities {
+    /// Requests may carry durable file systems.
+    pub durable_file_systems: bool,
+    /// The working directory the backend provides when a request names none.
+    pub default_workdir: Option<String>,
+    /// Sandboxes always have outbound networking regardless of the egress
+    /// policy the request asks for.
+    pub networking_always_enabled: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct SandboxImageConfiguration {
@@ -345,6 +428,14 @@ pub struct SandboxImageHealthcheck {
 pub struct ResolvedSandboxImage {
     pub image: String,
     pub configuration: SandboxImageConfiguration,
+    /// A port on which the image already serves a Codex exec-server, so callers
+    /// connect to it instead of starting one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_exec_server_port: Option<u16>,
+    /// The image ships a GitHub CLI wired to the sandbox's proxy, so callers may
+    /// direct agents to `gh api` for writes.
+    #[serde(default)]
+    pub github_cli: bool,
 }
 
 #[async_trait]
@@ -373,6 +464,10 @@ pub trait ManagedSandboxBackend: Send + Sync {
     }
 
     fn is_local(&self) -> bool;
+
+    fn capabilities(&self) -> SandboxBackendCapabilities {
+        SandboxBackendCapabilities::default()
+    }
 
     /// Whether stopping leaves provider-owned disks that deletion must reclaim.
     fn retains_disk_when_stopped(&self) -> bool {
@@ -422,6 +517,17 @@ pub trait ManagedSandboxBackend: Send + Sync {
         _sandbox_id: &str,
         _request: Option<&SandboxRequest>,
         _previous: &Arc<dyn ManagedSandboxHandle>,
+    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
+        Ok(None)
+    }
+
+    /// Reconnect to an existing sandbox with no previous handle and without
+    /// provisioning or resuming it. Return `None` when the sandbox is not
+    /// currently running or the backend cannot resolve it by id.
+    async fn lookup(
+        &self,
+        _sandbox_id: &str,
+        _request: Option<&SandboxRequest>,
     ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
         Ok(None)
     }

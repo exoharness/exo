@@ -1514,6 +1514,8 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             let file = File::open(path.with_extension("config.json"))?;
             let configuration = serde_json::from_reader(std::io::Read::take(file, 65_536))?;
             Ok(crate::ResolvedSandboxImage {
+                prepared_exec_server_port: None,
+                github_cli: false,
                 image: path.to_string_lossy().into_owned(),
                 configuration,
             })
