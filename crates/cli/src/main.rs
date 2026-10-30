@@ -1,3 +1,4 @@
+mod bootstrap;
 mod env;
 #[cfg(test)]
 mod env_tests;
@@ -502,6 +503,8 @@ impl Cli {
         match &self.command {
             Commands::Environment { runtime, .. }
             | Commands::Vault { runtime, .. }
+            | Commands::Secret { runtime, .. }
+            | Commands::Model { runtime, .. }
             | Commands::Identity { runtime, .. }
             | Commands::Run { runtime, .. }
             | Commands::Agent { runtime, .. }
@@ -562,6 +565,20 @@ enum Commands {
         runtime: RuntimeArgs,
         #[command(subcommand)]
         command: vaults::VaultCommands,
+    },
+    /// Store credentials for models and adapters.
+    Secret {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        #[command(subcommand)]
+        command: bootstrap::SecretCommands,
+    },
+    /// Bind models and their credentials to agents.
+    Model {
+        #[command(flatten)]
+        runtime: RuntimeArgs,
+        #[command(subcommand)]
+        command: bootstrap::ModelCommands,
     },
     #[command(hide = true)]
     FirecrackerBridge,
@@ -1169,6 +1186,8 @@ async fn run_selected(
         Commands::Identity { command, .. } => identity::run(&harness, http_client.as_ref(), state_root.as_deref(), command.into_request()).await?,
         Commands::Vault { command: vaults::VaultCommands::Bind { vault, email }, .. } => identity::run(&harness, http_client.as_ref(), state_root.as_deref(), exo_managed_agents::identity::IdentityCommand::BindVault { vault, email }).await?,
         Commands::Vault { command, .. } => vaults::run(harness.exoharness_handle().as_ref(), &command, &env_vars, local).await?,
+        Commands::Secret { command, .. } => bootstrap::run_secret_command(harness.exoharness_handle().as_ref(), &command, &env_vars, local).await?,
+        Commands::Model { command, .. } => bootstrap::run_model_command(harness.as_ref(), harness.exoharness_handle().as_ref(), &command).await?,
         Commands::Run { thread, serve: true, service, .. } => {
             let agent = if thread.agent.is_some() {
                 Some(managed_agents::open_agent(harness.as_ref(), definition.as_ref(), &thread).await?.record().id)
@@ -1185,12 +1204,35 @@ async fn run_selected(
                 execution.egress_policy.is_some(),
             )
             .await?;
+            if local {
+                let readiness = bootstrap::check_model_readiness(
+                    harness.as_ref(), agent.as_ref(), conversation.as_ref(),
+                ).await?;
+                if !matches!(readiness, bootstrap::ModelReadiness::Ready) {
+                    let interactive_setup = prompt.is_none()
+                        && io::stdin().is_terminal() && io::stdout().is_terminal();
+                    if interactive_setup {
+                        bootstrap::bootstrap_model(
+                            harness.as_ref(),
+                            harness.exoharness_handle().as_ref(),
+                            agent.as_ref(),
+                            conversation.as_ref(),
+                            readiness,
+                            local,
+                        ).await?;
+                    } else if let bootstrap::ModelReadiness::Unusable(error) = readiness {
+                        return Err(error);
+                    } else {
+                        let config = harness.as_ref().get_thread_agent_config(
+                            agent.as_ref(), conversation.as_ref(),
+                        ).await?;
+                        bootstrap::print_setup_guidance(&config, &agent.record().slug);
+                    }
+                }
+            }
             let mut progress = turn_display::TurnProgress::new();
             progress.set_status(Some("Preparing session".into()));
             if local {
-                managed_agents::check_model_credentials(
-                    harness.as_ref(), agent.as_ref(), conversation.as_ref(),
-                ).await?;
                 progress.wait(harness.start_inline_previews(agent.as_ref(), conversation.clone())).await?;
             }
             if let Some(previews) = progress.wait(harness.preview_urls(agent.as_ref(), conversation.clone())).await? {
@@ -2109,6 +2151,8 @@ fn command_refs_mut(command: &mut Commands) -> (Option<&mut String>, Option<&mut
         | Commands::Provider { .. }
         | Commands::Environment { .. }
         | Commands::Vault { .. }
+        | Commands::Secret { .. }
+        | Commands::Model { .. }
         | Commands::Identity { .. } => (None, None),
     }
 }
