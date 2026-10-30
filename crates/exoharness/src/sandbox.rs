@@ -234,37 +234,6 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
-    /// Identity of the provider allocation backing this handle, for backends
-    /// that give one sandbox successive allocations. It is stable for the
-    /// allocation's life, distinct across allocations of the same sandbox, and
-    /// absent for backends without that notion. Fence per-allocation state on
-    /// this rather than on `id()`, which some backends derive from the sandbox
-    /// name and therefore repeat across allocations.
-    fn allocation_identity(&self) -> Option<String> {
-        None
-    }
-
-    /// The recovery point this handle was restored from, when the backend
-    /// restored filesystem state after the previous allocation was lost rather
-    /// than resuming it intact.
-    fn recovery_point(&self) -> Option<SandboxRecoveryPoint> {
-        None
-    }
-
-    /// Whether the backend prepared the sandbox's repositories before returning
-    /// this handle, so the caller must not clone them again.
-    fn prepared_repositories(&self) -> bool {
-        false
-    }
-
-    /// Whether operations on this handle may still be attempted. A handle is
-    /// invalidated by an error that requires reconnecting; validity belongs to
-    /// this handle instance only and says nothing about the sandbox's
-    /// authorization or lifecycle.
-    fn validity(&self) -> HandleValidity {
-        HandleValidity::Valid
-    }
-
     /// Keep this sandbox available during a turn. Backends whose lifecycle
     /// already covers turn activity do not need a separate guard.
     async fn activity(&self) -> Result<crate::SandboxActivity> {
@@ -412,21 +381,6 @@ pub(crate) async fn websocket_over(
     let (socket, _) =
         tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}{path}"), stream).await?;
     Ok(Box::pin(socket))
-}
-
-/// Whether a handle may still be used; see `ManagedSandboxHandle::validity`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HandleValidity {
-    Valid,
-    Invalidated { reason: String },
-}
-
-/// Where a restored sandbox's filesystem came from; see
-/// `ManagedSandboxHandle::recovery_point`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SandboxRecoveryPoint {
-    pub captured_at_millis: u64,
-    pub description: String,
 }
 
 /// Facts about a backend that generic callers need before acquiring from it.

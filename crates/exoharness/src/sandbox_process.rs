@@ -56,18 +56,6 @@ impl ManagedSandboxHandle for ProcessManagedSandbox {
     async fn is_running(&self) -> Result<Option<bool>> {
         self.handle.is_running().await
     }
-    fn allocation_identity(&self) -> Option<String> {
-        self.handle.allocation_identity()
-    }
-    fn recovery_point(&self) -> Option<crate::SandboxRecoveryPoint> {
-        self.handle.recovery_point()
-    }
-    fn prepared_repositories(&self) -> bool {
-        self.handle.prepared_repositories()
-    }
-    fn validity(&self) -> crate::HandleValidity {
-        self.handle.validity()
-    }
     async fn activity(&self) -> Result<crate::SandboxActivity> {
         self.handle.activity().await
     }
