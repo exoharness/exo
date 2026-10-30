@@ -2775,6 +2775,32 @@ struct TestProviderStateHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for TestProviderStateHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         "test-provider-state"
     }
@@ -2888,6 +2914,32 @@ struct TestSandboxHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for TestSandboxHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         "test-sandbox"
     }
@@ -3223,6 +3275,32 @@ struct RestoreImageTestHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for RestoreImageTestHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         "restore-image-test"
     }

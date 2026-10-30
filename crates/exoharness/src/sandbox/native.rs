@@ -597,6 +597,32 @@ struct BorrowedDockerSandboxHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for BorrowedDockerSandboxHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         &self.id
     }
@@ -634,6 +660,32 @@ struct OneShotSandboxHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for OneShotSandboxHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         &self.id
     }
@@ -683,6 +735,32 @@ struct WarmSandboxHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for WarmSandboxHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         &self.id
     }
@@ -886,6 +964,32 @@ struct LocalProcessSandboxHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for LocalProcessSandboxHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         &self.id
     }

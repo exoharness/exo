@@ -1181,6 +1181,32 @@ impl SmolvmOneShotHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for SmolvmOneShotHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     fn id(&self) -> &str {
         &self.id
     }
@@ -1276,6 +1302,32 @@ impl SmolvmWarmHandle {
 
 #[async_trait]
 impl ManagedSandboxHandle for SmolvmWarmHandle {
+    async fn start_managed_terminal(
+        &self,
+        _command: &crate::SandboxCommand,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<crate::SandboxProcessId> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn resize_terminal(
+        &self,
+        _process_id: &str,
+        _size: crate::SandboxTerminalSize,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sandbox backend does not support managed terminals")
+    }
+
+    async fn release_processes(&self) {}
+
+    async fn next_process_events(
+        &self,
+        _process_id: &str,
+        _after: u64,
+    ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
+        anyhow::bail!("sandbox backend does not support managed processes")
+    }
+
     async fn command_environment(&self) -> Result<HashMap<String, String>> {
         match &self.egress {
             Some(egress) => egress.environment(),
