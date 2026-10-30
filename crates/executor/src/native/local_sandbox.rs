@@ -496,6 +496,31 @@ impl SandboxHandle for LocalSandboxAgent {
             .await
     }
 
+    async fn connect_sandbox_websocket(
+        &self,
+        id: SandboxId,
+        port: u16,
+        path: &str,
+    ) -> Result<Option<exoharness::BoxSandboxWebSocket>> {
+        let Some(local_id) = self.local_sandbox_id(&id).await? else {
+            return self.remote.connect_sandbox_websocket(id, port, path).await;
+        };
+        self.local_agent()
+            .await?
+            .connect_sandbox_websocket(local_id, port, path)
+            .await
+    }
+
+    async fn sandbox_command_environment(&self, id: SandboxId) -> Result<HashMap<String, String>> {
+        let Some(local_id) = self.local_sandbox_id(&id).await? else {
+            return self.remote.sandbox_command_environment(id).await;
+        };
+        self.local_agent()
+            .await?
+            .sandbox_command_environment(local_id)
+            .await
+    }
+
     async fn start_sandbox_process(
         &self,
         request: StartSandboxProcessRequest,
@@ -1139,6 +1164,31 @@ impl SandboxHandle for LocalSandboxConversation {
         self.local_conversation()
             .await?
             .connect_sandbox_tcp(local_id, port)
+            .await
+    }
+
+    async fn connect_sandbox_websocket(
+        &self,
+        id: SandboxId,
+        port: u16,
+        path: &str,
+    ) -> Result<Option<exoharness::BoxSandboxWebSocket>> {
+        let Some(local_id) = self.local_sandbox_id(&id).await? else {
+            return self.remote.connect_sandbox_websocket(id, port, path).await;
+        };
+        self.local_conversation()
+            .await?
+            .connect_sandbox_websocket(local_id, port, path)
+            .await
+    }
+
+    async fn sandbox_command_environment(&self, id: SandboxId) -> Result<HashMap<String, String>> {
+        let Some(local_id) = self.local_sandbox_id(&id).await? else {
+            return self.remote.sandbox_command_environment(id).await;
+        };
+        self.local_conversation()
+            .await?
+            .sandbox_command_environment(local_id)
             .await
     }
 
