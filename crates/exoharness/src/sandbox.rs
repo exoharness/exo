@@ -448,9 +448,7 @@ pub trait ManagedSandboxBackend: Send + Sync {
 
     fn is_local(&self) -> bool;
 
-    fn capabilities(&self) -> SandboxBackendCapabilities {
-        SandboxBackendCapabilities::default()
-    }
+    fn capabilities(&self) -> SandboxBackendCapabilities;
 
     /// Whether stopping leaves provider-owned disks that deletion must reclaim.
     fn retains_disk_when_stopped(&self) -> bool {
@@ -509,11 +507,9 @@ pub trait ManagedSandboxBackend: Send + Sync {
     /// currently running or the backend cannot resolve it by id.
     async fn lookup(
         &self,
-        _sandbox_id: &str,
-        _request: Option<&SandboxRequest>,
-    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
-        Ok(None)
-    }
+        sandbox_id: &str,
+        request: Option<&SandboxRequest>,
+    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>>;
 
     /// Stop the sandbox identified by `sandbox_id`, even if `previous` is stale.
     /// Backends with independently changing allocations should override this to

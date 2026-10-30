@@ -136,6 +136,18 @@ impl CloudflareBackend {
 }
 #[async_trait]
 impl ManagedSandboxBackend for CloudflareBackend {
+    fn capabilities(&self) -> exoharness::SandboxBackendCapabilities {
+        exoharness::SandboxBackendCapabilities::default()
+    }
+
+    async fn lookup(
+        &self,
+        _sandbox_id: &str,
+        _request: Option<&exoharness::SandboxRequest>,
+    ) -> Result<Option<std::sync::Arc<dyn exoharness::ManagedSandboxHandle>>> {
+        Ok(None)
+    }
+
     fn is_local(&self) -> bool {
         false
     }

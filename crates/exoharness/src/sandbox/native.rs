@@ -375,6 +375,14 @@ impl Drop for CliContainerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for CliContainerSandboxBackend {
+    async fn lookup(
+        &self,
+        _sandbox_id: &str,
+        _request: Option<&crate::SandboxRequest>,
+    ) -> Result<Option<std::sync::Arc<dyn crate::ManagedSandboxHandle>>> {
+        Ok(None)
+    }
+
     fn is_local(&self) -> bool {
         true
     }
@@ -800,6 +808,14 @@ impl LocalProcessSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for LocalProcessSandboxBackend {
+    async fn lookup(
+        &self,
+        _sandbox_id: &str,
+        _request: Option<&crate::SandboxRequest>,
+    ) -> Result<Option<std::sync::Arc<dyn crate::ManagedSandboxHandle>>> {
+        Ok(None)
+    }
+
     fn is_local(&self) -> bool {
         true
     }
