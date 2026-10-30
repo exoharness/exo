@@ -1223,12 +1223,6 @@ pub enum SandboxProcessEvent {
     Cancelled {
         cursor: u64,
     },
-    /// Output through `cursor` was dropped to stay within the process's
-    /// retained-output limits; `dropped_bytes` counts the lost bytes.
-    Truncated {
-        cursor: u64,
-        dropped_bytes: u64,
-    },
 }
 
 impl SandboxProcessEvent {
@@ -1238,8 +1232,7 @@ impl SandboxProcessEvent {
             | Self::Stderr { cursor, .. }
             | Self::Exit { cursor, .. }
             | Self::Error { cursor, .. }
-            | Self::Cancelled { cursor }
-            | Self::Truncated { cursor, .. } => *cursor,
+            | Self::Cancelled { cursor } => *cursor,
         }
     }
 }

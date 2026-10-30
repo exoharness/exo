@@ -288,38 +288,6 @@ pub trait ManagedSandboxHandle: Send + Sync {
         bail!("sandbox backend does not support terminal sessions")
     }
 
-    /// Start a terminal as a managed process: its output arrives as stdout
-    /// events and `resize_terminal` changes its size.
-    async fn start_managed_terminal(
-        &self,
-        _command: &SandboxCommand,
-        _size: crate::SandboxTerminalSize,
-    ) -> Result<crate::SandboxProcessId> {
-        bail!("sandbox backend does not support managed terminals")
-    }
-
-    async fn resize_terminal(
-        &self,
-        _process_id: &str,
-        _size: crate::SandboxTerminalSize,
-    ) -> Result<()> {
-        bail!("sandbox backend does not support managed terminals")
-    }
-
-    /// Cancel every managed process and drop its record. Call this when the
-    /// sandbox went away without `stop`, such as after a backend terminate.
-    async fn release_processes(&self) {}
-
-    /// Like `process_events`, but waits until an event after `after` exists
-    /// or the process has finished.
-    async fn next_process_events(
-        &self,
-        _process_id: &str,
-        _after: u64,
-    ) -> Result<crate::GetSandboxProcessEventsResult> {
-        bail!("sandbox backend does not support managed processes")
-    }
-
     fn supports_tcp(&self) -> bool {
         false
     }

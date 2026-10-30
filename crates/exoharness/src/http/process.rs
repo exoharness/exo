@@ -142,11 +142,6 @@ async fn poll_events(
                 SandboxProcessEvent::Cancelled { .. } => {
                     return Err(anyhow!("sandbox process was cancelled"));
                 }
-                SandboxProcessEvent::Truncated { dropped_bytes, .. } => {
-                    return Err(anyhow!(
-                        "sandbox process output was truncated ({dropped_bytes} bytes dropped)"
-                    ));
-                }
             }
         }
         match result.status {
