@@ -680,6 +680,56 @@ impl<'a> BasicScopedSandboxHandle<'a> {
         sandbox_handle.connect_tcp(port).await
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+    pub(super) async fn connect_sandbox_websocket(
+        &self,
+        id: SandboxId,
+        port: u16,
+        path: &str,
+    ) -> Result<Option<crate::BoxSandboxWebSocket>> {
+        self.harness.check(self.owner).await?;
+        self.ensure_full_sandbox_scope("connect_sandbox_websocket")?;
+        let sandbox = self.load_sandbox(&id).await?;
+        if !sandbox.running {
+            bail!("sandbox is not running: {id}");
+        }
+        if sandbox.provider == SandboxProvider::Smolvm && sandbox.attachment.is_none() {
+            let Some(stream) = self
+                .harness
+                .inner
+                .sandbox_backend_for_provider(sandbox.provider.clone())
+                .await?
+                .connect_tcp(sandbox_request(self.owner, &id, &sandbox, None), port)
+                .await?
+            else {
+                return Ok(None);
+            };
+            return Ok(Some(
+                crate::sandbox::websocket_over(stream, port, path).await?,
+            ));
+        }
+        let sandbox_handle = self.tcp_sandbox_handle(&id, &sandbox).await?;
+        sandbox_handle.connect_websocket(port, path).await
+    }
+
+    #[cfg(feature = "basic-backend")]
+    pub(super) async fn sandbox_command_environment(
+        &self,
+        id: SandboxId,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        self.harness.check(self.owner).await?;
+        self.ensure_full_sandbox_scope("sandbox_command_environment")?;
+        let sandbox = self.load_sandbox(&id).await?;
+        if !sandbox.running {
+            bail!("sandbox is not running: {id}");
+        }
+        if sandbox.provider == SandboxProvider::Smolvm && sandbox.attachment.is_none() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let sandbox_handle = self.tcp_sandbox_handle(&id, &sandbox).await?;
+        sandbox_handle.command_environment().await
+    }
+
     #[cfg(feature = "basic-backend")]
     pub(super) async fn sandbox_supports_tcp(&self, id: SandboxId) -> Result<bool> {
         self.harness.check(self.owner).await?;

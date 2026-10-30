@@ -2679,6 +2679,142 @@ async fn tcp_access_caches_full_handles_for_other_providers() -> crate::Result<(
     Ok(())
 }
 
+#[tokio::test]
+async fn thread_websocket_and_environment_reach_the_sandbox_handle() -> crate::Result<()> {
+    let temp = TempDir::new()?;
+    let harness = BasicExoHarness::new_with_sandbox_backend(
+        local_test_config(temp.path()),
+        Arc::new(WebSocketOnlyBackend),
+    )
+    .await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            slug: "websocket".into(),
+            name: "WebSocket".into(),
+            vaults: vec![],
+        })
+        .await?;
+    let thread = agent.new_thread(Default::default()).await?;
+    let id = thread
+        .create_sandbox(provider_state_test_create_request())
+        .await?;
+    assert!(!thread.sandbox_supports_tcp(id.clone()).await?);
+    assert!(
+        thread
+            .connect_sandbox_websocket(id.clone(), 8000, "/")
+            .await?
+            .is_some()
+    );
+    assert_eq!(
+        thread.sandbox_command_environment(id).await?,
+        std::collections::HashMap::from([("SANDBOX_PROXY".to_string(), "set".to_string())])
+    );
+    Ok(())
+}
+
+/// A backend whose sandboxes are reachable by WebSocket but not raw TCP,
+/// like providers that only proxy HTTP to guest ports.
+struct WebSocketOnlyBackend;
+
+#[async_trait]
+impl ManagedSandboxBackend for WebSocketOnlyBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
+    fn is_local(&self) -> bool {
+        false
+    }
+
+    fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
+        &[]
+    }
+
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(WebSocketOnlyHandle))
+    }
+
+    async fn attach(
+        &self,
+        _request: SandboxRequest,
+        _attachment: SandboxAttachment,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("websocket-only backend does not support attachment")
+    }
+
+    async fn suspend(
+        &self,
+        _request: SandboxRequest,
+        _kind: crate::SnapshotKind,
+    ) -> crate::Result<SnapshotPayload> {
+        bail!("websocket-only backend does not support suspension")
+    }
+
+    async fn acquire_from_snapshot(
+        &self,
+        _request: SandboxRequest,
+        _payload: SnapshotPayload,
+    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+        bail!("websocket-only backend does not support snapshot restore")
+    }
+}
+
+struct WebSocketOnlyHandle;
+
+#[async_trait]
+impl ManagedSandboxHandle for WebSocketOnlyHandle {
+    fn id(&self) -> &str {
+        "websocket-only"
+    }
+
+    async fn command_environment(
+        &self,
+    ) -> crate::Result<std::collections::HashMap<String, String>> {
+        Ok(std::collections::HashMap::from([(
+            "SANDBOX_PROXY".to_string(),
+            "set".to_string(),
+        )]))
+    }
+
+    async fn connect_websocket(
+        &self,
+        _port: u16,
+        _path: &str,
+    ) -> crate::Result<Option<crate::BoxSandboxWebSocket>> {
+        let (stream, _peer) = tokio::io::duplex(64);
+        let socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        Ok(Some(Box::pin(socket)))
+    }
+
+    async fn exec(&self, _command: &SandboxCommand) -> crate::Result<SandboxCommandOutput> {
+        bail!("websocket-only handle does not support exec")
+    }
+
+    async fn start_process(&self, _command: &SandboxCommand) -> crate::Result<SandboxProcessParts> {
+        bail!("websocket-only handle does not support start_process")
+    }
+
+    async fn stop(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    async fn detach(&self) -> crate::Result<SandboxAttachment> {
+        bail!("websocket-only handle does not support detachment")
+    }
+
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
+        bail!("websocket-only handle does not support snapshots")
+    }
+}
+
 struct TestProviderStateBackend {
     retains_disk_when_stopped: bool,
     state: Value,
