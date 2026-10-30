@@ -23,6 +23,9 @@ EXO_BIN="${EXO_BIN:-$ROOT_DIR/target/debug/exo}"
 SCHEDULER_BIN="${EXO_SCHEDULER_BIN:-$ROOT_DIR/target/debug/exo-scheduler-runner}"
 ENV_FILE="${EXO_ENV_FILE:-$ROOT_DIR/.env}"
 SCHEDULER_INTERVAL_SECONDS="${EXO_SCHEDULER_INTERVAL_SECONDS:-10}"
+# Extra fail-closed preflight command run (from ROOT_DIR) before a freshly
+# built candidate may be activated, for example: EXO_ACTIVATION_PREFLIGHT="pnpm check"
+ACTIVATION_PREFLIGHT="${EXO_ACTIVATION_PREFLIGHT:-}"
 
 for arg_index in "$@"; do
   if [[ "${previous_arg:-}" == "--config" ]]; then
@@ -63,6 +66,12 @@ Options:
   --config <path>           Service guardian config path (default: .exo/exo-service-guardian.env)
   --build                   For restart-all, build before restarting services
   --help                    Show this help
+
+Activation is fail-closed: before services are restarted, the candidate
+binaries are smoke-checked (each must be executable and respond to --help)
+and, if set, the EXO_ACTIVATION_PREFLIGHT command must succeed (run from the
+repo root, e.g. EXO_ACTIVATION_PREFLIGHT="pnpm check"). Any preflight failure
+stops the restart, and the currently running version remains active.
 
 The service guardian owns host-side services only. It never deletes .exo state, adapter
 pairing data, conversations, artifacts, or sandbox records.
@@ -111,7 +120,39 @@ build_all() {
   run_cargo build -p exo --ignore-rust-version
   echo "Building Exo scheduler runner..."
   run_cargo build --manifest-path examples/self-improving-agent/scheduler-runner/Cargo.toml --ignore-rust-version
+  validate_activation
   request_repl_restart
+}
+
+# Fail-closed activation boundary: the currently running version stays active
+# until every required preflight check on the candidate succeeds. A successful
+# build alone does not prove the candidate is safe to activate, so smoke-check
+# the freshly built binaries and run any configured extra preflight command
+# before anything is restarted. Any failure exits nonzero, which the deferred
+# rebuild runner records as a terminal failed outcome; services are untouched.
+validate_activation() {
+  echo "Validating candidate before activation (fail-closed)..."
+  candidate_smoke_check "exo" "$EXO_BIN"
+  candidate_smoke_check "scheduler runner" "$SCHEDULER_BIN"
+  if [[ -n "$ACTIVATION_PREFLIGHT" ]]; then
+    echo "Running configured activation preflight command: $ACTIVATION_PREFLIGHT"
+    if ! (cd "$ROOT_DIR" && eval "$ACTIVATION_PREFLIGHT"); then
+      die "activation preflight command failed; refusing to activate the candidate; the currently running version remains active"
+    fi
+  fi
+  echo "Activation preflight passed."
+}
+
+candidate_smoke_check() {
+  local label="$1"
+  local bin="$2"
+  if [[ ! -x "$bin" ]]; then
+    die "activation preflight failed: $label binary missing or not executable: $bin; the currently running version remains active"
+  fi
+  if ! "$bin" --help >/dev/null 2>&1; then
+    die "activation preflight failed: $label binary does not run ($bin --help exited nonzero); refusing to activate the candidate; the currently running version remains active"
+  fi
+  echo "  $label smoke check passed: $bin"
 }
 
 request_repl_restart() {
@@ -500,6 +541,8 @@ case "$COMMAND" in
   restart-all)
     if [[ "$BUILD_BEFORE_RESTART" == true ]]; then
       build_all
+    else
+      validate_activation
     fi
     restart_services
     ;;
