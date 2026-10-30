@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,15 +11,22 @@ use crate::{BoxAsyncRead, SandboxProcessParts};
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 
-/// What a process produced when run to completion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a process produced when run to completion. Each stream keeps its
+/// last bytes up to the limit; the byte counts include what was dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CollectedProcessOutput {
     pub exit_code: i32,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
-    /// Output beyond the byte limit was dropped from at least one stream, or a
-    /// stream was still open when the drain grace ran out.
-    pub truncated: bool,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+}
+
+impl CollectedProcessOutput {
+    /// Whether either stream lost output to the byte limit.
+    pub fn truncated(&self) -> bool {
+        self.stdout_bytes > self.stdout.len() as u64 || self.stderr_bytes > self.stderr.len() as u64
+    }
 }
 
 /// The process outlived its timeout and was stopped.
@@ -37,8 +45,8 @@ impl std::fmt::Display for ProcessTimedOut {
 
 impl std::error::Error for ProcessTimedOut {}
 
-/// Write `stdin` to a started process, close its input, and collect up to
-/// `max_output_bytes` from each output stream until it exits.
+/// Write `stdin` to a started process, close its input, and collect the last
+/// `max_output_bytes` of each output stream until it exits.
 ///
 /// Dropping a process's pipes stops it, so a timeout, or dropping the returned
 /// future, stops the process as well. A timeout fails with `ProcessTimedOut`.
@@ -68,8 +76,18 @@ async fn collect(
         stdin: mut input,
         wait,
     } = parts;
-    let mut stdout = AbortOnDrop(tokio::spawn(read_capped(stdout, max_output_bytes)));
-    let mut stderr = AbortOnDrop(tokio::spawn(read_capped(stderr, max_output_bytes)));
+    let stdout_tail = Arc::new(Mutex::new(Tail::default()));
+    let stderr_tail = Arc::new(Mutex::new(Tail::default()));
+    let mut stdout = AbortOnDrop(tokio::spawn(read_tail(
+        stdout,
+        Arc::clone(&stdout_tail),
+        max_output_bytes,
+    )));
+    let mut stderr = AbortOnDrop(tokio::spawn(read_tail(
+        stderr,
+        Arc::clone(&stderr_tail),
+        max_output_bytes,
+    )));
     let write = async move {
         let result = async {
             input.write_all(stdin).await?;
@@ -84,40 +102,47 @@ async fn collect(
     let (written, exit_code) = tokio::join!(write, wait);
     let exit_code = exit_code?;
     written?;
-    let drained = tokio::time::timeout(DRAIN_GRACE, async {
+    if let Ok((stdout, stderr)) = tokio::time::timeout(DRAIN_GRACE, async {
         ((&mut stdout.0).await, (&mut stderr.0).await)
     })
-    .await;
-    let Ok((stdout, stderr)) = drained else {
-        return Ok(CollectedProcessOutput {
-            exit_code,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            truncated: true,
-        });
-    };
-    let (stdout, stdout_truncated) = stdout??;
-    let (stderr, stderr_truncated) = stderr??;
+    .await
+    {
+        stdout??;
+        stderr??;
+    }
+    let stdout = std::mem::take(&mut *stdout_tail.lock().unwrap());
+    let stderr = std::mem::take(&mut *stderr_tail.lock().unwrap());
     Ok(CollectedProcessOutput {
         exit_code,
-        stdout,
-        stderr,
-        truncated: stdout_truncated || stderr_truncated,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+        stdout_bytes: stdout.total,
+        stderr_bytes: stderr.total,
     })
 }
 
-async fn read_capped(mut stream: BoxAsyncRead, max_bytes: usize) -> Result<(Vec<u8>, bool)> {
-    let mut kept = Vec::new();
-    let mut truncated = false;
+#[derive(Default)]
+struct Tail {
+    bytes: Vec<u8>,
+    total: u64,
+}
+
+async fn read_tail(
+    mut stream: BoxAsyncRead,
+    tail: Arc<Mutex<Tail>>,
+    max_bytes: usize,
+) -> Result<()> {
     let mut chunk = vec![0; READ_CHUNK_BYTES];
     loop {
         let read = stream.read(&mut chunk).await?;
         if read == 0 {
-            return Ok((kept, truncated));
+            return Ok(());
         }
-        let room = max_bytes.saturating_sub(kept.len());
-        kept.extend_from_slice(&chunk[..read.min(room)]);
-        truncated |= read > room;
+        let mut tail = tail.lock().unwrap();
+        tail.total += read as u64;
+        tail.bytes.extend_from_slice(&chunk[..read]);
+        let excess = tail.bytes.len().saturating_sub(max_bytes);
+        tail.bytes.drain(..excess);
     }
 }
 
@@ -191,7 +216,8 @@ mod tests {
                 exit_code: 3,
                 stdout: b"out".to_vec(),
                 stderr: b"err".to_vec(),
-                truncated: false,
+                stdout_bytes: 3,
+                stderr_bytes: 3,
             }
         );
         assert_eq!(*written.lock().unwrap(), b"input");
@@ -199,12 +225,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn caps_each_stream() -> Result<()> {
+    async fn keeps_the_tail_of_each_stream() -> Result<()> {
         let (parts, _) = parts(b"0123456789", b"ab", Box::pin(async { Ok(0) }));
         let output = collect_process_output(parts, b"", None, 4).await?;
-        assert_eq!(output.stdout, b"0123");
+        assert_eq!(output.stdout, b"6789");
+        assert_eq!(output.stdout_bytes, 10);
         assert_eq!(output.stderr, b"ab");
-        assert!(output.truncated);
+        assert!(output.truncated());
         Ok(())
     }
 
