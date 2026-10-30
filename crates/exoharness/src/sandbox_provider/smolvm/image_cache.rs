@@ -103,8 +103,6 @@ pub(super) fn resolve_image(
     let configuration: ImageConfiguration =
         serde_json::from_reader(File::open(prepared.join("config.json"))?.take(65_536))?;
     Ok(crate::ResolvedSandboxImage {
-        prepared_exec_server_port: None,
-        github_cli: false,
         image: prepared.to_string_lossy().into_owned(),
         configuration: configuration.config,
     })
