@@ -658,7 +658,17 @@ async function traceRootExecutorTurn(
   );
 }
 
-function buildNonStreamingBody(
+// OpenAI prompt caching is keyed on the request prefix; sending a stable
+// `prompt_cache_key` lets the provider route requests from the same session to
+// the same cache shard instead of missing on every call. Derive it from the
+// harness metadata so it stays constant across the turns of a conversation.
+export function promptCacheKeyFromRequest(
+  request: Pick<NativeResponsesRequest, "metadata">,
+): string | undefined {
+  return request.metadata?.conversation_id ?? request.metadata?.session_id;
+}
+
+export function buildNonStreamingBody(
   request: NativeResponsesRequest,
 ): ResponseCreateParamsNonStreaming {
   return {
@@ -669,12 +679,13 @@ function buildNonStreamingBody(
       toolDefinitionsToResponsesTools(request.tools ?? []),
     max_output_tokens: request.maxOutputTokens ?? null,
     metadata: request.metadata ?? null,
+    prompt_cache_key: promptCacheKeyFromRequest(request) ?? undefined,
     stream: false,
     store: false,
   };
 }
 
-function buildStreamingBody(
+export function buildStreamingBody(
   request: NativeResponsesRequest,
 ): ResponseCreateParamsStreaming {
   return {
@@ -685,12 +696,13 @@ function buildStreamingBody(
       toolDefinitionsToResponsesTools(request.tools ?? []),
     max_output_tokens: request.maxOutputTokens ?? null,
     metadata: request.metadata ?? null,
+    prompt_cache_key: promptCacheKeyFromRequest(request) ?? undefined,
     stream: true,
     store: false,
   };
 }
 
-function buildChatNonStreamingBody(
+export function buildChatNonStreamingBody(
   request: NativeResponsesRequest,
 ): ChatCompletionCreateParamsNonStreaming {
   const tools = toolDefinitionsToChatTools(request.tools ?? []);
@@ -700,11 +712,12 @@ function buildChatNonStreamingBody(
     tools: tools.length === 0 ? undefined : tools,
     tool_choice: tools.length === 0 ? undefined : "auto",
     max_tokens: request.maxOutputTokens ?? undefined,
+    prompt_cache_key: promptCacheKeyFromRequest(request) ?? undefined,
     stream: false,
   };
 }
 
-function buildChatStreamingBody(
+export function buildChatStreamingBody(
   request: NativeResponsesRequest,
 ): ChatCompletionCreateParamsStreaming {
   const tools = toolDefinitionsToChatTools(request.tools ?? []);
@@ -714,6 +727,7 @@ function buildChatStreamingBody(
     tools: tools.length === 0 ? undefined : tools,
     tool_choice: tools.length === 0 ? undefined : "auto",
     max_tokens: request.maxOutputTokens ?? undefined,
+    prompt_cache_key: promptCacheKeyFromRequest(request) ?? undefined,
     stream: true,
     stream_options: { include_usage: true },
   };
