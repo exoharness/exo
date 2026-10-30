@@ -497,14 +497,6 @@ pub struct SandboxImageHealthcheck {
 pub struct ResolvedSandboxImage {
     pub image: String,
     pub configuration: SandboxImageConfiguration,
-    /// A port on which the image already serves a Codex exec-server, so callers
-    /// connect to it instead of starting one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prepared_exec_server_port: Option<u16>,
-    /// The image ships a GitHub CLI wired to the sandbox's proxy, so callers may
-    /// direct agents to `gh api` for writes.
-    #[serde(default)]
-    pub github_cli: bool,
 }
 
 #[async_trait]
