@@ -649,6 +649,27 @@ async fn firecracker_sandbox_contract_long_running_process_and_workdir_survive_s
     .expect("Firecracker sandbox long-running process and workdir contract");
 }
 
+const DOCKER_NODE_IMAGE: &str = "docker.io/library/node:22-slim";
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "uses a real Docker sandbox whose image provides node; run this test explicitly"]
+async fn docker_sandbox_contract_connect_tcp_round_trip() {
+    let backend: Arc<dyn ManagedSandboxBackend> =
+        Arc::new(crate::CliContainerSandboxBackend::docker());
+    let handle = backend
+        .acquire(provider_contract_request(
+            "docker",
+            "connect-tcp",
+            env_or("DOCKER_NODE_IMAGE", DOCKER_NODE_IMAGE),
+            "/tmp",
+        ))
+        .await
+        .expect("acquire Docker sandbox");
+    crate::contract_tests::sandbox_handle_connect_tcp_round_trip(handle)
+        .await
+        .expect("Docker connect_tcp contract");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn local_process_sandbox_reaches_loopback_websockets() {
     use anyhow::Context as _;
