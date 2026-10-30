@@ -1883,8 +1883,24 @@ pub(super) async fn active_sandbox_handle(
         bail!("sandbox is not running: {sandbox_id}");
     }
     let mut running = harness.inner.running_sandboxes.lock().await;
-    if let Some(existing) = running.get(sandbox_id) {
-        return Ok((Arc::clone(existing), None));
+    if let Some(existing) = running.get(sandbox_id).cloned() {
+        // Another caller registered this sandbox while we were provisioning:
+        // the unlocked lookup at the top of this function ran before the
+        // write lock, so it could not see them. Stop the handle we just
+        // created (the loser) so a remote sandbox cannot leak untracked, and
+        // hand back the winner's handle.
+        //
+        // Drop the registry guard first: a losing caller must not hold the
+        // read of `running_sandboxes` across a provider round trip.
+        drop(running);
+        tracing::warn!(
+            sandbox_id,
+            "sandbox already active; stopping the handle provisioned by this caller"
+        );
+        if let Err(stop_error) = handle.stop().await {
+            tracing::warn!(%stop_error, sandbox_id, "failed to stop the losing sandbox handle");
+        }
+        return Ok((existing, None));
     }
     running.insert(sandbox_id.clone(), Arc::clone(&handle));
     Ok((handle, provider_state_event))
