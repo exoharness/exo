@@ -488,28 +488,20 @@ pub trait ManagedSandboxBackend: Send + Sync {
         self.acquire(request).await?.stop().await
     }
 
-    /// Reconnect to an existing sandbox without provisioning a replacement.
-    /// `request` is available when the caller retained the acquisition context;
-    /// remote backends may resolve `sandbox_id` without it. Return `None` when the
-    /// sandbox is gone or reconnection is unsupported. Reuse `previous` when its
-    /// connection is unchanged so any process bookkeeping remains intact.
+    /// Reconnect to an existing sandbox without provisioning or resuming it.
+    /// `request` is available when the caller retained the acquisition context,
+    /// and `previous` when it still holds a handle; remote backends may resolve
+    /// `sandbox_id` without either. Return `None` when the sandbox is not running
+    /// or reconnection is unsupported. Reuse `previous` when its connection is
+    /// unchanged so any process bookkeeping remains intact.
     async fn resolve_existing(
         &self,
         _sandbox_id: &str,
         _request: Option<&SandboxRequest>,
-        _previous: &Arc<dyn ManagedSandboxHandle>,
+        _previous: Option<&Arc<dyn ManagedSandboxHandle>>,
     ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
         Ok(None)
     }
-
-    /// Reconnect to an existing sandbox with no previous handle and without
-    /// provisioning or resuming it. Return `None` when the sandbox is not
-    /// currently running or the backend cannot resolve it by id.
-    async fn lookup(
-        &self,
-        sandbox_id: &str,
-        request: Option<&SandboxRequest>,
-    ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>>;
 
     /// Stop the sandbox identified by `sandbox_id`, even if `previous` is stale.
     /// Backends with independently changing allocations should override this to

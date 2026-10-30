@@ -9,14 +9,6 @@ impl ManagedSandboxBackend for TcpBackend {
         exoharness::SandboxBackendCapabilities::default()
     }
 
-    async fn lookup(
-        &self,
-        _sandbox_id: &str,
-        _request: Option<&exoharness::SandboxRequest>,
-    ) -> Result<Option<std::sync::Arc<dyn exoharness::ManagedSandboxHandle>>> {
-        Ok(None)
-    }
-
     fn is_local(&self) -> bool {
         true
     }

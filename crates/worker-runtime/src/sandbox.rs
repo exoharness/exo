@@ -140,14 +140,6 @@ impl ManagedSandboxBackend for CloudflareBackend {
         exoharness::SandboxBackendCapabilities::default()
     }
 
-    async fn lookup(
-        &self,
-        _sandbox_id: &str,
-        _request: Option<&exoharness::SandboxRequest>,
-    ) -> Result<Option<std::sync::Arc<dyn exoharness::ManagedSandboxHandle>>> {
-        Ok(None)
-    }
-
     fn is_local(&self) -> bool {
         false
     }
@@ -161,8 +153,11 @@ impl ManagedSandboxBackend for CloudflareBackend {
         &self,
         _id: &str,
         _request: Option<&SandboxRequest>,
-        previous: &Arc<dyn ManagedSandboxHandle>,
+        previous: Option<&Arc<dyn ManagedSandboxHandle>>,
     ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
         Ok(previous
             .is_running()
             .await?

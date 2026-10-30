@@ -2705,14 +2705,6 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
         crate::SandboxBackendCapabilities::default()
     }
 
-    async fn lookup(
-        &self,
-        _sandbox_id: &str,
-        _request: Option<&crate::SandboxRequest>,
-    ) -> anyhow::Result<Option<std::sync::Arc<dyn crate::ManagedSandboxHandle>>> {
-        Ok(None)
-    }
-
     fn is_local(&self) -> bool {
         false
     }
@@ -2830,14 +2822,6 @@ impl TestSandboxBackend {
 impl ManagedSandboxBackend for TestSandboxBackend {
     fn capabilities(&self) -> crate::SandboxBackendCapabilities {
         crate::SandboxBackendCapabilities::default()
-    }
-
-    async fn lookup(
-        &self,
-        _sandbox_id: &str,
-        _request: Option<&crate::SandboxRequest>,
-    ) -> anyhow::Result<Option<std::sync::Arc<dyn crate::ManagedSandboxHandle>>> {
-        Ok(None)
     }
 
     fn is_local(&self) -> bool {
@@ -3156,14 +3140,6 @@ struct RestoreImageTestBackend {
 impl ManagedSandboxBackend for RestoreImageTestBackend {
     fn capabilities(&self) -> crate::SandboxBackendCapabilities {
         crate::SandboxBackendCapabilities::default()
-    }
-
-    async fn lookup(
-        &self,
-        _sandbox_id: &str,
-        _request: Option<&crate::SandboxRequest>,
-    ) -> anyhow::Result<Option<std::sync::Arc<dyn crate::ManagedSandboxHandle>>> {
-        Ok(None)
     }
 
     fn is_local(&self) -> bool {
