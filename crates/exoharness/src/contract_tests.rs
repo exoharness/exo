@@ -642,63 +642,6 @@ async fn sandbox_handle_connect_tcp_round_trip_inner(
     Ok(())
 }
 
-/// `command_environment` carries the external proxy, its trust bundle, and the
-/// configured extra variables, and the trust bundle exists in the guest.
-pub async fn sandbox_handle_exposes_external_proxy_environment(
-    handle: Arc<dyn ManagedSandboxHandle>,
-    proxy: &crate::egress::ExternalProxyConfig,
-) -> crate::Result<()> {
-    let result =
-        sandbox_handle_exposes_external_proxy_environment_inner(Arc::clone(&handle), proxy).await;
-    stop_after_contract(handle, result, "stop sandbox after contract").await
-}
-
-async fn sandbox_handle_exposes_external_proxy_environment_inner(
-    handle: Arc<dyn ManagedSandboxHandle>,
-    proxy: &crate::egress::ExternalProxyConfig,
-) -> crate::Result<()> {
-    let environment = handle
-        .command_environment()
-        .await
-        .context("command environment")?;
-    for variable in ["HTTPS_PROXY", "SSL_CERT_FILE"] {
-        ensure!(
-            environment
-                .get(variable)
-                .is_some_and(|value| !value.is_empty()),
-            "command environment lacks {variable}"
-        );
-    }
-    for (key, value) in &proxy.environment {
-        ensure!(
-            environment.get(key) == Some(value),
-            "command environment lacks {key}"
-        );
-    }
-    let output = handle
-        .exec(&SandboxCommand {
-            argv: vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                r#"test -s "$SSL_CERT_FILE" && grep -q "BEGIN CERTIFICATE" "$SSL_CERT_FILE""#
-                    .into(),
-            ],
-            env: environment,
-            display_argv: None,
-            cwd: None,
-            timeout: Some(Duration::from_secs(30)),
-        })
-        .await
-        .context("inspect trust bundle")?;
-    ensure!(
-        output.ok,
-        "trust bundle is missing in the sandbox: {}{}",
-        output.stdout,
-        output.stderr
-    );
-    Ok(())
-}
-
 pub async fn sandbox_backend_durable_file_system_survives_stop_and_reacquire(
     backend: Arc<dyn ManagedSandboxBackend>,
     request: SandboxRequest,
