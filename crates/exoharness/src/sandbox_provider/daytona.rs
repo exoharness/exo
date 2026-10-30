@@ -256,6 +256,10 @@ impl DaytonaSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for DaytonaSandboxBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
     fn is_local(&self) -> bool {
         false
     }

@@ -136,6 +136,10 @@ impl CloudflareBackend {
 }
 #[async_trait]
 impl ManagedSandboxBackend for CloudflareBackend {
+    fn capabilities(&self) -> exoharness::SandboxBackendCapabilities {
+        exoharness::SandboxBackendCapabilities::default()
+    }
+
     fn is_local(&self) -> bool {
         false
     }
@@ -149,8 +153,11 @@ impl ManagedSandboxBackend for CloudflareBackend {
         &self,
         _id: &str,
         _request: Option<&SandboxRequest>,
-        previous: &Arc<dyn ManagedSandboxHandle>,
+        previous: Option<&Arc<dyn ManagedSandboxHandle>>,
     ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
+        let Some(previous) = previous else {
+            return Ok(None);
+        };
         Ok(previous
             .is_running()
             .await?

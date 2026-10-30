@@ -946,6 +946,14 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         true
     }
 
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities {
+            durable_file_systems: false,
+            default_workdir: None,
+            networking_always_enabled: false,
+        }
+    }
+
     fn retains_disk_when_stopped(&self) -> bool {
         true
     }

@@ -5,6 +5,10 @@ struct TcpBackend;
 
 #[async_trait::async_trait]
 impl ManagedSandboxBackend for TcpBackend {
+    fn capabilities(&self) -> exoharness::SandboxBackendCapabilities {
+        exoharness::SandboxBackendCapabilities::default()
+    }
+
     fn is_local(&self) -> bool {
         true
     }
@@ -12,7 +16,7 @@ impl ManagedSandboxBackend for TcpBackend {
         &[]
     }
     async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        exoharness::LocalProcessSandboxBackend
+        exoharness::LocalProcessSandboxBackend::new()
             .acquire(request)
             .await
     }

@@ -28,6 +28,10 @@ struct ResourceBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for ResourceBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
     async fn materialize_resources(
         &self,
         request: MaterializeResourcesRequest,

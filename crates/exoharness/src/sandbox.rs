@@ -296,6 +296,22 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
+    /// Reach a WebSocket server listening on `port` inside the sandbox at
+    /// `path` and complete the client handshake. The default handshakes over
+    /// the `connect_tcp` stream; backends that can only proxy HTTP to guest
+    /// ports perform the upgrade themselves.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+    async fn connect_websocket(
+        &self,
+        port: u16,
+        path: &str,
+    ) -> Result<Option<BoxSandboxWebSocket>> {
+        let Some(stream) = self.connect_tcp(port).await? else {
+            return Ok(None);
+        };
+        Ok(Some(websocket_over(stream, port, path).await?))
+    }
+
     async fn stop(&self) -> Result<()>;
 
     /// Relinquish lifecycle ownership without stopping the sandbox and return
@@ -320,6 +336,64 @@ pub trait SandboxTcpStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send 
 impl<T> SandboxTcpStream for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}
 
 pub type BoxSandboxTcpStream = Pin<Box<dyn SandboxTcpStream>>;
+
+/// A WebSocket to a port inside the sandbox with the client handshake done.
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub trait SandboxWebSocket:
+    futures::Stream<
+        Item = std::result::Result<
+            tokio_tungstenite::tungstenite::Message,
+            tokio_tungstenite::tungstenite::Error,
+        >,
+    > + futures::Sink<
+        tokio_tungstenite::tungstenite::Message,
+        Error = tokio_tungstenite::tungstenite::Error,
+    > + Send
+    + Unpin
+{
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+impl<T> SandboxWebSocket for T where
+    T: futures::Stream<
+            Item = std::result::Result<
+                tokio_tungstenite::tungstenite::Message,
+                tokio_tungstenite::tungstenite::Error,
+            >,
+        > + futures::Sink<
+            tokio_tungstenite::tungstenite::Message,
+            Error = tokio_tungstenite::tungstenite::Error,
+        > + Send
+        + Unpin
+{
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub type BoxSandboxWebSocket = Pin<Box<dyn SandboxWebSocket>>;
+
+/// Complete a WebSocket client handshake over a stream to `port` at `path`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub(crate) async fn websocket_over(
+    stream: BoxSandboxTcpStream,
+    port: u16,
+    path: &str,
+) -> Result<BoxSandboxWebSocket> {
+    let (socket, _) =
+        tokio_tungstenite::client_async(format!("ws://127.0.0.1:{port}{path}"), stream).await?;
+    Ok(Box::pin(socket))
+}
+
+/// Facts about a backend that generic callers need before acquiring from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxBackendCapabilities {
+    /// Requests may carry durable file systems.
+    pub durable_file_systems: bool,
+    /// The working directory the backend provides when a request names none.
+    pub default_workdir: Option<String>,
+    /// Sandboxes always have outbound networking regardless of the egress
+    /// policy the request asks for.
+    pub networking_always_enabled: bool,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -374,6 +448,8 @@ pub trait ManagedSandboxBackend: Send + Sync {
 
     fn is_local(&self) -> bool;
 
+    fn capabilities(&self) -> SandboxBackendCapabilities;
+
     /// Whether stopping leaves provider-owned disks that deletion must reclaim.
     fn retains_disk_when_stopped(&self) -> bool {
         false
@@ -412,16 +488,17 @@ pub trait ManagedSandboxBackend: Send + Sync {
         self.acquire(request).await?.stop().await
     }
 
-    /// Reconnect to an existing sandbox without provisioning a replacement.
-    /// `request` is available when the caller retained the acquisition context;
-    /// remote backends may resolve `sandbox_id` without it. Return `None` when the
-    /// sandbox is gone or reconnection is unsupported. Reuse `previous` when its
-    /// connection is unchanged so any process bookkeeping remains intact.
+    /// Reconnect to an existing sandbox without provisioning or resuming it.
+    /// `request` is available when the caller retained the acquisition context,
+    /// and `previous` when it still holds a handle; remote backends may resolve
+    /// `sandbox_id` without either. Return `None` when the sandbox is not running
+    /// or reconnection is unsupported. Reuse `previous` when its connection is
+    /// unchanged so any process bookkeeping remains intact.
     async fn resolve_existing(
         &self,
         _sandbox_id: &str,
         _request: Option<&SandboxRequest>,
-        _previous: &Arc<dyn ManagedSandboxHandle>,
+        _previous: Option<&Arc<dyn ManagedSandboxHandle>>,
     ) -> Result<Option<Arc<dyn ManagedSandboxHandle>>> {
         Ok(None)
     }

@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, anyhow, bail, ensure};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use lingua::Message;
 use lingua::universal::{AssistantContent, UserContent};
@@ -557,6 +558,88 @@ pub async fn sandbox_handle_start_process_supports_long_running_request_response
             "{error:#}; also failed to stop sandbox after contract: {stop_error:#}"
         )),
     }
+}
+
+/// A TCP server inside the sandbox is reachable through `connect_tcp`. The
+/// server runs on `node`, which the sandbox image must provide.
+pub async fn sandbox_handle_connect_tcp_round_trip(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    let result = sandbox_handle_connect_tcp_round_trip_inner(Arc::clone(&handle)).await;
+    stop_after_contract(handle, result, "stop sandbox after contract").await
+}
+
+const ECHO_SERVER: &str = r#"
+const net = require("node:net");
+const server = net.createServer((socket) => socket.pipe(socket));
+server.listen(0, "127.0.0.1", () => {
+  process.stdout.write(`ready ${server.address().port}\n`);
+});
+"#;
+
+async fn sandbox_handle_connect_tcp_round_trip_inner(
+    handle: Arc<dyn ManagedSandboxHandle>,
+) -> crate::Result<()> {
+    ensure!(
+        handle.supports_tcp(),
+        "sandbox handle does not support TCP connections"
+    );
+    let mut process = handle
+        .start_process(&SandboxCommand {
+            argv: vec!["node".into(), "-e".into(), ECHO_SERVER.into()],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: None,
+        })
+        .await
+        .context("start echo server")?;
+    let mut ready = Vec::new();
+    timeout(Duration::from_secs(30), async {
+        let mut byte = [0u8; 1];
+        while ready.last() != Some(&b'\n') {
+            process.stdout.read_exact(&mut byte).await?;
+            ready.push(byte[0]);
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .context("echo server should report its port")??;
+    let port: u16 = std::str::from_utf8(&ready)?
+        .trim()
+        .strip_prefix("ready ")
+        .context("unexpected echo server output")?
+        .parse()
+        .context("echo server port")?;
+
+    let mut stream = handle
+        .connect_tcp(port)
+        .await
+        .context("connect to echo server")?
+        .context("connect_tcp returned no stream")?;
+    tokio::io::AsyncWriteExt::write_all(
+        &mut stream,
+        b"contract-ping
+",
+    )
+    .await
+    .context("write to echo server")?;
+    let mut echoed = [0u8; 14];
+    timeout(
+        Duration::from_secs(10),
+        tokio::io::AsyncReadExt::read_exact(&mut stream, &mut echoed),
+    )
+    .await
+    .context("echo server should answer")?
+    .context("read echo")?;
+    ensure!(
+        &echoed
+            == b"contract-ping
+",
+        "unexpected echo: {:?}",
+        String::from_utf8_lossy(&echoed)
+    );
+    Ok(())
 }
 
 pub async fn sandbox_backend_durable_file_system_survives_stop_and_reacquire(

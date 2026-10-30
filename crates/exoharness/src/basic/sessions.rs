@@ -305,6 +305,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ManagedSandboxBackend for RecoveryBackend {
+        fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+            crate::SandboxBackendCapabilities::default()
+        }
+
         fn is_local(&self) -> bool {
             true
         }
@@ -319,7 +323,7 @@ mod tests {
             if self.pause_acquisitions.load(Ordering::SeqCst) {
                 self.resume_acquisition.notified().await;
             }
-            LocalProcessSandboxBackend.acquire(request).await
+            LocalProcessSandboxBackend::new().acquire(request).await
         }
         async fn stop(&self, _request: SandboxRequest) -> Result<()> {
             self.stops.fetch_add(1, Ordering::SeqCst);
@@ -327,7 +331,7 @@ mod tests {
         }
         async fn terminate(&self, request: SandboxRequest) -> Result<()> {
             self.terminations.fetch_add(1, Ordering::SeqCst);
-            LocalProcessSandboxBackend.terminate(request).await
+            LocalProcessSandboxBackend::new().terminate(request).await
         }
         async fn attach(
             &self,

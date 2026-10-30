@@ -176,6 +176,10 @@ impl VercelSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for VercelSandboxBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
     fn is_local(&self) -> bool {
         false
     }

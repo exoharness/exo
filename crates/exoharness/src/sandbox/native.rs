@@ -379,6 +379,14 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         true
     }
 
+    fn capabilities(&self) -> SandboxBackendCapabilities {
+        SandboxBackendCapabilities {
+            durable_file_systems: true,
+            default_workdir: None,
+            networking_always_enabled: false,
+        }
+    }
+
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
         match self.cli {
             ContainerCliFlavor::Docker => &DOCKER_CONSUMABLE_SNAPSHOT_FORMATS,
@@ -796,6 +804,14 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         true
     }
 
+    fn capabilities(&self) -> SandboxBackendCapabilities {
+        SandboxBackendCapabilities {
+            durable_file_systems: false,
+            default_workdir: None,
+            networking_always_enabled: true,
+        }
+    }
+
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
         &[]
     }
@@ -856,6 +872,17 @@ struct LocalProcessSandboxHandle {
 impl ManagedSandboxHandle for LocalProcessSandboxHandle {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn supports_tcp(&self) -> bool {
+        true
+    }
+
+    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
+        let stream = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .with_context(|| format!("connecting to local process port {port}"))?;
+        Ok(Some(Box::pin(stream)))
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {

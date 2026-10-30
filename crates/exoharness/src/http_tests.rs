@@ -530,6 +530,10 @@ struct SnapshotTestSandboxBackend;
 
 #[async_trait]
 impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
     fn is_local(&self) -> bool {
         false
     }

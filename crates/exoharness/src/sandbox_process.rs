@@ -104,6 +104,13 @@ impl ManagedSandboxHandle for ProcessManagedSandbox {
     async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
         self.handle.connect_tcp(port).await
     }
+    async fn connect_websocket(
+        &self,
+        port: u16,
+        path: &str,
+    ) -> Result<Option<crate::BoxSandboxWebSocket>> {
+        self.handle.connect_websocket(port, path).await
+    }
     async fn stop(&self) -> Result<()> {
         self.handle.stop().await?;
         self.processes.cancel_all().await;

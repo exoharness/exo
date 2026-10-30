@@ -169,6 +169,10 @@ impl SpritesSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for SpritesSandboxBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
     fn is_local(&self) -> bool {
         false
     }

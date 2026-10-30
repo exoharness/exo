@@ -225,6 +225,10 @@ impl E2bSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for E2bSandboxBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
     fn is_local(&self) -> bool {
         false
     }

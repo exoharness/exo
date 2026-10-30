@@ -75,29 +75,35 @@ impl SandboxEgress {
     }
 }
 
+/// Install `ca_pem` alongside the guest's system roots at `ca_path`.
+pub(crate) async fn install_trust(
+    handle: &dyn ManagedSandboxHandle,
+    ca_path: &str,
+    ca_pem: &str,
+) -> Result<()> {
+    let prepared = handle
+        .exec(&SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), PREPARE_TRUST.into()],
+            env: HashMap::from([
+                ("EXO_EGRESS_CA_PATH".into(), ca_path.to_owned()),
+                ("EXO_EGRESS_CA_PEM".into(), ca_pem.to_owned()),
+            ]),
+            display_argv: None,
+            cwd: None,
+            timeout: Some(Duration::from_secs(30)),
+        })
+        .await?;
+    ensure!(
+        prepared.ok,
+        "could not prepare sandbox TLS trust: {}",
+        prepared.stderr
+    );
+    Ok(())
+}
+
 impl<P: SandboxProxy> SandboxEgress<P> {
     pub(crate) async fn initialize_trust(&self, handle: &dyn ManagedSandboxHandle) -> Result<()> {
-        let prepared = handle
-            .exec(&SandboxCommand {
-                argv: vec!["/bin/sh".into(), "-c".into(), PREPARE_TRUST.into()],
-                env: HashMap::from([
-                    ("EXO_EGRESS_CA_PATH".into(), self.ca_path.clone()),
-                    (
-                        "EXO_EGRESS_CA_PEM".into(),
-                        self.proxy.connection().ca_pem.clone(),
-                    ),
-                ]),
-                display_argv: None,
-                cwd: None,
-                timeout: Some(Duration::from_secs(30)),
-            })
-            .await?;
-        ensure!(
-            prepared.ok,
-            "could not prepare sandbox TLS trust: {}",
-            prepared.stderr
-        );
-        Ok(())
+        install_trust(handle, &self.ca_path, &self.proxy.connection().ca_pem).await
     }
 
     pub(crate) fn prepare_command<'a>(
@@ -122,14 +128,7 @@ impl<P: SandboxProxy> SandboxEgress<P> {
             "sandbox egress proxy is closed; acquire the sandbox again"
         );
         let mut env = self.proxy.connection().environment.clone();
-        for key in [
-            "SSL_CERT_FILE",
-            "CODEX_CA_CERTIFICATE",
-            "REQUESTS_CA_BUNDLE",
-            "NODE_EXTRA_CA_CERTS",
-            "CURL_CA_BUNDLE",
-            "GIT_SSL_CAINFO",
-        ] {
+        for key in super::TRUST_VARIABLES {
             env.insert(key.into(), self.ca_path.clone());
         }
         Ok(env)

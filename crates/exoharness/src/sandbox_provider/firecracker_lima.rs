@@ -322,6 +322,14 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         true
     }
 
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities {
+            durable_file_systems: true,
+            default_workdir: None,
+            networking_always_enabled: false,
+        }
+    }
+
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
