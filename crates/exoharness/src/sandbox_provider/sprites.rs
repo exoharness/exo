@@ -173,14 +173,6 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         crate::SandboxBackendCapabilities::default()
     }
 
-    async fn lookup(
-        &self,
-        _sandbox_id: &str,
-        _request: Option<&crate::SandboxRequest>,
-    ) -> Result<Option<std::sync::Arc<dyn crate::ManagedSandboxHandle>>> {
-        Ok(None)
-    }
-
     fn is_local(&self) -> bool {
         false
     }

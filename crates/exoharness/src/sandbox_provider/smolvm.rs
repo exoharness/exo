@@ -931,14 +931,6 @@ impl Default for SmolvmSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for SmolvmSandboxBackend {
-    async fn lookup(
-        &self,
-        _sandbox_id: &str,
-        _request: Option<&crate::SandboxRequest>,
-    ) -> Result<Option<std::sync::Arc<dyn crate::ManagedSandboxHandle>>> {
-        Ok(None)
-    }
-
     fn with_external_proxy(
         &self,
         proxy: crate::egress::ExternalProxyConfig,
