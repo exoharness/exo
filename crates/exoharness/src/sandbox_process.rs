@@ -1567,32 +1567,6 @@ mod tests {
 
     #[async_trait]
     impl ManagedSandboxHandle for TerminalHandle {
-        async fn start_managed_terminal(
-            &self,
-            _command: &crate::SandboxCommand,
-            _size: crate::SandboxTerminalSize,
-        ) -> anyhow::Result<crate::SandboxProcessId> {
-            anyhow::bail!("sandbox backend does not support managed terminals")
-        }
-
-        async fn resize_terminal(
-            &self,
-            _process_id: &str,
-            _size: crate::SandboxTerminalSize,
-        ) -> anyhow::Result<()> {
-            anyhow::bail!("sandbox backend does not support managed terminals")
-        }
-
-        async fn release_processes(&self) {}
-
-        async fn next_process_events(
-            &self,
-            _process_id: &str,
-            _after: u64,
-        ) -> anyhow::Result<crate::GetSandboxProcessEventsResult> {
-            anyhow::bail!("sandbox backend does not support managed processes")
-        }
-
         fn id(&self) -> &str {
             "terminal"
         }
@@ -1631,24 +1605,6 @@ mod tests {
 
     #[async_trait]
     impl ManagedSandboxHandle for ManagedOnly {
-        async fn start_managed_terminal(
-            &self,
-            _command: &crate::SandboxCommand,
-            _size: crate::SandboxTerminalSize,
-        ) -> anyhow::Result<crate::SandboxProcessId> {
-            anyhow::bail!("sandbox backend does not support managed terminals")
-        }
-
-        async fn resize_terminal(
-            &self,
-            _process_id: &str,
-            _size: crate::SandboxTerminalSize,
-        ) -> anyhow::Result<()> {
-            anyhow::bail!("sandbox backend does not support managed terminals")
-        }
-
-        async fn release_processes(&self) {}
-
         fn id(&self) -> &str {
             self.0.id()
         }

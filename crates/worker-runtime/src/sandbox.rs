@@ -207,32 +207,6 @@ struct CloudflareHandle {
 }
 #[async_trait]
 impl ManagedSandboxHandle for CloudflareHandle {
-    async fn start_managed_terminal(
-        &self,
-        _command: &exoharness::SandboxCommand,
-        _size: exoharness::SandboxTerminalSize,
-    ) -> anyhow::Result<exoharness::SandboxProcessId> {
-        anyhow::bail!("sandbox backend does not support managed terminals")
-    }
-
-    async fn resize_terminal(
-        &self,
-        _process_id: &str,
-        _size: exoharness::SandboxTerminalSize,
-    ) -> anyhow::Result<()> {
-        anyhow::bail!("sandbox backend does not support managed terminals")
-    }
-
-    async fn release_processes(&self) {}
-
-    async fn next_process_events(
-        &self,
-        _process_id: &str,
-        _after: u64,
-    ) -> anyhow::Result<exoharness::GetSandboxProcessEventsResult> {
-        anyhow::bail!("sandbox backend does not support managed processes")
-    }
-
     fn id(&self) -> &str {
         &self.request.sandbox_id
     }
