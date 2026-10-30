@@ -1,6 +1,5 @@
 use super::*;
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use tokio::net::TcpStream;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,16 +43,6 @@ impl ExternalProxyConfig {
         Ok(())
     }
 
-    /// The proxy URL carrying this configuration's authorization, for guests
-    /// that reach the proxy themselves.
-    pub(crate) fn authorized_url(&self) -> Result<url::Url> {
-        let mut url = self.url.clone();
-        url.set_username(&self.username)
-            .and_then(|()| url.set_password(Some(&self.password)))
-            .map_err(|()| anyhow!("external proxy URL cannot carry authorization"))?;
-        Ok(url)
-    }
-
     pub(super) async fn connect(&self, host: &str) -> Result<crate::BoxSandboxTcpStream> {
         let stream = tokio::time::timeout(
             CONNECT_TIMEOUT,
@@ -95,50 +84,6 @@ impl ExternalProxyConfig {
         })
         .await
         .context("external proxy handshake timed out")?
-    }
-}
-
-/// External proxy settings installed in a guest that reaches the proxy itself,
-/// for backends without an in-sandbox egress proxy. The guest trusts the proxy's
-/// CA from `ca_path`, and every command inherits the proxy environment.
-#[derive(Clone)]
-pub(crate) struct DirectExternalProxy {
-    proxy: ExternalProxyConfig,
-    ca_path: String,
-}
-
-impl DirectExternalProxy {
-    pub(crate) fn new(proxy: ExternalProxyConfig, ca_path: String) -> Self {
-        Self { proxy, ca_path }
-    }
-
-    pub(crate) async fn install(&self, handle: &dyn crate::ManagedSandboxHandle) -> Result<()> {
-        super::sandbox::install_trust(handle, &self.ca_path, &self.proxy.ca_pem).await
-    }
-
-    pub(crate) fn environment(&self) -> Result<HashMap<String, String>> {
-        let mut environment = self.proxy.environment.clone();
-        environment.extend(guest_proxy_environment(
-            self.proxy.authorized_url()?.as_str(),
-            &self.ca_path,
-        ));
-        Ok(environment)
-    }
-
-    pub(crate) fn environment_of(egress: Option<&Self>) -> Result<HashMap<String, String>> {
-        egress.map_or_else(|| Ok(HashMap::new()), Self::environment)
-    }
-
-    pub(crate) fn prepare_command<'a>(
-        egress: Option<&Self>,
-        command: &'a crate::SandboxCommand,
-    ) -> Result<Cow<'a, crate::SandboxCommand>> {
-        let Some(egress) = egress else {
-            return Ok(Cow::Borrowed(command));
-        };
-        let mut command = command.clone();
-        command.env.extend(egress.environment()?);
-        Ok(Cow::Owned(command))
     }
 }
 

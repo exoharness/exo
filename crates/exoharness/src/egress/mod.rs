@@ -35,7 +35,6 @@ use crate::types::canonical_egress_host;
 use crate::{EgressPolicy, SandboxEgressProxy};
 
 mod external;
-pub(crate) use external::DirectExternalProxy;
 pub use external::ExternalProxyConfig;
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
@@ -553,7 +552,7 @@ pub(crate) fn public_ipv4(ip: IpAddr) -> bool {
 // https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.1
 // Proxy authentication is scoped to its proxy (sections 11.7.1/11.7.2); framing
 // and trailers are handled by the HTTP stacks on either side of this proxy.
-pub(crate) fn tls_configuration(hosts: Vec<String>) -> Result<(String, TlsAcceptor)> {
+fn tls_configuration(hosts: Vec<String>) -> Result<(String, TlsAcceptor)> {
     let mut ca = CertificateParams::new(Vec::<String>::new())?;
     ca.distinguished_name
         .push(DnType::CommonName, "Exo sandbox egress CA");

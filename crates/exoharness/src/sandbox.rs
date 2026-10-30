@@ -13,12 +13,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
-mod direct_proxy;
 #[cfg(feature = "basic-backend")]
 mod native;
-#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
-pub use direct_proxy::DirectExternalProxyBackend;
 #[cfg(feature = "aws-agentcore")]
 pub(crate) use native::validate_durable_file_systems;
 #[cfg(feature = "basic-backend")]
