@@ -862,6 +862,26 @@ where
         self.sandbox_handle().sandbox_supports_tcp(id).await
     }
 
+    #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+    async fn connect_sandbox_websocket(
+        &self,
+        id: SandboxId,
+        port: u16,
+        path: &str,
+    ) -> Result<Option<crate::BoxSandboxWebSocket>> {
+        self.sandbox_handle()
+            .connect_sandbox_websocket(id, port, path)
+            .await
+    }
+
+    #[cfg(feature = "basic-backend")]
+    async fn sandbox_command_environment(
+        &self,
+        id: SandboxId,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        self.sandbox_handle().sandbox_command_environment(id).await
+    }
+
     async fn start_sandbox_process(
         &self,
         request: StartSandboxProcessRequest,

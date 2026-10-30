@@ -3,8 +3,10 @@ use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -13,7 +15,8 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use serde::Deserialize;
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
 use tokio::time;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -603,6 +606,17 @@ impl ManagedSandboxHandle for BorrowedDockerSandboxHandle {
         start_warm_process(&self.container_bin, &self.container_id, &self.spec, command).await
     }
 
+    fn supports_tcp(&self) -> bool {
+        true
+    }
+
+    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
+        inspect_running_docker_container(&self.container_bin, &self.container_id).await?;
+        docker_exec_tunnel(&self.container_bin, &self.container_id, port)
+            .await
+            .map(Some)
+    }
+
     async fn stop(&self) -> Result<()> {
         bail!("borrowed Docker containers must be detached, not stopped")
     }
@@ -673,6 +687,20 @@ struct WarmSandboxHandle {
     warm_sandboxes: Arc<Mutex<HashMap<SandboxId, WarmSandboxEntry>>>,
 }
 
+impl WarmSandboxHandle {
+    async fn ready(&self) -> Result<String> {
+        let name = ensure_warm_sandbox_ready(
+            &self.container_bin,
+            self.cli,
+            &self.request,
+            &self.warm_sandboxes,
+        )
+        .await?;
+        touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
+        Ok(name)
+    }
+}
+
 #[async_trait]
 impl ManagedSandboxHandle for WarmSandboxHandle {
     fn id(&self) -> &str {
@@ -684,29 +712,29 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
     }
 
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
-        let name = ensure_warm_sandbox_ready(
-            &self.container_bin,
-            self.cli,
-            &self.request,
-            &self.warm_sandboxes,
-        )
-        .await?;
-        touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
+        let name = self.ready().await?;
         let output = exec_warm(&self.container_bin, &name, &self.request.spec, command).await;
         touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
         output
     }
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
-        let name = ensure_warm_sandbox_ready(
-            &self.container_bin,
-            self.cli,
-            &self.request,
-            &self.warm_sandboxes,
-        )
-        .await?;
-        touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
+        let name = self.ready().await?;
         start_warm_process(&self.container_bin, &name, &self.request.spec, command).await
+    }
+
+    fn supports_tcp(&self) -> bool {
+        self.cli == ContainerCliFlavor::Docker
+    }
+
+    async fn connect_tcp(&self, port: u16) -> Result<Option<BoxSandboxTcpStream>> {
+        if self.cli != ContainerCliFlavor::Docker {
+            return Ok(None);
+        }
+        let name = self.ready().await?;
+        docker_exec_tunnel(&self.container_bin, &name, port)
+            .await
+            .map(Some)
     }
 
     async fn stop(&self) -> Result<()> {
@@ -1515,6 +1543,100 @@ async fn start_warm_process(
     spawn_sandbox_process(process, command).await
 }
 
+// Relays a guest TCP port over the stdio of a `node` process inside the
+// container, so the image must provide `node`. Connection failures surface as
+// end of stream, which callers handshaking over the stream already retry.
+const TCP_TUNNEL_SCRIPT: &str = r#"
+const net = require("node:net");
+const socket = net.connect({ host: "127.0.0.1", port: Number(process.argv[1]) });
+socket.on("connect", () => {
+  process.stdin.pipe(socket);
+  socket.pipe(process.stdout, { end: false });
+});
+socket.on("close", () => process.stdout.write("", () => process.exit(0)));
+socket.on("error", (error) => {
+  process.stderr.write(`${error.message}\n`);
+  process.exit(1);
+});
+"#;
+
+async fn docker_exec_tunnel(
+    container_bin: &Path,
+    container: &str,
+    port: u16,
+) -> Result<BoxSandboxTcpStream> {
+    let mut command = Command::new(container_bin);
+    command.args([
+        "exec",
+        "--interactive",
+        container,
+        "node",
+        "-e",
+        TCP_TUNNEL_SCRIPT,
+        &port.to_string(),
+    ]);
+    spawn_tunnel(command).await
+}
+
+async fn spawn_tunnel(mut command: Command) -> Result<BoxSandboxTcpStream> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().context("starting sandbox TCP tunnel")?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("sandbox TCP tunnel did not expose stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("sandbox TCP tunnel did not expose stdout"))?;
+    Ok(Box::pin(ChildTunnel {
+        _child: child,
+        stdout,
+        stdin,
+    }))
+}
+
+struct ChildTunnel {
+    _child: Child,
+    stdout: ChildStdout,
+    stdin: ChildStdin,
+}
+
+impl AsyncRead for ChildTunnel {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ChildTunnel {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stdin).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_shutdown(cx)
+    }
+}
+
 pub(crate) async fn run_command(
     mut process: Command,
     command: &SandboxCommand,
@@ -2115,6 +2237,40 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn child_tunnel_relays_bytes_and_closes_with_the_peer() -> Result<()> {
+        if Command::new("node")
+            .arg("--version")
+            .output()
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await?;
+            let mut buf = [0u8; 5];
+            socket.read_exact(&mut buf).await?;
+            socket.write_all(&buf).await?;
+            Ok::<_, anyhow::Error>(buf)
+        });
+        let mut command = Command::new("node");
+        command.args(["-e", TCP_TUNNEL_SCRIPT, &port.to_string()]);
+        let mut tunnel = spawn_tunnel(command).await?;
+        tunnel.write_all(b"hello").await?;
+        let mut echoed = [0u8; 5];
+        time::timeout(Duration::from_secs(10), tunnel.read_exact(&mut echoed)).await??;
+        assert_eq!(&echoed, b"hello");
+        assert_eq!(&server.await??, b"hello");
+        let mut rest = Vec::new();
+        time::timeout(Duration::from_secs(10), tunnel.read_to_end(&mut rest)).await??;
+        assert!(rest.is_empty());
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[tokio::test]
