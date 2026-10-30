@@ -84,6 +84,7 @@ async fn agent_runs_a_command_in_a_smolvm_microvm() {
                 "uname -s; printf ' '; uname -r".to_string(),
             ],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("run in smolvm sandbox");
@@ -182,6 +183,7 @@ async fn agent_runs_the_default_sandbox_shape() {
                 "uname -sr".to_string(),
             ],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("run in default sandbox");

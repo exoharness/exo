@@ -521,7 +521,7 @@ async fn http_run_in_sandbox(
             name: None,
             command: request.command,
             env: request.env,
-            cwd: None,
+            cwd: request.cwd,
             mode: Default::default(),
             stdin: Default::default(),
             output: Default::default(),

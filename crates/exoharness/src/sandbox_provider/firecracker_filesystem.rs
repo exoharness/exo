@@ -353,7 +353,7 @@ impl FirecrackerSandboxBackend {
                 terminate,
             )
             .await
-            .map(|handle| crate::with_process_management(handle))
+            .map(|handle| handle as Arc<dyn crate::ManagedSandboxHandle>)
     }
 
     pub(in crate::sandbox_provider) async fn acquire_filesystem_request(

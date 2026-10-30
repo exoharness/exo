@@ -166,6 +166,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
                 "printf hello".to_string(),
             ],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("sandbox command");
@@ -180,6 +181,7 @@ async fn http_exoharness_runs_noninteractive_sandbox_commands() {
             id: sandbox_id,
             command: vec!["cat".to_string()],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("attached process")
@@ -230,6 +232,7 @@ async fn http_exoharness_runs_agent_scoped_sandbox_commands() {
                 "printf agent-http".to_string(),
             ],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("agent sandbox command");
@@ -259,6 +262,7 @@ async fn http_exoharness_runs_agent_scoped_sandbox_commands() {
             id: sandbox_id,
             command: vec!["true".to_string()],
             env: Default::default(),
+            cwd: None,
         })
         .await;
     assert!(conversation_process.is_err());

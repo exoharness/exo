@@ -244,42 +244,6 @@ pub trait ManagedSandboxHandle: Send + Sync {
 
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts>;
 
-    /// Start a process whose ID remains usable through this sandbox's process API.
-    /// Once started, dropping a wait or output request must not cancel the process.
-    async fn start_managed_process(
-        &self,
-        _command: &SandboxCommand,
-        _stdin: crate::SandboxProcessStdin,
-    ) -> Result<crate::SandboxProcessId> {
-        bail!("sandbox backend does not support managed processes")
-    }
-
-    async fn write_process_input(&self, _process_id: &str, _data: &[u8]) -> Result<()> {
-        bail!("sandbox backend does not support managed processes")
-    }
-
-    async fn close_process_input(&self, _process_id: &str) -> Result<()> {
-        bail!("sandbox backend does not support managed processes")
-    }
-
-    /// Events strictly after `after`, ordered by cursor, with current status.
-    /// A terminal status guarantees that the terminal event is available.
-    async fn process_events(
-        &self,
-        _process_id: &str,
-        _after: u64,
-    ) -> Result<crate::GetSandboxProcessEventsResult> {
-        bail!("sandbox backend does not support managed processes")
-    }
-
-    async fn wait_process(&self, _process_id: &str) -> Result<crate::SandboxProcessStatus> {
-        bail!("sandbox backend does not support managed processes")
-    }
-
-    async fn cancel_process(&self, _process_id: &str) -> Result<crate::SandboxProcessStatus> {
-        bail!("sandbox backend does not support managed processes")
-    }
-
     async fn start_terminal(
         &self,
         _command: &SandboxCommand,

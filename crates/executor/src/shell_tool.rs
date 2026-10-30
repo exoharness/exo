@@ -48,6 +48,7 @@ pub async fn execute_shell_tool(
             id: sandbox_id,
             command: vec![program, "-lc".to_string(), args.command],
             env: Default::default(),
+            cwd: None,
         })
         .await?;
     read_shell_process(process).await

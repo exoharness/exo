@@ -38,6 +38,7 @@ async fn shell(thread: &dyn exoharness::ThreadHandle, sandbox: &str, command: &s
             id: sandbox.to_owned(),
             command: vec!["sh".into(), "-c".into(), command.into()],
             env: Default::default(),
+            cwd: None,
         })
         .await?
         .into_parts()
@@ -162,7 +163,7 @@ async fn pi_managed_local_and_http() -> Result<()> {
             let denied = live(f, &["run", "pi-live", "--thread", slug, "--prompt", "Use bash to write denied.txt. If denied, stop and report that."], &"n\n".repeat(20)).await?;
             ensure!(denied.contains("Permission required:"), "denial was not requested");
             ensure!(denied.contains("← pi.bash ✗ error"), "denied tool was displayed as successful");
-            let output = thread.run_in_sandbox(exoharness::RunInSandboxRequest { id: sandbox.clone(), command: vec!["sh".into(), "-c".into(), "test ! -e denied.txt && test \"$(cat proof.txt)\" = exo-pi-verified-47".into()], env: Default::default() }).await?;
+            let output = thread.run_in_sandbox(exoharness::RunInSandboxRequest { id: sandbox.clone(), command: vec!["sh".into(), "-c".into(), "test ! -e denied.txt && test \"$(cat proof.txt)\" = exo-pi-verified-47".into()], env: Default::default(), cwd: None }).await?;
             ensure!(output.into_parts().wait.await? == 0, "denied tool ran or saved file disappeared");
             let mut child = f.command(&["run", "pi-live", "--thread", slug, "--prompt", "Run this exact native bash command: touch cancel.started; sleep 113; touch cancel.finished. Wait for it to finish."])
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
@@ -183,7 +184,7 @@ async fn pi_managed_local_and_http() -> Result<()> {
             let independent = live(f, &["run", "second", "--environment", "pi", "--prompt", "Use bash to check whether proof.txt exists. Do not create it. Report the result."], &"y\n".repeat(20)).await?;
             let second_agent = exo_managed_agents::find_agent(f.runtime.exoharness_handle().as_ref(), "second").await?;
             let second_thread = exo_managed_agents::find_thread(second_agent.as_ref(), thread_slug(&independent)?).await?;
-            let output = second_thread.run_in_sandbox(exoharness::RunInSandboxRequest { id: second_thread.list_sandboxes().await?[0].id.clone(), command: vec!["sh".into(), "-c".into(), "test ! -e proof.txt".into()], env: Default::default() }).await?;
+            let output = second_thread.run_in_sandbox(exoharness::RunInSandboxRequest { id: second_thread.list_sandboxes().await?[0].id.clone(), command: vec!["sh".into(), "-c".into(), "test ! -e proof.txt".into()], env: Default::default(), cwd: None }).await?;
             ensure!(output.into_parts().wait.await? == 0, "different agents shared an implicit sandbox");
             live(f, &["run", f.agent_file.to_str().unwrap(), "--environment", "pi", "--prompt", "Reply exactly PI-READY without using tools."], "").await?;
             let history = live(f, &["run", "pi-live", "--thread", slug], "/history\n/quit\n").await?;
@@ -400,6 +401,7 @@ for (const dir of ['/tmp/exo-codex-home', '/home/exo/.codex', '/home/exo/.claude
                         id: sandbox,
                         command: vec!["node".into(), "-e".into(), inspect.into(), variable.into(), digest.clone()],
                         env: std::collections::HashMap::from([(variable.into(), "caller-supplied-value".into())]),
+                        cwd: None,
                     }).await?;
                     ensure!(audit.into_parts().wait.await? == 0, "credential containment audit failed");
                     Ok::<_, anyhow::Error>(())

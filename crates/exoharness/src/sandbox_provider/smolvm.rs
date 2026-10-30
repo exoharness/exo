@@ -739,7 +739,7 @@ impl SmolvmSandboxBackend {
         let handle = handle?;
         handle.touch();
         self.invalidate_tcp_forwards(&request.sandbox_id);
-        Ok(crate::with_process_management(handle))
+        Ok(handle)
     }
 
     async fn existing_tcp_forwards(
@@ -1018,17 +1018,15 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             let image = self.prepare_image(&request.spec.image).await?;
             reject_unsupported_spec(&request.spec, &image)?;
             let boot_binary = self.boot_binary().await?.clone();
-            return Ok(crate::with_process_management(Arc::new(
-                SmolvmOneShotHandle {
-                    id: format!("smolvm-oneshot:{}", request.sandbox_id),
-                    binary: binary.clone(),
-                    image,
-                    boot_binary,
-                    storage_gib: self.storage_gib,
-                    overlay_gib: self.overlay_gib,
-                    request,
-                },
-            )));
+            return Ok(Arc::new(SmolvmOneShotHandle {
+                id: format!("smolvm-oneshot:{}", request.sandbox_id),
+                binary: binary.clone(),
+                image,
+                boot_binary,
+                storage_gib: self.storage_gib,
+                overlay_gib: self.overlay_gib,
+                request,
+            }));
         }
         let machine = machine_name(&request.sandbox_id);
         #[cfg(unix)]
@@ -1056,7 +1054,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             .await?;
         handle.touch();
         self.invalidate_tcp_forwards(&request.sandbox_id);
-        Ok(crate::with_process_management(handle))
+        Ok(handle)
     }
 
     #[cfg(unix)]

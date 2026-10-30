@@ -189,14 +189,12 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         reject_host_mounts(&request)?;
         let sprite_name = sprite_name_for_request(&request);
         self.ensure_sprite(&sprite_name, &request).await?;
-        Ok(crate::with_process_management(Arc::new(
-            SpritesSandboxHandle {
-                id: format!("sprites:{}", request.sandbox_id.as_str()),
-                sprite_name,
-                request,
-                backend: self.handle_backend(),
-            },
-        )))
+        Ok(Arc::new(SpritesSandboxHandle {
+            id: format!("sprites:{}", request.sandbox_id.as_str()),
+            sprite_name,
+            request,
+            backend: self.handle_backend(),
+        }))
     }
 
     async fn attach(
@@ -249,14 +247,12 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
             &manifest.checkpoint_id,
         )
         .await?;
-        Ok(crate::with_process_management(Arc::new(
-            SpritesSandboxHandle {
-                id: format!("sprites-restored:{}", request.sandbox_id.as_str()),
-                sprite_name,
-                request,
-                backend: self.handle_backend(),
-            },
-        )))
+        Ok(Arc::new(SpritesSandboxHandle {
+            id: format!("sprites-restored:{}", request.sandbox_id.as_str()),
+            sprite_name,
+            request,
+            backend: self.handle_backend(),
+        }))
     }
 }
 
