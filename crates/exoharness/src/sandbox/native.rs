@@ -385,7 +385,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
     fn capabilities(&self) -> SandboxBackendCapabilities {
         SandboxBackendCapabilities {
             durable_file_systems: true,
-            default_workdir: None,
+            default_workdir: Some(SANDBOX_MAIN_MOUNT_DIR.to_string()),
             networking_always_enabled: false,
         }
     }

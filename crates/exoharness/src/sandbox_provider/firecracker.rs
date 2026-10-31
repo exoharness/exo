@@ -1500,7 +1500,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     fn capabilities(&self) -> crate::SandboxBackendCapabilities {
         crate::SandboxBackendCapabilities {
             durable_file_systems: true,
-            default_workdir: None,
+            default_workdir: Some(crate::SANDBOX_MAIN_MOUNT_DIR.to_string()),
             networking_always_enabled: false,
         }
     }
