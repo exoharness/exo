@@ -108,6 +108,7 @@ pub async fn ensure_conversation_sandbox(
                             id: sandbox.id.clone(),
                             command: vec![program.to_owned(), "-lc".to_owned(), "true".to_owned()],
                             env: Default::default(),
+                            cwd: None,
                         })
                         .await;
                     if healthcheck.is_err() {

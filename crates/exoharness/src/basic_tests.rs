@@ -1487,6 +1487,58 @@ async fn legacy_json_artifacts_are_still_readable() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn basic_run_in_sandbox_uses_the_requested_working_directory() -> crate::Result<()> {
+    let tempdir = TempDir::new()?;
+    let workdir = tempdir.path().join("workdir");
+    fs::create_dir_all(&workdir).await?;
+    let harness = BasicExoHarness::new(local_test_config(tempdir.path())).await?;
+    let agent = harness
+        .new_agent(NewAgentRequest {
+            vaults: vec![],
+            slug: "agent".to_string(),
+            name: "Agent".to_string(),
+        })
+        .await?;
+    let conversation = agent
+        .new_conversation(NewConversationRequest::default())
+        .await?;
+    let sandbox_id = conversation
+        .create_sandbox(CreateSandboxRequest {
+            tcp_ports: vec![],
+            name: None,
+            provider: SandboxProvider::LocalProcess,
+            image: "basic-local-process".to_string(),
+            resources: Default::default(),
+            default_workdir: Some(tempdir.path().display().to_string()),
+            file_system_mounts: None,
+            durable_file_systems: None,
+            policy: None,
+            enable_networking: Some(true),
+            idle_seconds: Some(60),
+        })
+        .await?;
+    let process = conversation
+        .run_in_sandbox(RunInSandboxRequest {
+            id: sandbox_id,
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "pwd -P".to_string(),
+            ],
+            env: Default::default(),
+            cwd: Some(workdir.display().to_string()),
+        })
+        .await?;
+    let output = crate::collect_process_output(process.into_parts(), b"", None, 4096).await?;
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        std::fs::canonicalize(&workdir)?.display().to_string()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn basic_backend_runs_commands_in_created_sandbox() {
     let tempdir = TempDir::new().expect("tempdir");
     let harness = BasicExoHarness::new(local_test_config(tempdir.path()))
@@ -1536,6 +1588,7 @@ async fn basic_backend_runs_commands_in_created_sandbox() {
             id: sandbox_id.clone(),
             command: vec!["/bin/sh".to_string(), "-lc".to_string(), "cat".to_string()],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("sandbox command should run");
@@ -1636,6 +1689,7 @@ async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
                 "printf agent-owned > agent-sandbox-proof".to_string(),
             ],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("agent sandbox command should run");
@@ -1662,6 +1716,7 @@ async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
                 "cat agent-sandbox-proof".to_string(),
             ],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("agent sandbox should retain filesystem state");
@@ -1680,6 +1735,7 @@ async fn agent_scoped_sandbox_is_shared_without_conversation_ownership() {
             id: reacquired,
             command: vec!["true".to_string()],
             env: Default::default(),
+            cwd: None,
         })
         .await;
     assert!(conversation_process.is_err());
@@ -1890,6 +1946,7 @@ async fn basic_backend_reattaches_running_sandbox_in_new_harness_process() {
                 "printf reattached".to_string(),
             ],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .expect("sandbox command should run after reload");

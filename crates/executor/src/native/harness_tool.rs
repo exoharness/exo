@@ -848,6 +848,7 @@ async fn execute_exo_shell_tool(
             id: agent_sandbox.sandbox_id,
             command: vec![program, "-lc".to_string(), args.command],
             env: Default::default(),
+            cwd: None,
         })
         .await?;
     read_shell_process(process).await

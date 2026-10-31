@@ -162,6 +162,7 @@ async fn exec_shell(
             id: sandbox_id.clone(),
             command: vec!["/bin/bash".into(), "-c".into(), cmd.into()],
             env: Default::default(),
+            cwd: None,
         })
         .await
         .unwrap_or_else(|error| panic!("run_in_sandbox({cmd:?}) failed: {error:#}"));

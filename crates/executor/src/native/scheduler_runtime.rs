@@ -442,6 +442,7 @@ impl ResolvedTaskSandbox {
                         id: sandbox_id.clone(),
                         command,
                         env: Default::default(),
+                        cwd: None,
                     })
                     .await
             }
@@ -454,6 +455,7 @@ impl ResolvedTaskSandbox {
                         id: sandbox_id.clone(),
                         command,
                         env: Default::default(),
+                        cwd: None,
                     })
                     .await
             }

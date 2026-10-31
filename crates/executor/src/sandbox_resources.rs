@@ -29,6 +29,7 @@ pub(crate) async fn materialize(
                 id: id.clone(),
                 command: vec!["/bin/sh".into(), "-ec".into(), git_script(resource)?],
                 env: Default::default(),
+                cwd: None,
             })
             .await?;
         let mut parts = process.into_parts();
