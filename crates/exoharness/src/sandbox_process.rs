@@ -99,9 +99,18 @@ async fn collect(
             _ => Ok(()),
         }
     };
-    let (written, exit_code) = tokio::join!(write, wait);
-    let exit_code = exit_code?;
-    written?;
+    // Stop writing input once the process exits: a background child can
+    // keep its stdin open without reading it.
+    tokio::pin!(write);
+    let mut wait = wait;
+    let exit_code = tokio::select! {
+        biased;
+        written = &mut write => {
+            written?;
+            wait.await?
+        }
+        exit_code = &mut wait => exit_code?,
+    };
     if let Ok((stdout, stderr)) = tokio::time::timeout(DRAIN_GRACE, async {
         ((&mut stdout.0).await, (&mut stderr.0).await)
     })
@@ -232,6 +241,53 @@ mod tests {
         assert_eq!(output.stdout_bytes, 10);
         assert_eq!(output.stderr, b"ab");
         assert!(output.truncated());
+        Ok(())
+    }
+
+    struct StalledWriter;
+
+    impl futures::io::AsyncWrite for StalledWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+            _buffer: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stops_writing_input_once_the_process_exits() -> Result<()> {
+        let (exited, exit) = tokio::sync::oneshot::channel();
+        let parts = SandboxProcessParts {
+            stdout: Box::pin(Cursor::new(&b"out"[..])),
+            stderr: Box::pin(Cursor::new(&b""[..])),
+            stdin: Box::pin(StalledWriter),
+            wait: Box::pin(async move {
+                exit.await?;
+                Ok(0)
+            }),
+        };
+        let collect = tokio::spawn(collect_process_output(parts, b"input", None, 1024));
+        tokio::task::yield_now().await;
+        exited.send(()).unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(1), collect).await???;
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, b"out");
         Ok(())
     }
 
