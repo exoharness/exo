@@ -57,7 +57,7 @@ pub use http_client::{AccessTokenProvider, HttpClient, HttpResponseError};
 #[cfg(feature = "store")]
 pub use sandbox::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
-pub use sandbox_process::with_process_management;
+pub use sandbox_process::{CollectedProcessOutput, ProcessTimedOut, collect_process_output};
 pub use sandbox_provider::*;
 pub use types::*;
 pub use uuid7::*;

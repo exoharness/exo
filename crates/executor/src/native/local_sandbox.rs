@@ -1505,6 +1505,7 @@ mod tests {
                 id: sandbox_id,
                 command: vec!["true".to_string()],
                 env: Default::default(),
+                cwd: None,
             })
             .await;
         assert!(remote_process.is_err());

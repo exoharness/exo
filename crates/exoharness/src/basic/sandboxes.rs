@@ -936,7 +936,7 @@ impl<'a> BasicScopedSandboxHandle<'a> {
                     request.env,
                 )?,
                 display_argv: Some(request.command),
-                cwd: None,
+                cwd: request.cwd,
                 timeout: None,
             })
             .await
