@@ -43,6 +43,23 @@ Then, set `OPENAI_API_KEY` in your environment and wire the credential to Exo:
 exo vault secret create global --preset openai
 ```
 
+Or store the key directly:
+
+```bash
+exo secret set openai --env OPENAI_API_KEY   # or --value <key>
+```
+
+If you start a session before configuring a credential, exo detects it and offers
+an interactive bootstrap wizard that stores the key and registers the model for
+you. You can also register a model explicitly:
+
+```bash
+exo model register gpt-5.4 --secret openai
+```
+
+Or just run `./scripts/exo.sh` — it builds exo, starts the bundled quickstart
+agent, and walks you through first-run setup when the model is not ready.
+
 Now, you're ready to run your agent:
 
 ```bash
