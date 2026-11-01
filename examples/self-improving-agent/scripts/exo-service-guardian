@@ -37,6 +37,19 @@ if [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
 fi
 
+# Activation preflight profile (fail-closed), read *after* the config file is
+# sourced so .exo/exo-service-guardian.env is an authoritative place to set it.
+# The value selects a hardcoded command list below; the gate never executes
+# free-form shell strings taken from the environment.
+PREFLIGHT_PROFILE="${EXO_ACTIVATION_PREFLIGHT_PROFILE:-default}"
+case "$PREFLIGHT_PROFILE" in
+  default | full | off) ;;
+  *)
+    echo "error: unknown EXO_ACTIVATION_PREFLIGHT_PROFILE '$PREFLIGHT_PROFILE' (expected default, full, or off)" >&2
+    exit 1
+    ;;
+esac
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -63,6 +76,18 @@ Options:
   --config <path>           Service guardian config path (default: .exo/exo-service-guardian.env)
   --build                   For restart-all, build before restarting services
   --help                    Show this help
+
+Activation is fail-closed: before a freshly built candidate is activated
+(restart-all --build), required preflight checks must pass. The check set is
+selected by EXO_ACTIVATION_PREFLIGHT_PROFILE, which may be set in
+.exo/exo-service-guardian.env: "default" (lint, typecheck, cargo check -p exo,
+harness import smoke), "full" (default plus pnpm test and a workspace cargo
+check), or "off" (binary smoke checks only; not recommended). The candidate
+binaries are always smoke-checked (executable, --help exits 0). Each check's
+result is recorded in .exo/activation-preflight.json; the first failure stops
+the restart with exit code 3 (preflight_failed) and the currently running
+version remains active. A plain restart-all without --build does not run the
+preflight: it restarts the already-active version, not a new candidate.
 
 The service guardian owns host-side services only. It never deletes .exo state, adapter
 pairing data, conversations, artifacts, or sandbox records.
@@ -111,7 +136,148 @@ build_all() {
   run_cargo build -p exo --ignore-rust-version
   echo "Building Exo scheduler runner..."
   run_cargo build --manifest-path examples/self-improving-agent/scheduler-runner/Cargo.toml --ignore-rust-version
+  validate_activation
   request_repl_restart
+}
+
+# Fail-closed activation boundary: the currently running version stays active
+# until every required preflight check on the candidate succeeds. A successful
+# build alone does not prove the candidate is safe to activate, so run the
+# profile's required checks before anything is restarted. Each check's result
+# (name, exit code, duration) is recorded in
+# $STATE_DIR/activation-preflight.json so a rejected candidate is an
+# inspectable iteration, and a preflight failure exits with code 3 so the
+# deferred runner can record the distinct "preflight_failed" terminal state;
+# services are untouched either way.
+PREFLIGHT_REPORT="$STATE_DIR/activation-preflight.json"
+PREFLIGHT_EXIT_PREFLIGHT_FAILED=3
+
+validate_activation() {
+  echo "Validating candidate before activation (fail-closed, profile: $PREFLIGHT_PROFILE)..."
+  PREFLIGHT_ENTRIES=""
+  preflight_check "candidate-exo-smoke" "candidate exo binary executable + --help" \
+    candidate_smoke_check_exo
+  preflight_check "candidate-scheduler-smoke" "candidate scheduler binary executable + --help" \
+    candidate_smoke_check_scheduler
+  case "$PREFLIGHT_PROFILE" in
+    default)
+      preflight_check "pnpm-lint" "pnpm lint" preflight_pnpm_lint
+      preflight_check "pnpm-typecheck" "pnpm typecheck" preflight_pnpm_typecheck
+      preflight_check "cargo-check-exo" "cargo check -p exo" preflight_cargo_check_exo
+      preflight_check "harness-import-smoke" "harness import smoke" preflight_harness_import_smoke
+      ;;
+    full)
+      preflight_check "pnpm-lint" "pnpm lint" preflight_pnpm_lint
+      preflight_check "pnpm-typecheck" "pnpm typecheck" preflight_pnpm_typecheck
+      preflight_check "pnpm-test" "pnpm test" preflight_pnpm_test
+      preflight_check "cargo-check-workspace" "cargo check --workspace" preflight_cargo_check_workspace
+      preflight_check "harness-import-smoke" "harness import smoke" preflight_harness_import_smoke
+      ;;
+    off)
+      echo "  EXO_ACTIVATION_PREFLIGHT_PROFILE=off: only the candidate binary smoke checks ran."
+      ;;
+  esac
+  preflight_write_report "passed" 0
+  echo "Activation preflight passed."
+}
+
+# Run one required check, record its result, and fail closed (exit 3) on the
+# first failure so the deferred runner records a preflight_failed outcome.
+preflight_check() {
+  local name="$1"
+  local description="$2"
+  local fn="$3"
+  echo "  preflight [$name]: $description"
+  local started seconds code
+  started=$SECONDS
+  set +e
+  "$fn"
+  code=$?
+  set -e
+  seconds=$((SECONDS - started))
+  if [[ -n "$PREFLIGHT_ENTRIES" ]]; then
+    PREFLIGHT_ENTRIES+=","$'\n  '
+  fi
+  if [ "$code" -eq 0 ]; then
+    PREFLIGHT_ENTRIES+="{\"name\": \"$name\", \"status\": \"passed\", \"exitCode\": $code, \"durationMs\": $((seconds * 1000))}"
+  else
+    PREFLIGHT_ENTRIES+="{\"name\": \"$name\", \"status\": \"failed\", \"exitCode\": $code, \"durationMs\": $((seconds * 1000))}"
+  fi
+  if [ "$code" -ne 0 ]; then
+    preflight_write_report "preflight_failed" "$code"
+    echo "error: activation preflight [$name] failed (exit $code); refusing to activate the candidate; the currently running version remains active; per-check results: $PREFLIGHT_REPORT" >&2
+    exit "$PREFLIGHT_EXIT_PREFLIGHT_FAILED"
+  fi
+}
+
+preflight_write_report() {
+  local overall="$1"
+  local exit_code="$2"
+  ensure_state_dir
+  {
+    printf '{\n'
+    printf '  "generatedAt": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "profile": "%s",\n' "$PREFLIGHT_PROFILE"
+    printf '  "status": "%s",\n' "$overall"
+    printf '  "exitCode": %s,\n' "$exit_code"
+    printf '  "checks": [\n'
+    printf '%s' "$PREFLIGHT_ENTRIES" | sed 's/^/    /'
+    printf '  ]\n'
+    printf '}\n'
+  } > "$PREFLIGHT_REPORT.tmp"
+  mv "$PREFLIGHT_REPORT.tmp" "$PREFLIGHT_REPORT"
+}
+
+candidate_smoke_check_exo() {
+  candidate_smoke_check "exo" "$EXO_BIN"
+}
+
+candidate_smoke_check_scheduler() {
+  candidate_smoke_check "scheduler runner" "$SCHEDULER_BIN"
+}
+
+candidate_smoke_check() {
+  local label="$1"
+  local bin="$2"
+  if [[ ! -x "$bin" ]]; then
+    echo "error: $label binary missing or not executable: $bin" >&2
+    return 1
+  fi
+  if ! "$bin" --help >/dev/null 2>&1; then
+    echo "error: $label binary does not run ($bin --help exited nonzero)" >&2
+    return 1
+  fi
+}
+
+# Required checks are hardcoded below; the profile name only selects among
+# them, so nothing from the environment is ever executed as shell input.
+preflight_pnpm_lint() {
+  (cd "$ROOT_DIR" && pnpm lint)
+}
+
+preflight_pnpm_typecheck() {
+  (cd "$ROOT_DIR" && pnpm typecheck)
+}
+
+preflight_pnpm_test() {
+  (cd "$ROOT_DIR" && pnpm test)
+}
+
+preflight_cargo_check_exo() {
+  (cd "$ROOT_DIR" && cargo check -p exo --quiet)
+}
+
+preflight_cargo_check_workspace() {
+  (cd "$ROOT_DIR" && cargo check --workspace --quiet)
+}
+
+preflight_harness_import_smoke() {
+  # Exercises the TypeScript harness import graph and tool registration,
+  # which a --help smoke on the Rust binary cannot reach.
+  (
+    cd "$ROOT_DIR" &&
+      pnpm exec tsx examples/self-improving-agent/scripts/harness-import-smoke.mts
+  )
 }
 
 request_repl_restart() {
@@ -498,6 +664,10 @@ case "$COMMAND" in
     restart_scheduler
     ;;
   restart-all)
+    # Only the build path activates a new candidate, so only it runs the
+    # fail-closed preflight. A plain restart re-launches the already-active
+    # binaries; preflighting those would validate the running version, not a
+    # candidate, and block recovery restarts on unrelated failures.
     if [[ "$BUILD_BEFORE_RESTART" == true ]]; then
       build_all
     fi
