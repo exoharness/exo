@@ -11,7 +11,7 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg?logo=rust)](Cargo.toml)
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-3178c6.svg?logo=typescript&logoColor=white)](tsconfig.json)
 
-[Documentation](https://exoharness.ai/docs) · [Discord](https://discord.gg/8x23hdBJU6)
+[Documentation](https://exoharness.ai/docs) · [Discord](https://discord.gg/8x23hdBJU6) · [Paper](#paper)
 
 </div>
 
@@ -104,3 +104,21 @@ as an [experiment in self-evolution](https://github.com/exoharness/exo/tree/main
 ## License
 
 [MIT](LICENSE).
+
+## Paper
+
+[Exo: An Architecture for Self-Improving Systems at Runtime](https://www.krentsel.com/assets/exo/krentsel-exo-preprint.pdf)
+describes Exo's architecture for safe learning during ongoing work and evaluates it on an open-world game, AppWorld, SREGym, and
+Continual Learning Bench. If you use Exo in your research, please cite:
+
+```bibtex
+@misc{krentsel2026exo,
+  title  = {Exo: An Architecture for Self-Improving Systems at Runtime},
+  author = {Krentsel, Alexander and Ratnasamy, Sylvia and Stoica, Ion and Casado, Martin and Goyal, Ankur},
+  year   = {2026},
+  month  = oct,
+  day    = {30},
+  note   = {Preprint},
+  url    = {https://www.krentsel.com/assets/exo/krentsel-exo-preprint.pdf}
+}
+```
