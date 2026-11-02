@@ -20,8 +20,8 @@ pub struct ResourceStore {
     root: PathBuf,
     excluded: PathBuf,
     master_key: Option<PathBuf>,
-    image_size_gib: Option<f64>,
-    volume_size_gib: Option<f64>,
+    image_size_bytes: Option<u64>,
+    volume_size_bytes: Option<u64>,
     cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
@@ -39,8 +39,8 @@ impl ResourceStore {
             root: root.join("resources"),
             excluded: root,
             master_key: None,
-            image_size_gib: None,
-            volume_size_gib: None,
+            image_size_bytes: None,
+            volume_size_bytes: None,
             cancel: None,
         })
     }
@@ -58,19 +58,16 @@ impl ResourceStore {
         git_with_cancellation(cwd, args, credential, self.cancel.as_ref(), None)
     }
 
-    /// Sets the resource volume capacity in GiB, including fractional sizes.
-    pub fn with_volume_size(mut self, size_gib: f64) -> Result<Self> {
+    /// Sets the resource volume capacity in bytes.
+    pub fn with_volume_size(mut self, size_bytes: u64) -> Result<Self> {
+        ensure!(size_bytes > 0, "resource volume size must be positive");
         ensure!(
-            size_gib.is_finite() && size_gib > 0.0,
-            "resource volume size must be positive and finite"
-        );
-        ensure!(
-            cfg!(target_os = "macos") || self.image_size_gib.is_some(),
+            cfg!(target_os = "macos") || self.image_size_bytes.is_some(),
             "bounded resources require APFS volumes or Firecracker resource images"
         );
-        self.volume_size_gib = Some(size_gib);
-        if self.image_size_gib.is_some() {
-            self.image_size_gib = Some(size_gib);
+        self.volume_size_bytes = Some(size_bytes);
+        if self.image_size_bytes.is_some() {
+            self.image_size_bytes = Some(size_bytes);
         }
         Ok(self)
     }
@@ -201,7 +198,7 @@ impl ResourceStore {
             .map(|instance| {
                 let definition = &instance.prepared.definition;
                 let resource = directory.join(&definition.name);
-                let path = if self.image_size_gib.is_some() {
+                let path = if self.image_size_bytes.is_some() {
                     resource.clone()
                 } else {
                     tracing::info!(target: "exoharness::progress", "Mounting resource {}", definition.name);

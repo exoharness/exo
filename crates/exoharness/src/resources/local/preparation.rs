@@ -11,29 +11,24 @@ impl ResourceStore {
         ensure!(!identity.is_empty(), "resource cache identity is required");
         self.initialize()?;
         // Preserve existing snapshot keys for whole-GiB capacities.
-        let volume_size_gib = self
-            .volume_size_gib
-            .map(|size| {
-                if size.fract() == 0.0 && size < u64::MAX as f64 {
-                    Ok(serde_json::Number::from(size as u64))
-                } else {
-                    serde_json::Number::from_f64(size)
-                        .context("resource volume size must be finite")
-                }
-            })
-            .transpose()?;
-        let key = digest(&serde_json::to_vec(&(
-            &definition.source,
-            identity,
-            volume_size_gib,
-        ))?);
+        let key = match self.volume_size_bytes {
+            Some(bytes) if bytes % (1024 * 1024 * 1024) != 0 => {
+                serde_json::to_vec(&(&definition.source, identity, ("bytes", bytes)))?
+            }
+            size_bytes => serde_json::to_vec(&(
+                &definition.source,
+                identity,
+                size_bytes.map(|bytes| bytes / (1024 * 1024 * 1024)),
+            ))?,
+        };
+        let key = digest(&key);
         let _lock = self.lock(&key)?;
         let fresh = !self.root.join("snapshots").join(&key).exists();
         self.publish(&key, |scope, volume| {
             // Firecracker opens the disk itself, so detach it before starting the VM.
             // Only new, empty disks need host-side ownership setup; cached guest data
             // must not be mounted on the host to refresh it.
-            let host_path = if self.image_size_gib.is_some() {
+            let host_path = if self.image_size_bytes.is_some() {
                 if fresh {
                     self.prepare_ownership(&self.mount_volume(volume)?)?;
                     self.unmount_volume(volume)?;
