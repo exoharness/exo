@@ -10,10 +10,22 @@ impl ResourceStore {
         definition.validate()?;
         ensure!(!identity.is_empty(), "resource cache identity is required");
         self.initialize()?;
+        // Preserve existing snapshot keys for whole-GiB capacities.
+        let volume_size_gib = self
+            .volume_size_gib
+            .map(|size| {
+                if size.fract() == 0.0 && size < u64::MAX as f64 {
+                    Ok(serde_json::Number::from(size as u64))
+                } else {
+                    serde_json::Number::from_f64(size)
+                        .context("resource volume size must be finite")
+                }
+            })
+            .transpose()?;
         let key = digest(&serde_json::to_vec(&(
             &definition.source,
             identity,
-            self.volume_size_gib,
+            volume_size_gib,
         ))?);
         let _lock = self.lock(&key)?;
         let fresh = !self.root.join("snapshots").join(&key).exists();
