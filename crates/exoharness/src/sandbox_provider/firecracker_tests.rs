@@ -1492,7 +1492,8 @@ async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()
         allowed_local_images: vec![image.clone().into()],
         ..Default::default()
     };
-    let store = crate::resources::ResourceStore::image_store(&config.state_root, 1)?;
+    let store =
+        crate::resources::ResourceStore::image_store(&config.state_root, 1024 * 1024 * 1024)?;
     let native = crate::resources::ResourceStore::new(&temp.path().join("native"))?;
     let resources = native.prepare(
         [

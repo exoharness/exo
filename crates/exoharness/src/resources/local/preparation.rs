@@ -13,7 +13,7 @@ impl ResourceStore {
         let key = digest(&serde_json::to_vec(&(
             &definition.source,
             identity,
-            self.volume_size_gib,
+            self.volume_size_bytes,
         ))?);
         let _lock = self.lock(&key)?;
         let fresh = !self.root.join("snapshots").join(&key).exists();
@@ -21,7 +21,7 @@ impl ResourceStore {
             // Firecracker opens the disk itself, so detach it before starting the VM.
             // Only new, empty disks need host-side ownership setup; cached guest data
             // must not be mounted on the host to refresh it.
-            let host_path = if self.image_size_gib.is_some() {
+            let host_path = if self.image_size_bytes.is_some() {
                 if fresh {
                     self.prepare_ownership(&self.mount_volume(volume)?)?;
                     self.unmount_volume(volume)?;

@@ -4,13 +4,14 @@ use std::collections::BTreeMap;
 
 impl ResourceStore {
     #[cfg(feature = "firecracker")]
-    pub fn image_store(root: &Path, size_gib: u64) -> Result<Self> {
+    /// Creates a resource image store with the given volume capacity in bytes.
+    pub fn image_store(root: &Path, size_bytes: u64) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
             let mut store = Self::new(root)?;
-            ensure!(size_gib > 0, "resource volume size must be positive");
-            store.image_size_gib = Some(size_gib);
-            store.volume_size_gib = Some(size_gib);
+            ensure!(size_bytes > 0, "resource volume size must be positive");
+            store.image_size_bytes = Some(size_bytes);
+            store.volume_size_bytes = Some(size_bytes);
             store.initialize()?;
             let filesystem = checked(
                 Command::new("findmnt")
@@ -35,7 +36,7 @@ impl ResourceStore {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (root, size_gib);
+            let _ = (root, size_bytes);
             bail!("resource images must be prepared on the Linux Firecracker host")
         }
     }
@@ -156,13 +157,10 @@ impl ResourceStore {
     }
 
     pub(super) fn create_volume(&self, directory: &Path) -> Result<()> {
-        if let Some(size) = self.image_size_gib {
+        if let Some(size_bytes) = self.image_size_bytes {
             let image = directory.join("volume.ext4");
             let file = File::create_new(&image)?;
-            file.set_len(
-                size.checked_mul(1024 * 1024 * 1024)
-                    .context("resource image is too large")?,
-            )?;
+            file.set_len(size_bytes)?;
             checked(
                 Command::new("mkfs.ext4")
                     .args([
@@ -178,14 +176,14 @@ impl ResourceStore {
             return Ok(());
         }
         #[cfg(target_os = "macos")]
-        if let Some(size) = self.volume_size_gib {
+        if let Some(size) = self.volume_size_bytes {
             return crate::local_volume::create_sized_volume(directory, size);
         }
         create_volume(directory)
     }
 
     pub(super) fn mount_volume(&self, directory: &Path) -> Result<PathBuf> {
-        if self.image_size_gib.is_some() {
+        if self.image_size_bytes.is_some() {
             let mount = directory.join("mount");
             fs::create_dir_all(&mount)?;
             let status = Command::new("mountpoint").arg("-q").arg(&mount).status()?;
@@ -209,7 +207,7 @@ impl ResourceStore {
     }
 
     pub(super) fn unmount_volume(&self, directory: &Path) -> Result<()> {
-        if self.image_size_gib.is_some() {
+        if self.image_size_bytes.is_some() {
             let mount = directory.join("mount");
             if mount.exists() {
                 checked(Command::new("umount").arg(&mount))?;
@@ -221,7 +219,7 @@ impl ResourceStore {
     }
 
     pub(super) fn clone_volume(&self, source: &Path, target: &Path) -> Result<()> {
-        if self.image_size_gib.is_some() {
+        if self.image_size_bytes.is_some() {
             checked(
                 Command::new("cp")
                     .args(["--reflink=always", "--"])
@@ -235,7 +233,7 @@ impl ResourceStore {
 
     pub(super) fn prepare_ownership(&self, _workspace: &Path) -> Result<()> {
         #[cfg(target_os = "linux")]
-        if self.image_size_gib.is_some() {
+        if self.image_size_bytes.is_some() {
             own_resource(_workspace)?;
         }
         Ok(())
