@@ -4,14 +4,12 @@ use std::collections::BTreeMap;
 
 impl ResourceStore {
     #[cfg(feature = "firecracker")]
-    pub fn image_store(root: &Path, size_gib: u64) -> Result<Self> {
+    /// Creates a resource image store with the given volume capacity in bytes.
+    pub fn image_store(root: &Path, size_bytes: u64) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
             let mut store = Self::new(root)?;
-            ensure!(size_gib > 0, "resource volume size must be positive");
-            let size_bytes = size_gib
-                .checked_mul(1024 * 1024 * 1024)
-                .context("resource image is too large")?;
+            ensure!(size_bytes > 0, "resource volume size must be positive");
             store.image_size_bytes = Some(size_bytes);
             store.volume_size_bytes = Some(size_bytes);
             store.initialize()?;
@@ -38,7 +36,7 @@ impl ResourceStore {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (root, size_gib);
+            let _ = (root, size_bytes);
             bail!("resource images must be prepared on the Linux Firecracker host")
         }
     }

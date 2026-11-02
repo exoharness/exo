@@ -1468,7 +1468,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         tokio::task::spawn_blocking(move || {
             crate::resources::ResourceStore::image_store(
                 &config.state_root,
-                config.workspace_size_gib,
+                gib_bytes(config.workspace_size_gib, "workspace")?,
             )?
             .materialize_images(request)
         })
@@ -1484,7 +1484,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         tokio::task::spawn_blocking(move || {
             crate::resources::ResourceStore::image_store(
                 &config.state_root,
-                config.workspace_size_gib,
+                gib_bytes(config.workspace_size_gib, "workspace")?,
             )?
             .remove_thread(agent, thread)
         })

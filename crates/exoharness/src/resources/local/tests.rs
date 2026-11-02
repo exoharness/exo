@@ -34,7 +34,7 @@ async fn firecracker_isolated_git_resources_live() -> Result<()> {
     let temp = tempfile::tempdir_in("/var/lib/exo")?;
     let image = std::env::var("EXO_FIRECRACKER_TEST_IMAGE")?;
     let state_root = temp.path().join("state");
-    let store = ResourceStore::image_store(&state_root, 1)?;
+    let store = ResourceStore::image_store(&state_root, 1024 * 1024 * 1024)?;
     let backend = std::sync::Arc::new(
         crate::FirecrackerSandboxBackend::new(crate::FirecrackerConfig {
             state_root,
@@ -409,7 +409,7 @@ fn cow_resources_reuse_git_volume_and_isolate_threads() -> Result<()> {
 #[ignore = "requires root and TMPDIR on XFS with reflinks enabled"]
 fn firecracker_images_reuse_git_cache_and_preserve_thread_edits() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let store = ResourceStore::image_store(&temp.path().join("state"), 1)?;
+    let store = ResourceStore::image_store(&temp.path().join("state"), 1024 * 1024 * 1024)?;
     check_git_thread_isolation(&store, &temp)
 }
 

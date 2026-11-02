@@ -2665,7 +2665,7 @@ if os.environ['EXO_TEST_CODEX'] == 'true':
         let source_dir = root.path().join("repository");
         std::fs::create_dir(&source_dir)?;
         std::fs::write(source_dir.join("source.txt"), "pristine")?;
-        let store = ResourceStore::image_store(&config.state_root, 1)?;
+        let store = ResourceStore::image_store(&config.state_root, 1024 * 1024 * 1024)?;
         let resources = store.prepare(vec![ResourceDefinition {
             name: "repository".into(), mount_path: Some("/home/exo/workspace/repository".into()),
             mode: crate::FileSystemMountMode::ReadWrite,
