@@ -325,7 +325,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let source = root.path().join("source");
         fs::create_dir(&source)?;
-        crate::local_volume::create_sized_volume(&source, 1)?;
+        crate::local_volume::create_sized_volume(&source, 1.0)?;
         let workspace = crate::local_volume::mount_volume(&source)?;
         let (mut request, payload) =
             capture_fixture(root.path(), vec![mount(&workspace, "/repo")])?;
@@ -334,7 +334,7 @@ mod tests {
         let lease = open(root.path(), &manifest)?;
         let target = root.path().join("target");
         fs::create_dir(&target)?;
-        crate::local_volume::create_sized_volume(&target, 1)?;
+        crate::local_volume::create_sized_volume(&target, 1.0)?;
         let target_workspace = crate::local_volume::mount_volume(&target)?;
         request.spec.mounts[0].host_path = target_workspace.clone();
         for _ in 0..2 {

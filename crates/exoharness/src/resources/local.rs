@@ -20,8 +20,8 @@ pub struct ResourceStore {
     root: PathBuf,
     excluded: PathBuf,
     master_key: Option<PathBuf>,
-    image_size_gib: Option<u64>,
-    volume_size_gib: Option<u64>,
+    image_size_gib: Option<f64>,
+    volume_size_gib: Option<f64>,
     cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
@@ -58,8 +58,12 @@ impl ResourceStore {
         git_with_cancellation(cwd, args, credential, self.cancel.as_ref(), None)
     }
 
-    pub fn with_volume_size(mut self, size_gib: u64) -> Result<Self> {
-        ensure!(size_gib > 0, "resource volume size must be positive");
+    /// Sets the resource volume capacity in GiB, including fractional sizes.
+    pub fn with_volume_size(mut self, size_gib: f64) -> Result<Self> {
+        ensure!(
+            size_gib.is_finite() && size_gib > 0.0,
+            "resource volume size must be positive and finite"
+        );
         ensure!(
             cfg!(target_os = "macos") || self.image_size_gib.is_some(),
             "bounded resources require APFS volumes or Firecracker resource images"

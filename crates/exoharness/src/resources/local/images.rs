@@ -9,8 +9,8 @@ impl ResourceStore {
         {
             let mut store = Self::new(root)?;
             ensure!(size_gib > 0, "resource volume size must be positive");
-            store.image_size_gib = Some(size_gib);
-            store.volume_size_gib = Some(size_gib);
+            store.image_size_gib = Some(size_gib as f64);
+            store.volume_size_gib = Some(size_gib as f64);
             store.initialize()?;
             let filesystem = checked(
                 Command::new("findmnt")
@@ -157,12 +157,11 @@ impl ResourceStore {
 
     pub(super) fn create_volume(&self, directory: &Path) -> Result<()> {
         if let Some(size) = self.image_size_gib {
+            let size_bytes = (size * 1024.0 * 1024.0 * 1024.0).ceil();
+            ensure!(size_bytes < u64::MAX as f64, "resource image is too large");
             let image = directory.join("volume.ext4");
             let file = File::create_new(&image)?;
-            file.set_len(
-                size.checked_mul(1024 * 1024 * 1024)
-                    .context("resource image is too large")?,
-            )?;
+            file.set_len(size_bytes as u64)?;
             checked(
                 Command::new("mkfs.ext4")
                     .args([

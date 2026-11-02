@@ -15,7 +15,7 @@ fn resource(source: ResourceSource) -> ResourceDefinition {
 #[ignore = "requires SmolVM and EXO_SMOLVM_TEST_IMAGE with Git and CA certificates"]
 async fn smolvm_isolated_git_resources_live() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let store = ResourceStore::new(&temp.path().join("state"))?.with_volume_size(1)?;
+    let store = ResourceStore::new(&temp.path().join("state"))?.with_volume_size(1.0)?;
     let backend = std::sync::Arc::new(crate::SmolvmSandboxBackend::from_config(
         crate::SmolvmBackendConfig {
             mode: crate::SmolvmExecutionMode::Warm,
@@ -203,7 +203,7 @@ async fn run_resource_command(
 #[ignore = "requires APFS disk images on macOS"]
 fn isolated_preparation_preserves_edits_and_purge_preserves_private_copies() -> Result<()> {
     let temp = tempfile::tempdir()?;
-    let store = ResourceStore::new(&temp.path().join("state"))?.with_volume_size(1)?;
+    let store = ResourceStore::new(&temp.path().join("state"))?.with_volume_size(0.5)?;
     let definition = resource(ResourceSource::GitRepository {
         path: None,
         url: Some("https://github.com/acme/repository.git".into()),

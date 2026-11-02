@@ -19,12 +19,15 @@ fn checked(command: &mut Command) -> Result<Output> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn create_volume(directory: &Path) -> Result<()> {
-    create_sized_volume(directory, 1024)
+    create_sized_volume(directory, 1024.0)
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn create_sized_volume(directory: &Path, size_gib: u64) -> Result<()> {
-    ensure!(size_gib > 0, "resource volume size must be positive");
+pub(crate) fn create_sized_volume(directory: &Path, size_gib: f64) -> Result<()> {
+    ensure!(
+        size_gib.is_finite() && size_gib > 0.0,
+        "resource volume size must be positive and finite"
+    );
     checked(
         Command::new("hdiutil")
             .args([
