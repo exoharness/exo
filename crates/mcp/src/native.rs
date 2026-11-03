@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context, Result};
 use rmcp::{
     ServiceExt,
-    model::{CallToolRequestParams, CallToolResult, Tool},
+    model::{CallToolRequestParams, CallToolResult, ClientConfig, ProtocolVersion, Tool},
     service::{RoleClient, RunningService},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
@@ -19,7 +19,7 @@ pub(crate) struct HttpMcpConnector<'a> {
     pub(crate) servers: &'a [McpServerConfig],
     pub(crate) clients: &'a [reqwest::Client],
 }
-struct NativeConnection(tokio::sync::RwLock<Option<RunningService<RoleClient, ()>>>);
+struct NativeConnection(tokio::sync::RwLock<Option<RunningService<RoleClient, ClientConfig>>>);
 #[async_trait::async_trait]
 impl McpConnector for NativeMcpConnector {
     async fn connect(
@@ -88,14 +88,19 @@ async fn connect_service(
     server: &McpServerConfig,
     credentials: Arc<dyn McpCredentialProvider>,
     client: reqwest::Client,
-) -> Result<RunningService<RoleClient, ()>> {
+) -> Result<RunningService<RoleClient, ClientConfig>> {
     let config = StreamableHttpClientTransportConfig::with_uri(server.url.clone());
     let client = auth::CredentialClient::new(client, server.clone(), credentials);
     let transport = StreamableHttpClientTransport::with_client(client, config);
-    tokio::time::timeout(Duration::from_secs(60), ().serve(transport))
-        .await
-        .context("MCP initialization timed out")?
-        .map_err(auth::authentication_context)
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        ClientConfig::default()
+            .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
+            .serve(transport),
+    )
+    .await
+    .context("MCP initialization timed out")?
+    .map_err(auth::authentication_context)
 }
 
 fn http_client() -> Result<reqwest::Client> {

@@ -37,7 +37,7 @@ futures = "0.3.31"
 ipnet = { version = "2.12.0", features = ["serde"] }
 libc = "0.2.177"
 oauth2 = { version = "5.0", default-features = false }
-rmcp = { version = "3.3.0", default-features = false }
+rmcp = { version = "3.5.0", default-features = false }
 object_store = { version = "0.12.5", features = [
   "fs",
   "aws",
