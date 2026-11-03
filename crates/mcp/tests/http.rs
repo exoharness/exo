@@ -108,6 +108,11 @@ async fn rpc(
     }
     let result = match request.method {
         Method::Initialize { protocol_version } => {
+            if !["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"]
+                .contains(&protocol_version.as_str())
+            {
+                return Json(json!({"jsonrpc":"2.0","id":request.id,"error":{"code":-32022,"message":"unsupported protocol version"}})).into_response();
+            }
             state.requests.lock().unwrap().push("initialize".into());
             json!({"protocolVersion":protocol_version,"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
         }

@@ -6003,9 +6003,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.3.0"
+version = "3.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b88db56b8ae316560e9e868b6b978ea940f27cb883323fc90e07435e44158f5c"
+checksum = "f8be15815186873ea063bf005011d16c356804973489e40c39116ae3a2878d1f"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -6014,6 +6014,7 @@ dependencies = [
  "futures",
  "http 1.4.0",
  "indexmap 2.13.0",
+ "libc",
  "oauth2",
  "pin-project-lite",
  "reqwest 0.13.4",
