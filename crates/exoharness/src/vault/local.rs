@@ -4,7 +4,7 @@ mod hosted;
 mod legacy;
 #[cfg(feature = "basic-backend")]
 mod native;
-mod oauth;
+pub(super) mod oauth;
 #[cfg(all(test, feature = "basic-backend"))]
 mod tests;
 use super::*;

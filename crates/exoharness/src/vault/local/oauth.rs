@@ -20,7 +20,7 @@ pub(super) fn needs_refresh(secret: &Secret) -> bool {
     matches!(secret, Secret::Oauth { expires_at: Some(expires_at), .. } if *expires_at <= now().saturating_add(60))
 }
 
-pub(super) async fn refresh(secret: Secret, http: &dyn OAuthHttpClient) -> Result<Secret> {
+pub async fn refresh(secret: Secret, http: &dyn OAuthHttpClient) -> Result<Secret> {
     let Secret::Oauth {
         refresh_token,
         refresh,
