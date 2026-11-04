@@ -760,3 +760,39 @@ Slack Socket Mode / HTTP callback
   to stderr.
 - Scheduler and adapters are users of Exoharness, not core Exoharness features.
   Their durable stores are separate from the core event log.
+
+## Self-Update Across Executor Swaps
+
+Because the substrate is independent of the executor, durable *state* carries
+over when you swap executors: agents, conversations, the event log, artifacts,
+bindings, secrets, and sandboxes all stay in exoharness. Self-update (RSI)
+capability is a different question: it splits into what the substrate provides
+to any executor automatically, and what only the example Exo agent provides
+today.
+
+| Capability | Where it lives | Automatic when you swap executors? |
+| --- | --- | --- |
+| Durable event log (append-only history of turns, tool calls, errors, sandbox and host events) | exoharness substrate (`crates/exoharness/src/basic.rs`, `append_events_to_conversation`) | Yes — any executor on exoharness records into the same log. |
+| Sandbox snapshot / rewind | exoharness substrate (`snapshot_sandbox` / `rewind_sandbox`, dispatched in `crates/executor/src/native/harness_tool.rs`) | Yes — backend-provided; unsupported backends report clear errors. |
+| Secrets / bindings | exoharness substrate (`ExoHarness` root handle; secret backend selection in `crates/cli/src/main.rs`) | Yes — stored outside the executor, survives executor swaps and restarts. |
+| Code visibility + editing | Sandbox mounts plus the `shell` tool (`exoharness/typescript/harness/built-in-tools.ts`) | Mostly — mounts and the shell tool are substrate features, but mounting *the executor's own repo* is a per-harness choice (the example agent does it via `examples/self-improving-agent/exo.sh` with `--self-repo-mount` / `EXO_REPO`, default `/workspace/exo`). |
+| Self-rebuild + self-restart with state preserved | Example-agent-specific: the `rebuild_and_restart_exo` tool (`examples/self-improving-agent/tools/guardian-tools.ts`) driving the host-side service guardian, durably recording the update and appending a `rebuild_and_restart_exo` host event (`crates/executor/src/native/conversation_events.rs`) | **No.** "Restart yourself cleanly" is inherently specific to the executor's own build and supervision; the generic substrate cannot automate it. |
+
+The last row is the one to plan for. A custom executor (a LangChain agent, a
+Claude Agent SDK app, etc.) gets the substrate rows automatically but has no
+equivalent of the guardian bridge today. To add self-update to a custom
+executor, follow the same pattern:
+
+1. Write a host-side guardian-style script that validates, builds, and restarts
+   *your* executor's process while preserving the `.exo` state directory, using
+   a deferred handoff so the in-flight turn can finish and durably record the
+   update first (see area 1 of `examples/self-improving-agent/docs/SELF-CONTROL.md`).
+2. Wrap it with a narrow, validated tool registered via `registerHostTool`
+   (`examples/self-improving-agent/tools/host-tools.ts` is the standard bridge;
+   `examples/self-improving-agent/tools/guardian-tools.ts` is the reference
+   implementation), and record the restart in the conversation event log as a
+   `Custom` event so the audit trail stays complete.
+
+Everything else the example agent does — event-log introspection,
+snapshot-before-risky-change, git as the second audit log — rides on substrate
+capabilities any executor inherits by running on exoharness.

@@ -60,3 +60,12 @@ minimal scaffolding.
     Whether or not the agent can modify the exo-harness is actually a policy
     consideration. The system technically allows it, but to provide safer standard
     usage, it's disallowed on the default configuration.
+
+> **Note:** the self-update loop described in agent docs (repo mount at
+> `/workspace/exo`, `rebuild_and_restart_exo` → the service guardian) is
+> specific to this example agent's executor. An executor swapped in for it
+> inherits the substrate capabilities (event log, sandbox snapshot/rewind,
+> secrets, mounts and shell) automatically, but must provide its own
+> build/restart bridge. See
+> [Self-Update Across Executor Swaps](../../../exoharness/docs/design/architecture.md#self-update-across-executor-swaps)
+> in the exoharness architecture doc.
