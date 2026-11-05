@@ -41,9 +41,36 @@ code=$?
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 if [ "$code" -eq 0 ]; then
   status=succeeded
+elif [ "$code" -eq 3 ]; then
+  # The guardian's activation preflight rejected the candidate (exit 3).
+  # Distinct from a generic failure so the audit trail says *which* boundary
+  # stopped the activation, not just that something exited nonzero.
+  status=preflight_failed
 else
   status=failed
 fi
+
+# Attach the guardian's structured per-check preflight report when present, so
+# a rejected candidate is an inspectable iteration (which check, exit, duration).
+# Best-effort and idempotent; `complete-rebuild-update` rewrites the record from
+# a typed struct, so it is attached again after that call below.
+attach_preflight_report() {
+  preflight_report="$exo_root/activation-preflight.json"
+  if [ -f "$preflight_report" ] && command -v node >/dev/null 2>&1; then
+    node -e '
+const fs = require("node:fs");
+const [path, reportPath] = process.argv.slice(1);
+try {
+  const record = JSON.parse(fs.readFileSync(path, "utf8"));
+  record.preflight = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+  fs.writeFileSync(path, `${JSON.stringify(record)}\n`);
+} catch (error) {
+  console.error(`failed to attach preflight report: ${error.message}`);
+}
+' "$record" "$preflight_report"
+  fi
+}
+attach_preflight_report
 
 if [ ! -x "$exo_bin" ]; then
   printf '[%s] rebuild update %s: exo binary missing at %s; writing outcome without event log\n' \
@@ -75,4 +102,5 @@ if [ "$record_code" -ne 0 ]; then
   printf '[%s] rebuild update %s: failed to record conversation event (exit %s); outcome file may be incomplete\n' \
     "$completed_at" "$update_id" "$record_code"
 fi
+attach_preflight_report
 exit "$code"

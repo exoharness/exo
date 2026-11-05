@@ -745,7 +745,7 @@ enum ConversationCommands {
         /// Path to the queued `.exo/guardian-updates/<id>.json` record.
         #[arg(long)]
         outcome: PathBuf,
-        /// Final status: `succeeded` or `failed`.
+        /// Final status: `succeeded`, `failed`, `preflight_failed`, or `spawn_failed`.
         #[arg(long)]
         status: String,
         /// Guardian process exit code.
