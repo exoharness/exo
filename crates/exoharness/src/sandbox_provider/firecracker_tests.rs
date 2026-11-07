@@ -753,6 +753,10 @@ async fn vsock_request_uses_firecracker_handshake_and_framing() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "Firecracker sandbox execution is only supported on Linux"
+)]
 async fn process_termination_survives_wait_cleanup_and_one_shot_shutdown() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
         for completed in [false, true] {
