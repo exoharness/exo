@@ -24,7 +24,7 @@ case "$sandbox_backend" in
     # Pinned bundle documented in support/firecracker/README.md. Build the guest
     # from this checkout so the host/guest protocol versions always match.
     sudo apt-get update
-    sudo apt-get install -y --no-install-recommends cpio e2fsprogs iproute2 iptables nftables
+    sudo apt-get install -y --no-install-recommends cpio e2fsprogs iproute2 iptables nftables xfsprogs
     sudo modprobe vhost_vsock
     sudo sysctl -w net.ipv4.ip_forward=1
     archive="$artifact_dir/firecracker.tgz"
@@ -47,6 +47,11 @@ case "$sandbox_backend" in
       --output "$kernel"
     printf '3fde810177aaf9d9a465d00e915924a7a6e2bdd34869d7fcd33c6af73b45e12d  %s\n' "$kernel" | sha256sum --check --strict
     sudo install -d -o root -g root -m 0755 /var/lib/exo/firecracker
+    sudo truncate -s 8G /var/lib/exo/firecracker/test-state.img
+    sudo mkfs.xfs -f /var/lib/exo/firecracker/test-state.img
+    sudo install -d -o root -g root -m 0700 /var/lib/exo/firecracker/test-state
+    sudo mount -o loop /var/lib/exo/firecracker/test-state.img /var/lib/exo/firecracker/test-state
+    sudo chmod 0700 /var/lib/exo/firecracker/test-state
     sudo install -o root -g root -m 0644 "$kernel" /var/lib/exo/firecracker/vmlinux
     guest_runtime="$(bash support/firecracker/build-guest.sh)"
     bash support/firecracker/build-initramfs.sh \

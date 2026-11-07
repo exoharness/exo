@@ -100,7 +100,7 @@ fn canned_response_body() -> Value {
 
 #[cfg(feature = "firecracker")]
 #[tokio::test]
-#[ignore = "requires root, KVM, and the Firecracker host artifact bundle"]
+#[ignore = "requires root, KVM, TMPDIR on XFS, and the Firecracker host artifact bundle"]
 async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Result<()> {
     use exoharness::{
         FirecrackerConfig, FirecrackerNetworkDevicePolicy, FirecrackerSandboxBackend,

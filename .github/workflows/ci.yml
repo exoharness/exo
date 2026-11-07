@@ -226,6 +226,7 @@ jobs:
           if [[ "$EXO_TEST_SANDBOX_BACKEND" == firecracker ]]; then
             # Build as the runner user; only the test needs root for jailer.
             sudo -n env EXO_TEST_SANDBOX_BACKEND=firecracker \
+              TMPDIR=/var/lib/exo/firecracker/test-state \
               EXO_FIRECRACKER_BINARY="$EXO_FIRECRACKER_BINARY" \
               EXO_FIRECRACKER_JAILER="$EXO_FIRECRACKER_JAILER" \
               PATH=/usr/sbin:/usr/bin:/sbin:/bin \
