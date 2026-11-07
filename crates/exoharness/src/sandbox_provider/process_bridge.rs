@@ -800,19 +800,14 @@ mod tests {
                 serde_json::to_string(&descendant).unwrap()
             );
             let probe = r#"
-import os,queue,signal,socket,sys,threading
-queued = threading.Event()
-class ExitQueue(queue.Queue):
-    def put(self, event):
-        super().put(event)
-        if event.get("type") == "exit":
-            queued.set()
-queue.Queue = ExitQueue
+import os,signal,socket,sys
 runtime = {"__name__": "test"}
 exec(sys.argv[1], runtime)
 state = runtime["BridgeState"]()
 try:
-    assert queued.wait(3), "exit was not queued"
+    event = state.events.get(timeout=3)
+    assert event["type"] == "exit", event
+    state.events.put(event)
     state.terminate()
     with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=1):
         pass

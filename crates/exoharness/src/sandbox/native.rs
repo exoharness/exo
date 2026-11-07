@@ -2,8 +2,6 @@ use super::*;
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
-#[cfg(unix)]
-use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
@@ -20,8 +18,6 @@ use futures::{
     future::{BoxFuture, Shared},
 };
 use serde::Deserialize;
-#[cfg(unix)]
-use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
@@ -1723,10 +1719,7 @@ pub(crate) async fn spawn_sandbox_process(
     let stopped = stop.clone();
     let mut child = LocalChild::new(child);
     #[cfg(unix)]
-    let output = [
-        AsyncFd::new(stdout.as_fd().try_clone_to_owned()?)?,
-        AsyncFd::new(stderr.as_fd().try_clone_to_owned()?)?,
-    ];
+    let process_group = child.process_group;
     let wait = async move {
         let status = tokio::select! {
             biased;
@@ -1736,26 +1729,6 @@ pub(crate) async fn spawn_sandbox_process(
                 child.child.wait().await?
             }
         };
-        #[cfg(unix)]
-        {
-            let closed = async {
-                tokio::try_join!(
-                    wait_for_pipe_close(&output[0]),
-                    wait_for_pipe_close(&output[1])
-                )?;
-                Ok::<(), std::io::Error>(())
-            };
-            tokio::pin!(closed);
-            tokio::select! {
-                biased;
-                result = &mut closed => result?,
-                () = stopped.cancelled() => {
-                    child.kill()?;
-                    closed.await?;
-                }
-            }
-        }
-        child.complete();
         Ok(process_exit_code(status))
     }
     .map(|result: std::io::Result<i32>| result.map_err(Arc::new))
@@ -1769,13 +1742,18 @@ pub(crate) async fn spawn_sandbox_process(
             let wait = wait.clone();
             async move { wait.await.map_err(anyhow::Error::new) }
         }),
-        control: Some(Arc::new(ChildProcessControl { stop, wait })),
+        control: Some(Arc::new(ChildProcessControl {
+            stop,
+            wait,
+            #[cfg(unix)]
+            process_group,
+            terminated: Mutex::new(false),
+        })),
     })
 }
 
 struct LocalChild {
     child: Child,
-    completed: bool,
     #[cfg(unix)]
     process_group: Option<u32>,
 }
@@ -1786,24 +1764,13 @@ impl LocalChild {
             #[cfg(unix)]
             process_group: child.id(),
             child,
-            completed: false,
         }
-    }
-
-    fn complete(&mut self) {
-        self.completed = true;
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pid) = self.process_group {
-            if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error);
-                }
-            }
-            return Ok(());
+            return signal_process_group(pid, libc::SIGKILL).map(|_| ());
         }
         self.child.start_kill()
     }
@@ -1811,7 +1778,7 @@ impl LocalChild {
 
 impl Drop for LocalChild {
     fn drop(&mut self) {
-        if self.completed {
+        if self.child.id().is_none() {
             return;
         }
         if let Err(error) = self.kill() {
@@ -1823,29 +1790,49 @@ impl Drop for LocalChild {
 struct ChildProcessControl {
     stop: CancellationToken,
     wait: Shared<BoxFuture<'static, std::result::Result<i32, Arc<std::io::Error>>>>,
+    #[cfg(unix)]
+    process_group: Option<u32>,
+    terminated: Mutex<bool>,
 }
 
 #[async_trait]
 impl crate::SandboxProcessControl for ChildProcessControl {
     async fn terminate(&self) -> Result<()> {
-        self.stop.cancel();
-        time::timeout(Duration::from_secs(20), self.wait.clone())
-            .await
-            .context("waiting for local process termination and output closure")?
-            .map(|_| ())
-            .map_err(anyhow::Error::new)
+        time::timeout(Duration::from_secs(20), async {
+            let mut terminated = self.terminated.lock().await;
+            if *terminated {
+                return Ok(());
+            }
+            self.stop.cancel();
+            #[cfg(unix)]
+            if let Some(pid) = self.process_group {
+                signal_process_group(pid, libc::SIGKILL)?;
+            }
+            self.wait.clone().await.map_err(anyhow::Error::new)?;
+            #[cfg(unix)]
+            if let Some(pid) = self.process_group {
+                while signal_process_group(pid, 0)? {
+                    time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+            *terminated = true;
+            Ok(())
+        })
+        .await
+        .context("waiting for local process group termination")?
     }
 }
 
 #[cfg(unix)]
-async fn wait_for_pipe_close(pipe: &AsyncFd<OwnedFd>) -> std::io::Result<()> {
-    loop {
-        let mut ready = pipe.readable().await?;
-        if ready.ready().is_read_closed() {
-            return Ok(());
-        }
-        ready.clear_ready();
+fn signal_process_group(pid: u32, signal: i32) -> std::io::Result<bool> {
+    if unsafe { libc::kill(-(pid as i32), signal) } == 0 {
+        return Ok(true);
     }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(error)
 }
 
 fn process_exit_code(status: std::process::ExitStatus) -> i32 {
@@ -2384,21 +2371,97 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+    #[cfg(unix)]
+    struct GroupCleanup(i32);
+
+    #[cfg(unix)]
+    impl Drop for GroupCleanup {
+        fn drop(&mut self) {
+            if unsafe { libc::kill(-self.0, libc::SIGKILL) } != 0 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collect_local_output_keeps_background_drain_grace() {
+        use futures::{AsyncBufReadExt, io::BufReader};
+        for limit in [None, Some(Duration::from_secs(4))] {
+            let command = SandboxCommand {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf '%s\\n' \"$$\"; sleep 600 & echo hi".into(),
+                ],
+                env: HashMap::new(),
+                display_argv: None,
+                cwd: None,
+                timeout: None,
+            };
+            let mut child = Command::new(&command.argv[0]);
+            child.args(&command.argv[1..]);
+            let mut parts = spawn_sandbox_process(child, &command, ProcessTermination::Local)
+                .await
+                .unwrap();
+            let mut stdout = BufReader::new(parts.stdout);
+            let mut leader = String::new();
+            stdout.read_line(&mut leader).await.unwrap();
+            let _cleanup = GroupCleanup(leader.trim().parse().unwrap());
+            parts.stdout = Box::pin(stdout);
+            let started = Instant::now();
+            let output = time::timeout(
+                Duration::from_secs(3),
+                crate::collect_process_output(parts, b"", limit, 1024),
+            )
+            .await
+            .expect("collection ignored the output drain grace")
+            .unwrap();
+            assert_eq!(output.exit_code, 0);
+            assert_eq!(output.stdout, b"hi\n");
+            assert!(started.elapsed() < Duration::from_secs(3));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dropping_local_stdout_preserves_sigpipe() {
+        use futures::{AsyncBufReadExt, io::BufReader};
+        let command = SandboxCommand {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf '%s\\n' \"$$\"; exec yes".into(),
+            ],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: None,
+        };
+        let mut child = Command::new(&command.argv[0]);
+        child.args(&command.argv[1..]);
+        let parts = spawn_sandbox_process(child, &command, ProcessTermination::Local)
+            .await
+            .unwrap();
+        let mut stdout = BufReader::new(parts.stdout);
+        let mut leader = String::new();
+        stdout.read_line(&mut leader).await.unwrap();
+        let _cleanup = GroupCleanup(leader.trim().parse().unwrap());
+        drop(stdout);
+        let exit = time::timeout(Duration::from_secs(3), parts.wait)
+            .await
+            .expect("yes survived dropping its stdout")
+            .unwrap();
+        assert_ne!(exit, 0);
+    }
+
     #[tokio::test]
     #[cfg(unix)]
     async fn terminate_local_descendant_after_leader_exit() {
         use futures::{AsyncBufReadExt, AsyncReadExt, io::BufReader};
-        struct GroupCleanup(i32);
-        impl Drop for GroupCleanup {
-            fn drop(&mut self) {
-                if unsafe { libc::kill(-self.0, libc::SIGKILL) } != 0 {
-                    assert_eq!(
-                        std::io::Error::last_os_error().raw_os_error(),
-                        Some(libc::ESRCH)
-                    );
-                }
-            }
-        }
         tokio::time::timeout(Duration::from_secs(5), async {
             for stderr in [false, true] {
                 let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2436,16 +2499,9 @@ mod tests {
                     stdout.read_exact(&mut ready).await.unwrap();
                 }
                 assert_eq!(&ready, b"ready\n");
-                while unsafe { libc::kill(leader, 0) } == 0 {
-                    assert!(
-                        tokio::time::timeout(Duration::from_millis(20), &mut parts.wait)
-                            .await
-                            .is_err(),
-                        "wait completed while a descendant held output open"
-                    );
-                }
-                parts.control.unwrap().terminate().await.unwrap();
                 assert_eq!(parts.wait.await.unwrap(), 0);
+                parts.control.unwrap().terminate().await.unwrap();
+                assert!(!signal_process_group(leader as u32, 0).unwrap());
                 let mut rest = Vec::new();
                 stdout.read_to_end(&mut rest).await.unwrap();
                 parts.stderr.read_to_end(&mut rest).await.unwrap();
@@ -2479,7 +2535,6 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(parts.wait.await.unwrap(), 0);
-            parts.control.unwrap().terminate().await.unwrap();
             let mut output = String::new();
             parts.stdout.read_to_string(&mut output).await.unwrap();
             assert_eq!(output, "earlylate");
