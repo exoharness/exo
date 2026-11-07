@@ -117,6 +117,7 @@ async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Resul
         state_root: root.path().join("state"),
         firecracker_bin: std::env::var("EXO_FIRECRACKER_BINARY")?.into(),
         jailer_bin: std::env::var("EXO_FIRECRACKER_JAILER")?.into(),
+        image_size_gib: 1,
         workspace_size_gib: 1,
         network_device_policy: FirecrackerNetworkDevicePolicy::AllSandboxes,
         allow_guest_root: false,
