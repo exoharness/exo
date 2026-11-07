@@ -874,6 +874,68 @@ fn test_shared(
 }
 
 #[tokio::test]
+async fn guest_clock_sync_uses_host_time_and_propagates_errors() -> Result<()> {
+    for succeeds in [true, false] {
+        let directory = tempfile::tempdir()?;
+        let shared = test_shared(
+            FirecrackerConfig {
+                state_root: directory.path().into(),
+                ..Default::default()
+            },
+            HashMap::new(),
+        )?;
+        let socket = directory.path().join("vsock");
+        let listener = UnixListener::bind(&socket)?;
+        let guest = GuestClient::new(shared, socket);
+        let before = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+        let respond = async {
+            let (stream, _) = listener.accept().await?;
+            let mut stream = AsyncBufReader::new(stream);
+            let mut handshake = String::new();
+            stream.read_line(&mut handshake).await?;
+            assert_eq!(handshake, "CONNECT 10052\n");
+            stream.get_mut().write_all(b"OK 1073741824\n").await?;
+            let mut stream = stream.into_inner();
+            let length = stream.read_u32().await? as usize;
+            let mut payload = vec![0; length];
+            stream.read_exact(&mut payload).await?;
+            let request: Message<ProtocolGuestRequest<()>> = serde_json::from_slice(&payload)?;
+            assert_eq!(request.protocol_version, PROTOCOL_VERSION);
+            let ProtocolGuestRequest::SyncClock {
+                unix_seconds,
+                nanoseconds,
+            } = request.payload
+            else {
+                panic!("expected clock synchronization");
+            };
+            let time = Duration::new(unix_seconds, nanoseconds);
+            assert!(time >= before);
+            assert!(time <= SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?);
+            let response = if succeeds {
+                GuestResponse::ok()
+            } else {
+                GuestResponse::error("clock_settime denied")
+            };
+            let payload = serde_json::to_vec(&Message::new(response))?;
+            stream.write_u32(payload.len() as u32).await?;
+            stream.write_all(&payload).await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        let (result, response) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(guest.sync_clock(), respond)
+        })
+        .await?;
+        response?;
+        if succeeds {
+            result?;
+        } else {
+            assert!(format!("{:#}", result.unwrap_err()).contains("clock_settime denied"));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn template_restore_with_restricted_egress_still_validates_mounts() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let config = FirecrackerConfig {

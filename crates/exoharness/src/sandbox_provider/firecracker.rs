@@ -1103,24 +1103,28 @@ impl FirecrackerSandboxBackend {
             bail!("Firecracker snapshot source is not running")
         }
 
-        GuestClient::new(
+        let guest = GuestClient::new(
             Arc::clone(shared),
             machine_from_record(&shared.config, source.clone()).vsock_path,
-        )
-        .sync_filesystem(&request.spec.default_workdir)
-        .await
-        .context("syncing Firecracker snapshot source filesystem")?;
+        );
+        guest
+            .sync_filesystem(&request.spec.default_workdir)
+            .await
+            .context("syncing Firecracker snapshot source filesystem")?;
 
         let config = shared.config.clone();
         let source_for_snapshot = source.clone();
         let key_for_snapshot = template_key.clone();
         let span = tracing::Span::current();
-        let lease = tokio::task::spawn_blocking(move || {
+        let captured = tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
             capture_snapshot_template(&config, &source_for_snapshot, &key_for_snapshot, lifecycle)
         })
         .await
-        .context("joining Firecracker snapshot creation")??;
+        .context("joining Firecracker snapshot creation")?;
+        let clock = guest.sync_clock().await;
+        let lease = captured?;
+        clock?;
 
         Ok(CapturedSnapshot {
             manifest: FirecrackerSnapshotManifest {
@@ -2119,10 +2123,18 @@ impl Shared {
             }
         };
         let machine = machine_from_record(&self.config, record);
-        let ready = match readiness {
-            GuestReadiness::Signal(listener) => wait_for_guest(self, machine_id, listener).await,
-            GuestReadiness::Probe => wait_for_restored_guest(self, &machine).await,
-        };
+        let ready = async {
+            match readiness {
+                GuestReadiness::Signal(listener) => {
+                    wait_for_guest(self, machine_id, listener).await?
+                }
+                GuestReadiness::Probe => wait_for_restored_guest(self, &machine).await?,
+            }
+            GuestClient::new(Arc::clone(self), machine.vsock_path.clone())
+                .sync_clock()
+                .await
+        }
+        .await;
         if let Err(error) = ready {
             if let Err(cleanup_error) = self
                 .cleanup_machine(machine_id, !reusing_existing_machine)
@@ -5301,6 +5313,19 @@ impl GuestClient {
 
     async fn ping(&self) -> Result<()> {
         self.ping_with_timeout(Duration::from_secs(2)).await
+    }
+
+    async fn sync_clock(&self) -> Result<()> {
+        let time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .context("host clock is before the Unix epoch")?;
+        let response: GuestResponse = self
+            .invoke(&GuestRequest::SyncClock {
+                unix_seconds: time.as_secs(),
+                nanoseconds: time.subsec_nanos(),
+            })
+            .await?;
+        guest_response_result(&response, "synchronizing Firecracker guest wall clock")
     }
 
     async fn ping_with_timeout(&self, timeout: Duration) -> Result<()> {

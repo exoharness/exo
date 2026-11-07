@@ -419,6 +419,10 @@ impl AgentState {
                 }),
                 ..Response::default()
             },
+            Request::SyncClock {
+                unix_seconds,
+                nanoseconds,
+            } => sync_clock(unix_seconds, nanoseconds),
             Request::Exec {
                 argv,
                 env,
@@ -884,6 +888,26 @@ fn sync_filesystem(path: &str) -> Response {
     } else {
         Response::error(std::io::Error::last_os_error().to_string())
     }
+}
+
+fn sync_clock(unix_seconds: u64, nanoseconds: u32) -> Response {
+    if nanoseconds >= 1_000_000_000 {
+        return Response::error("guest clock nanoseconds must be less than one second");
+    }
+    let time = libc::timespec {
+        tv_sec: match libc::time_t::try_from(unix_seconds) {
+            Ok(seconds) => seconds,
+            Err(error) => return Response::error(format!("invalid guest clock time: {error}")),
+        },
+        tv_nsec: nanoseconds.into(),
+    };
+    if unsafe { libc::clock_settime(libc::CLOCK_REALTIME, &time) } != 0 {
+        return Response::error(format!(
+            "setting guest wall clock: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Response::ok()
 }
 
 fn configure_restored_network(address: Ipv4Addr, gateway: Ipv4Addr, prefix: u8) -> Response {
@@ -1531,6 +1555,19 @@ fn c_string(value: &str) -> Result<CString, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_sync_rejects_invalid_time_before_setting_the_clock() {
+        let nanoseconds = sync_clock(0, 1_000_000_000);
+        assert!(!nanoseconds.ok);
+        assert_eq!(
+            nanoseconds.error.as_deref(),
+            Some("guest clock nanoseconds must be less than one second")
+        );
+        let seconds = sync_clock(u64::MAX, 0);
+        assert!(!seconds.ok);
+        assert!(seconds.error.unwrap().contains("invalid guest clock time"));
+    }
 
     #[test]
     fn parses_typed_requests() {
