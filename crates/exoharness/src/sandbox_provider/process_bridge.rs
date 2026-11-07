@@ -191,7 +191,7 @@ class Handler(socketserver.BaseRequestHandler):
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         self.request.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8"))
-        if (kind == "terminate" and response.get("ok")) or any(event.get("type") == "exit" for event in response.get("events", [])):
+        if any(event.get("type") == "exit" for event in response.get("events", [])):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
 
 
@@ -657,6 +657,7 @@ mod tests {
     struct ScriptClient {
         script_path: PathBuf,
         fail_recv: AtomicBool,
+        recv_delay: Duration,
     }
 
     #[async_trait]
@@ -664,6 +665,9 @@ mod tests {
         async fn request(&self, request: Request) -> Result<Response> {
             if request.kind == "recv" && self.fail_recv.swap(false, Ordering::AcqRel) {
                 anyhow::bail!("injected output transport failure");
+            }
+            if request.kind == "recv" {
+                tokio::time::sleep(self.recv_delay).await;
             }
             let output = bridge_client(&self.script_path, serde_json::to_string(&request)?).await;
             anyhow::ensure!(
@@ -679,7 +683,7 @@ mod tests {
         _temp: TempDir,
         script_path: PathBuf,
         port: u16,
-        _server: tokio::process::Child,
+        server: tokio::process::Child,
     }
 
     impl Drop for BridgeFixture {
@@ -819,6 +823,7 @@ mod tests {
         let mut parts = process_parts(Arc::new(ScriptClient {
             script_path: bridge.script_path.clone(),
             fail_recv: AtomicBool::new(false),
+            recv_delay: Duration::from_secs(1),
         }));
         let mut ready = [0; 6];
         parts
@@ -856,7 +861,7 @@ mod tests {
             let source = format!("import subprocess; subprocess.Popen(['python3','-c',{}])", serde_json::to_string(&descendant).unwrap());
             let bridge = start_bridge_for_python_command(&source).await;
             let mut parts = process_parts(Arc::new(ScriptClient {
-                script_path: bridge.script_path.clone(), fail_recv: AtomicBool::new(false),
+                script_path: bridge.script_path.clone(), fail_recv: AtomicBool::new(false), recv_delay: Duration::ZERO,
             }));
             let mut ready = [0; 6];
             parts.stdout.read_exact(&mut ready).await.unwrap();
@@ -870,19 +875,26 @@ mod tests {
     #[tokio::test]
     async fn terminate_still_works_after_output_transport_failure() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let bridge = start_bridge_for_python_command("import time; time.sleep(600)").await;
+            let port = unused_local_port();
+            let mut bridge = start_bridge_for_python_command(&format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(600)"
+            )).await;
+            while TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
             let parts = process_parts(Arc::new(ScriptClient {
                 script_path: bridge.script_path.clone(),
                 fail_recv: AtomicBool::new(true),
+                recv_delay: Duration::ZERO,
             }));
             let termination = parts.terminate();
             parts.wait.await.expect_err("output monitor failed");
             termination
                 .await
                 .expect("terminate independently of failed output monitor");
-            while bridge_ping(&bridge.script_path).await.status.success() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            let _listener = TcpListener::bind(("127.0.0.1", port))
+                .expect("listener survived termination after monitor failure");
+            bridge.server.kill().await.expect("clean up bridge server");
         })
         .await
         .expect("termination regression timed out");
@@ -914,7 +926,7 @@ mod tests {
             _temp: temp,
             script_path,
             port,
-            _server: server,
+            server,
         }
     }
 
