@@ -82,6 +82,8 @@ class BridgeState:
         )
         self.events = queue.Queue()
         self.write_lock = threading.Lock()
+        self.exit_lock = threading.Lock()
+        self.exit_complete = False
         self.stdout_thread = threading.Thread(target=self._read_stream, args=("stdout", self.process.stdout), daemon=True)
         self.stderr_thread = threading.Thread(target=self._read_stream, args=("stderr", self.process.stderr), daemon=True)
         self.stdout_thread.start()
@@ -106,7 +108,9 @@ class BridgeState:
             exit_code = self.process.wait()
             self.stdout_thread.join()
             self.stderr_thread.join()
-            self.events.put({"type": "exit", "exit_code": exit_code})
+            with self.exit_lock:
+                self.exit_complete = True
+                self.events.put({"type": "exit", "exit_code": exit_code})
         except Exception as exc:
             self.events.put({"type": "error", "message": f"wait failed: {exc}"})
 
@@ -125,10 +129,12 @@ class BridgeState:
 
     def terminate(self):
         deadline = time.monotonic() + 20
-        try:
-            os.killpg(self.process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        with self.exit_lock:
+            if not self.exit_complete:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
         self.process.wait(timeout=max(0, deadline - time.monotonic()))
         self.stdout_thread.join(timeout=max(0, deadline - time.monotonic()))
         self.stderr_thread.join(timeout=max(0, deadline - time.monotonic()))
@@ -783,18 +789,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_bridge_exit_preserves_descendant_output() {
+    async fn terminate_preserves_detached_descendant_after_exit_is_queued() {
         tokio::time::timeout(Duration::from_secs(5), async {
-            let bridge = start_bridge_for_python_command(
-                "import subprocess; subprocess.Popen(['sh','-c','(sleep 0.3; printf late) & printf early'])",
-            )
-            .await;
-            let mut output = String::new();
-            assert_eq!(recv_until_exit(&bridge.script_path, &mut output).await, 0);
-            assert_eq!(output, "earlylate");
+            let port = unused_local_port();
+            let descendant = format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(600)"
+            );
+            let parent = format!(
+                "import subprocess,socket,time; subprocess.Popen(['python3','-c',{}],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nwhile True:\n try:\n  socket.create_connection(('127.0.0.1',{port}),timeout=0.1).close(); break\n except OSError: time.sleep(0.001)",
+                serde_json::to_string(&descendant).unwrap()
+            );
+            let probe = r#"
+import os,queue,signal,socket,sys,threading
+queued = threading.Event()
+class ExitQueue(queue.Queue):
+    def put(self, event):
+        super().put(event)
+        if event.get("type") == "exit":
+            queued.set()
+queue.Queue = ExitQueue
+runtime = {"__name__": "test"}
+exec(sys.argv[1], runtime)
+state = runtime["BridgeState"]()
+try:
+    assert queued.wait(3), "exit was not queued"
+    state.terminate()
+    with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=1):
+        pass
+finally:
+    try: os.killpg(state.process.pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+"#;
+            let output = Command::new("python3")
+                .args(["-c", probe, SCRIPT, &port.to_string()])
+                .env(
+                    "EXO_PROCESS_BRIDGE_ARGV_JSON",
+                    serde_json::to_string(&["python3", "-c", &parent]).unwrap(),
+                )
+                .kill_on_drop(true)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         })
         .await
-        .expect("normal bridge completion timed out");
+        .expect("bridge completion race timed out");
     }
 
     #[tokio::test]
