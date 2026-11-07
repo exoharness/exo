@@ -1274,7 +1274,7 @@ pub trait SandboxProcess: Send {
 #[async_trait]
 pub trait SandboxProcessControl: Send + Sync {
     /// Terminate the process and confirm exit.
-    /// On Unix, local termination also waits for the process group to disappear.
+    /// On Unix, local termination also waits for live process-group members to exit.
     /// Errors must not be treated as evidence that the process has exited.
     async fn terminate(&self) -> Result<()>;
 }
