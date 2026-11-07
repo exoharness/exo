@@ -27,7 +27,9 @@ async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Resul
         sandbox_id: "clock-source".into(),
         scope: exoharness::ResourceScope::Global,
         provider_state: None,
-        lifecycle: SandboxLifecycleConfig::default(),
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(300)),
+        },
         spec: SandboxSpec {
             image: "docker.io/library/alpine:3.22".into(),
             resources: SandboxResourceShape::new(1, 512),
