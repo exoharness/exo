@@ -234,3 +234,16 @@ jobs:
           else
             "$test_binary" --ignored --nocapture
           fi
+      - name: Run Firecracker clock regression
+        if: matrix.sandbox-backend == 'firecracker'
+        run: |
+          cargo test --locked --package exoharness --features firecracker \
+            --test firecracker_clock --no-run --message-format=json-render-diagnostics \
+            > "$RUNNER_TEMP/clock-build.jsonl"
+          test_binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "firecracker_clock") | .executable // empty' "$RUNNER_TEMP/clock-build.jsonl")"
+          test -x "$test_binary"
+          sudo -n env TMPDIR=/exo-test \
+            EXO_FIRECRACKER_BINARY="$EXO_FIRECRACKER_BINARY" \
+            EXO_FIRECRACKER_JAILER="$EXO_FIRECRACKER_JAILER" \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            "$test_binary" --ignored --nocapture

@@ -25,6 +25,7 @@ case "$sandbox_backend" in
     # from this checkout so the host/guest protocol versions always match.
     sudo apt-get update
     sudo apt-get install -y --no-install-recommends cpio e2fsprogs iproute2 iptables nftables xfsprogs
+    sudo swapoff --all
     sudo modprobe vhost_vsock
     sudo sysctl -w net.ipv4.ip_forward=1
     archive="$artifact_dir/firecracker.tgz"
