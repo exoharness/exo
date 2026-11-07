@@ -1749,7 +1749,7 @@ pub(crate) async fn spawn_sandbox_process(
             wait,
             #[cfg(unix)]
             process_group,
-            terminated: Mutex::new(false),
+            termination: Mutex::new(()),
         })),
     })
 }
@@ -1810,20 +1810,19 @@ struct ChildProcessControl {
     wait: Shared<BoxFuture<'static, std::result::Result<i32, Arc<std::io::Error>>>>,
     #[cfg(unix)]
     process_group: Option<Arc<LocalProcessGroup>>,
-    terminated: Mutex<bool>,
+    termination: Mutex<()>,
 }
 
 #[async_trait]
 impl crate::SandboxProcessControl for ChildProcessControl {
     async fn terminate(&self) -> Result<()> {
         time::timeout(Duration::from_secs(20), async {
-            let mut terminated = self.terminated.lock().await;
-            if *terminated {
-                return Ok(());
-            }
+            let _termination = self.termination.lock().await;
             #[cfg(unix)]
-            if let Some(group) = &self.process_group {
-                group.signal(libc::SIGKILL)?;
+            if let Some(group) = &self.process_group
+                && let Err(error) = group.signal(libc::SIGKILL)
+            {
+                tracing::warn!(%error, "failed to kill local sandbox process group");
             }
             self.stop.cancel();
             self.wait.clone().await.map_err(anyhow::Error::new)?;
@@ -1833,7 +1832,6 @@ impl crate::SandboxProcessControl for ChildProcessControl {
                     time::sleep(Duration::from_millis(10)).await;
                 }
             }
-            *terminated = true;
             Ok(())
         })
         .await
@@ -1870,64 +1868,10 @@ fn signal_process_group(pid: u32, signal: i32) -> std::io::Result<bool> {
         return Ok(false);
     }
     #[cfg(target_os = "macos")]
-    if error.raw_os_error() == Some(libc::EPERM) && !process_group_has_live_members(pid)? {
-        return Ok(false);
+    if error.raw_os_error() == Some(libc::EPERM) {
+        return Ok(true);
     }
     Err(error)
-}
-
-#[cfg(target_os = "macos")]
-fn process_group_has_live_members(pid: u32) -> std::io::Result<bool> {
-    let mut members: Vec<libc::pid_t> = vec![0; 16];
-    loop {
-        unsafe { *libc::__error() = 0 };
-        let count = unsafe {
-            libc::proc_listpgrppids(
-                pid as libc::pid_t,
-                members.as_mut_ptr().cast(),
-                std::mem::size_of_val(members.as_slice()) as i32,
-            )
-        };
-        if count <= 0 {
-            let error = std::io::Error::last_os_error();
-            return if error.raw_os_error() == Some(0) {
-                Ok(false)
-            } else {
-                Err(error)
-            };
-        }
-        if count as usize == members.len() {
-            members.resize(members.len() * 2, 0);
-            continue;
-        }
-        members.truncate(count as usize);
-        break;
-    }
-    for member in members {
-        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-        let size = std::mem::size_of_val(&info) as i32;
-        let read = unsafe {
-            libc::proc_pidinfo(
-                member,
-                libc::PROC_PIDTBSDINFO,
-                0,
-                info.as_mut_ptr().cast(),
-                size,
-            )
-        };
-        if read != size {
-            let error = std::io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::ESRCH) {
-                continue;
-            }
-            return Err(error);
-        }
-        let info = unsafe { info.assume_init() };
-        if info.pbi_pgid == pid && info.pbi_status != libc::SZOMB {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn process_exit_code(status: std::process::ExitStatus) -> i32 {
@@ -2472,7 +2416,9 @@ mod tests {
     #[cfg(unix)]
     impl Drop for GroupCleanup {
         fn drop(&mut self) {
-            signal_process_group(self.0 as u32, libc::SIGKILL).unwrap();
+            if let Err(error) = signal_process_group(self.0 as u32, libc::SIGKILL) {
+                tracing::warn!(%error, "failed to clean up test process group");
+            }
         }
     }
 
@@ -2494,7 +2440,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn zombie_only_local_group_is_finished() {
+    async fn zombie_only_local_group_is_retried_until_reaped() {
         use std::os::unix::process::CommandExt;
         let mut child = std::process::Command::new("sh")
             .args(["-c", "exit 0"])
@@ -2513,12 +2459,13 @@ mod tests {
                 }
                 time::sleep(Duration::from_millis(1)).await;
             }
-            assert!(!signal_process_group(pid, 0).unwrap());
-            assert!(!signal_process_group(pid, libc::SIGKILL).unwrap());
+            assert!(signal_process_group(pid, 0).unwrap());
+            assert!(signal_process_group(pid, libc::SIGKILL).unwrap());
         })
         .await;
         assert!(child.wait().unwrap().success());
         result.expect("child did not become a zombie");
+        assert!(!signal_process_group(pid, 0).unwrap());
     }
 
     #[cfg(unix)]
