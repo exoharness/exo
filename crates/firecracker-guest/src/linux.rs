@@ -236,6 +236,8 @@ struct ManagedProcess {
     terminal: Option<File>,
     events: Arc<EventQueue>,
     exited: AtomicBool,
+    exit_result: Mutex<Option<Result<(), String>>>,
+    exit_ready: Condvar,
 }
 
 impl ManagedProcess {
@@ -245,7 +247,10 @@ impl ManagedProcess {
         env: &HashMap<String, String>,
     ) -> Result<Arc<Self>, String> {
         validate_command(argv, cwd)?;
-        let mut command = command(argv, cwd, env);
+        Self::spawn_command(command(argv, cwd, env))
+    }
+
+    fn spawn_command(mut command: Command) -> Result<Arc<Self>, String> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -260,16 +265,24 @@ impl ManagedProcess {
             terminal: None,
             events: Arc::new(EventQueue::default()),
             exited: AtomicBool::new(false),
+            exit_result: Mutex::new(None),
+            exit_ready: Condvar::new(),
         });
         let stdout_thread = stream_thread(stdout, Arc::clone(&process.events), true);
         let stderr_thread = stream_thread(stderr, Arc::clone(&process.events), false);
         let wait_process = Arc::clone(&process);
         thread::spawn(move || {
             let result = child.wait();
+            *wait_process
+                .exit_result
+                .lock()
+                .expect("exit result lock poisoned") =
+                Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+            wait_process.exited.store(true, Ordering::Release);
+            wait_process.exit_ready.notify_all();
             drop(registration);
             let stdout_result = stdout_thread.join();
             let stderr_result = stderr_thread.join();
-            wait_process.exited.store(true, Ordering::Release);
             match result {
                 Ok(status) if stdout_result.is_ok() && stderr_result.is_ok() => {
                     wait_process.events.push(ProcessEvent::Exit {
@@ -314,14 +327,22 @@ impl ManagedProcess {
             terminal: Some(terminal),
             events: Arc::new(EventQueue::default()),
             exited: AtomicBool::new(false),
+            exit_result: Mutex::new(None),
+            exit_ready: Condvar::new(),
         });
         let output_thread = terminal_stream_thread(output, Arc::clone(&process.events));
         let wait_process = Arc::clone(&process);
         thread::spawn(move || {
             let result = child.wait();
+            *wait_process
+                .exit_result
+                .lock()
+                .expect("exit result lock poisoned") =
+                Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+            wait_process.exited.store(true, Ordering::Release);
+            wait_process.exit_ready.notify_all();
             drop(registration);
             let output_result = output_thread.join();
-            wait_process.exited.store(true, Ordering::Release);
             match result {
                 Ok(status) if output_result.is_ok() => {
                     wait_process.events.push(ProcessEvent::Exit {
@@ -374,6 +395,19 @@ impl ManagedProcess {
             }
         }
         Ok(())
+    }
+
+    fn terminate(&self) -> Result<(), String> {
+        self.kill()?;
+        let result = self
+            .exit_result
+            .lock()
+            .map_err(|_| "exit result lock poisoned")?;
+        let result = self
+            .exit_ready
+            .wait_while(result, |result| result.is_none())
+            .map_err(|_| "exit result lock poisoned")?;
+        result.as_ref().expect("exit result is available").clone()
     }
 
     fn kill(&self) -> Result<(), String> {
@@ -504,6 +538,10 @@ impl AgentState {
                 Err(error) => Response::error(error),
             },
             BridgeRequest::CloseStdin => match process.close_stdin() {
+                Ok(()) => Response::ok(),
+                Err(error) => Response::error(error),
+            },
+            BridgeRequest::Terminate => match process.terminate() {
                 Ok(()) => Response::ok(),
                 Err(error) => Response::error(error),
             },
@@ -1531,6 +1569,36 @@ fn c_string(value: &str) -> Result<CString, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminate_confirms_exit_without_consuming_output_events() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf ready; exec sleep 600"]);
+        command.process_group(0);
+        let process = ManagedProcess::spawn_command(command).unwrap();
+        let (events, _) = process.events.recv(Duration::from_secs(5)).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProcessEvent::Stdout { .. }))
+        );
+        process.close_stdin().unwrap();
+        assert!(!process.exited.load(Ordering::Acquire));
+        process.terminate().unwrap();
+        assert_eq!(unsafe { libc::kill(process.process_group, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        process.terminate().unwrap();
+        let (events, exited) = process.events.recv(Duration::from_secs(5)).unwrap();
+        assert!(exited);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ProcessEvent::Exit { .. }))
+        );
+    }
 
     #[test]
     fn parses_typed_requests() {

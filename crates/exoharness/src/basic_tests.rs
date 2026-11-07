@@ -3102,6 +3102,7 @@ impl ManagedSandboxHandle for TestSandboxHandle {
             .take()
             .expect("test process should only start once");
         Ok(SandboxProcessParts {
+            control: None,
             stdout: process.stdout,
             stderr: process.stderr,
             stdin: process.stdin,

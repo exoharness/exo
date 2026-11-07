@@ -5448,6 +5448,7 @@ impl GuestClient {
             process_id: process_id.clone(),
         });
         let SandboxProcessParts {
+            control,
             stdout,
             stderr,
             stdin,
@@ -5459,6 +5460,7 @@ impl GuestClient {
             machine_id: cleanup_machine_id,
         };
         Ok(SandboxProcessParts {
+            control,
             stdout,
             stderr,
             stdin,

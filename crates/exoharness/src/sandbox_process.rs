@@ -71,6 +71,7 @@ async fn collect(
     max_output_bytes: usize,
 ) -> Result<CollectedProcessOutput> {
     let SandboxProcessParts {
+        control: _control,
         stdout,
         stderr,
         stdin: mut input,
@@ -179,6 +180,7 @@ mod tests {
         let written = Arc::new(Mutex::new(Vec::new()));
         (
             SandboxProcessParts {
+                control: None,
                 stdout: Box::pin(Cursor::new(stdout)),
                 stderr: Box::pin(Cursor::new(stderr)),
                 stdin: Box::pin(RecordingWriter(Arc::clone(&written))),
@@ -274,6 +276,7 @@ mod tests {
     async fn stops_writing_input_once_the_process_exits() -> Result<()> {
         let (exited, exit) = tokio::sync::oneshot::channel();
         let parts = SandboxProcessParts {
+            control: None,
             stdout: Box::pin(Cursor::new(&b"out"[..])),
             stderr: Box::pin(Cursor::new(&b""[..])),
             stdin: Box::pin(StalledWriter),

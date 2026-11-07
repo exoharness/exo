@@ -284,6 +284,7 @@ impl ManagedSandboxHandle for CloudflareHandle {
         };
         let waiting = process.clone();
         Ok(SandboxProcessParts {
+            control: None,
             stdout: reader(OutputStream::Stdout),
             stderr: reader(OutputStream::Stderr),
             stdin: Box::pin(ProcessInput {

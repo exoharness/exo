@@ -1188,7 +1188,7 @@ impl ManagedSandboxHandle for SmolvmOneShotHandle {
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
         let cwd = resolve_cwd(command, &self.request.spec);
         let process = self.build(command, &cwd)?;
-        spawn_sandbox_process(process, command).await
+        spawn_sandbox_process(process, command, false).await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -1308,7 +1308,7 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
         let command = command.as_ref();
         let cwd = resolve_cwd(command, &self.request.spec);
         let process = self.build(command, &cwd, true, false);
-        let process = spawn_sandbox_process(process, command).await?;
+        let process = spawn_sandbox_process(process, command, false).await?;
         self.touch();
         Ok(process)
     }

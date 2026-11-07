@@ -76,6 +76,7 @@ pub enum GuestProcessRequest {
     Ping,
     Write { data: String },
     CloseStdin,
+    Terminate,
     Recv { timeout_seconds: Option<f64> },
     Resize { size: TerminalSize },
 }

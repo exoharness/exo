@@ -1271,11 +1271,32 @@ pub trait SandboxProcess: Send {
     fn into_parts(self: Box<Self>) -> SandboxProcessParts;
 }
 
+#[async_trait]
+pub trait SandboxProcessControl: Send + Sync {
+    /// Terminate the process and return only after its exit is confirmed.
+    /// Errors must not be treated as evidence that the process has exited.
+    async fn terminate(&self) -> Result<()>;
+}
+
 pub struct SandboxProcessParts {
     pub stdout: BoxAsyncRead,
     pub stderr: BoxAsyncRead,
     pub stdin: BoxAsyncWrite,
     pub wait: BoxFuture<'static, Result<i32>>,
+    /// None when the provider cannot confirm remote process termination.
+    pub control: Option<Arc<dyn SandboxProcessControl>>,
+}
+
+impl SandboxProcessParts {
+    pub fn terminate(&self) -> BoxFuture<'static, Result<()>> {
+        let control = self.control.clone();
+        Box::pin(async move {
+            control
+                .ok_or_else(|| anyhow::anyhow!("sandbox process does not support termination"))?
+                .terminate()
+                .await
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

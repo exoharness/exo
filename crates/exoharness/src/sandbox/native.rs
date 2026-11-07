@@ -13,7 +13,10 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use futures::future::BoxFuture;
+use futures::{
+    FutureExt,
+    future::{BoxFuture, Shared},
+};
 use serde::Deserialize;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -934,7 +937,7 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
             process.current_dir(workdir);
         }
         process.kill_on_drop(true);
-        spawn_sandbox_process(process, command).await
+        spawn_sandbox_process(process, command, true).await
     }
 
     async fn stop(&self) -> Result<()> {
@@ -1472,7 +1475,7 @@ async fn start_one_shot_process(
     process.args(&command.argv);
     process.kill_on_drop(true);
 
-    spawn_sandbox_process(process, command).await
+    spawn_sandbox_process(process, command, false).await
 }
 
 async fn exec_warm(
@@ -1528,7 +1531,7 @@ async fn start_warm_process(
     process.args(&command.argv);
     process.kill_on_drop(true);
 
-    spawn_sandbox_process(process, command).await
+    spawn_sandbox_process(process, command, false).await
 }
 
 // Relays a guest TCP port over the stdio of a `node` process inside the
@@ -1664,11 +1667,16 @@ pub(crate) async fn run_command(
 pub(crate) async fn spawn_sandbox_process(
     mut process: Command,
     command: &SandboxCommand,
+    can_terminate: bool,
 ) -> Result<crate::SandboxProcessParts> {
     process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    if can_terminate {
+        process.process_group(0);
+    }
     let mut child = process.spawn().with_context(|| {
         format!(
             "failed to start sandbox command: {}",
@@ -1692,19 +1700,65 @@ pub(crate) async fn spawn_sandbox_process(
         .take()
         .ok_or_else(|| anyhow!("sandbox process did not expose stdin"))?;
 
+    let (stop, mut stopped) = tokio::sync::watch::channel(false);
+    let keep_stop_open = stop.clone();
+    let wait = async move {
+        let _keep_stop_open = keep_stop_open;
+        let status = tokio::select! {
+            status = child.wait() => status?,
+            _ = stopped.changed() => {
+                #[cfg(unix)]
+                if can_terminate {
+                    if let Some(pid) = child.id() {
+                        let result = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                        if result != 0 {
+                            let error = std::io::Error::last_os_error();
+                            if error.raw_os_error() != Some(libc::ESRCH) {
+                                return Err(error.into());
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                child.start_kill()?;
+                child.wait().await?
+            }
+        };
+        Ok(status.code().unwrap_or_default())
+    }
+    .map(|result: Result<i32>| result.map_err(Arc::new))
+    .boxed()
+    .shared();
+    let control: Option<Arc<dyn crate::SandboxProcessControl>> = can_terminate.then(|| {
+        Arc::new(ChildProcessControl {
+            stop,
+            wait: wait.clone(),
+        }) as Arc<dyn crate::SandboxProcessControl>
+    });
     Ok(crate::SandboxProcessParts {
         stdout: Box::pin(stdout.compat()),
         stderr: Box::pin(stderr.compat()),
         stdin: Box::pin(stdin.compat_write()),
-        wait: wait_for_child(child),
+        wait: Box::pin(async move { wait.await.map_err(|error| anyhow!("{error:#}")) }),
+        control,
     })
 }
 
-fn wait_for_child(mut child: Child) -> BoxFuture<'static, crate::Result<i32>> {
-    Box::pin(async move {
-        let status = child.wait().await?;
-        Ok(status.code().unwrap_or_default())
-    })
+struct ChildProcessControl {
+    stop: tokio::sync::watch::Sender<bool>,
+    wait: Shared<BoxFuture<'static, std::result::Result<i32, Arc<anyhow::Error>>>>,
+}
+
+#[async_trait]
+impl crate::SandboxProcessControl for ChildProcessControl {
+    async fn terminate(&self) -> Result<()> {
+        self.stop.send_replace(true);
+        self.wait
+            .clone()
+            .await
+            .map(|_| ())
+            .map_err(|error| anyhow!("{error:#}"))
+    }
 }
 
 fn configure_network_args(
@@ -2226,6 +2280,36 @@ async fn docker_load_image(container_bin: &Path, payload: &Bytes) -> Result<Stri
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[tokio::test]
+    async fn terminate_local_process_survives_dropped_waiter() {
+        use futures::AsyncReadExt;
+        let command = SandboxCommand {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf ready; exec sleep 600".into(),
+            ],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: None,
+            timeout: None,
+        };
+        let mut child = Command::new(&command.argv[0]);
+        child.args(&command.argv[1..]);
+        let mut parts = spawn_sandbox_process(child, &command, true).await.unwrap();
+        let mut ready = [0; 5];
+        parts.stdout.read_exact(&mut ready).await.unwrap();
+        assert_eq!(&ready, b"ready");
+        let control = parts.control.unwrap();
+        drop(parts.wait);
+        let (first, second) = tokio::join!(control.terminate(), control.terminate());
+        first.unwrap();
+        second.unwrap();
+        let mut rest = Vec::new();
+        parts.stdout.read_to_end(&mut rest).await.unwrap();
+        control.terminate().await.unwrap();
+    }
 
     #[tokio::test]
     async fn child_tunnel_relays_bytes_and_closes_with_the_peer() -> Result<()> {
