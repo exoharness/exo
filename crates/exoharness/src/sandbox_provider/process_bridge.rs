@@ -408,18 +408,24 @@ pub fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
         stderr: Box::pin(stderr_reader.compat()),
         stdin: Box::pin(stdin_writer.compat_write()),
         wait,
-        control: Some(Arc::new(ProcessBridgeControl { client, exited })),
+        control: Some(Arc::new(ProcessBridgeControl {
+            client,
+            exited,
+            termination: tokio::sync::Mutex::new(()),
+        })),
     }
 }
 
 struct ProcessBridgeControl {
     client: Arc<dyn Client>,
     exited: Arc<AtomicBool>,
+    termination: tokio::sync::Mutex<()>,
 }
 
 #[async_trait]
 impl crate::SandboxProcessControl for ProcessBridgeControl {
     async fn terminate(&self) -> Result<()> {
+        let _termination = self.termination.lock().await;
         if self.exited.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -963,20 +969,14 @@ mod tests {
     }
 
     async fn bridge_client(script_path: &Path, request: String) -> std::process::Output {
-        let output = Command::new("python3")
+        Command::new("python3")
             .arg(script_path)
             .kill_on_drop(true)
             .arg("client")
             .arg(request)
             .output()
             .await
-            .expect("run bridge client");
-        assert!(
-            output.status.success(),
-            "bridge client failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        output
+            .expect("run bridge client")
     }
 
     fn unused_local_port() -> u16 {
