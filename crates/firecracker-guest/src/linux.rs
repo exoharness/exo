@@ -34,6 +34,7 @@ const MAX_RECV_BYTES: usize = 1024 * 1024;
 const MAX_QUEUED_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(45);
+const PROCESS_TERMINATION_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Request = GuestRequest<BridgeRequest>;
 
@@ -230,14 +231,49 @@ fn reap_orphans() {
     }
 }
 
+#[derive(Default)]
+struct ProcessExit {
+    result: Mutex<Option<Result<(), String>>>,
+    ready: Condvar,
+}
+
+impl ProcessExit {
+    fn record(&self, result: &std::io::Result<std::process::ExitStatus>) {
+        *self.result.lock().expect("exit result lock poisoned") =
+            Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        self.ready.notify_all();
+    }
+
+    fn is_complete(&self) -> Result<bool, String> {
+        Ok(self
+            .result
+            .lock()
+            .map_err(|_| "exit result lock poisoned")?
+            .is_some())
+    }
+
+    fn wait(&self, timeout: Duration) -> Result<(), String> {
+        let result = self
+            .result
+            .lock()
+            .map_err(|_| "exit result lock poisoned")?;
+        let (result, _) = self
+            .ready
+            .wait_timeout_while(result, timeout, |result| result.is_none())
+            .map_err(|_| "exit result lock poisoned")?;
+        result
+            .as_ref()
+            .ok_or_else(|| "timed out waiting for process termination".to_string())?
+            .clone()
+    }
+}
+
 struct ManagedProcess {
     process_group: i32,
     stdin: Mutex<Option<Box<dyn Write + Send>>>,
     terminal: Option<File>,
     events: Arc<EventQueue>,
-    exited: AtomicBool,
-    exit_result: Mutex<Option<Result<(), String>>>,
-    exit_ready: Condvar,
+    exit: ProcessExit,
 }
 
 impl ManagedProcess {
@@ -264,25 +300,17 @@ impl ManagedProcess {
             stdin: Mutex::new(Some(Box::new(stdin))),
             terminal: None,
             events: Arc::new(EventQueue::default()),
-            exited: AtomicBool::new(false),
-            exit_result: Mutex::new(None),
-            exit_ready: Condvar::new(),
+            exit: ProcessExit::default(),
         });
         let stdout_thread = stream_thread(stdout, Arc::clone(&process.events), true);
         let stderr_thread = stream_thread(stderr, Arc::clone(&process.events), false);
         let wait_process = Arc::clone(&process);
         thread::spawn(move || {
             let result = child.wait();
-            *wait_process
-                .exit_result
-                .lock()
-                .expect("exit result lock poisoned") =
-                Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
-            wait_process.exited.store(true, Ordering::Release);
-            wait_process.exit_ready.notify_all();
             drop(registration);
             let stdout_result = stdout_thread.join();
             let stderr_result = stderr_thread.join();
+            wait_process.exit.record(&result);
             match result {
                 Ok(status) if stdout_result.is_ok() && stderr_result.is_ok() => {
                     wait_process.events.push(ProcessEvent::Exit {
@@ -326,23 +354,15 @@ impl ManagedProcess {
             stdin: Mutex::new(Some(Box::new(master))),
             terminal: Some(terminal),
             events: Arc::new(EventQueue::default()),
-            exited: AtomicBool::new(false),
-            exit_result: Mutex::new(None),
-            exit_ready: Condvar::new(),
+            exit: ProcessExit::default(),
         });
         let output_thread = terminal_stream_thread(output, Arc::clone(&process.events));
         let wait_process = Arc::clone(&process);
         thread::spawn(move || {
             let result = child.wait();
-            *wait_process
-                .exit_result
-                .lock()
-                .expect("exit result lock poisoned") =
-                Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
-            wait_process.exited.store(true, Ordering::Release);
-            wait_process.exit_ready.notify_all();
             drop(registration);
             let output_result = output_thread.join();
+            wait_process.exit.record(&result);
             match result {
                 Ok(status) if output_result.is_ok() => {
                     wait_process.events.push(ProcessEvent::Exit {
@@ -361,7 +381,7 @@ impl ManagedProcess {
     }
 
     fn write(&self, encoded: &str) -> Result<(), String> {
-        if self.exited.load(Ordering::Acquire) {
+        if self.exit.is_complete()? {
             return Err("process is not running".to_string());
         }
         let bytes = STANDARD
@@ -385,13 +405,11 @@ impl ManagedProcess {
             .as_ref()
             .ok_or("process does not have a terminal")?;
         set_terminal_size(terminal.as_raw_fd(), size)?;
-        if !self.exited.load(Ordering::Acquire) {
-            let result = unsafe { libc::kill(-self.process_group, libc::SIGWINCH) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error.to_string());
-                }
+        let result = unsafe { libc::kill(-self.process_group, libc::SIGWINCH) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.to_string());
             }
         }
         Ok(())
@@ -399,21 +417,10 @@ impl ManagedProcess {
 
     fn terminate(&self) -> Result<(), String> {
         self.kill()?;
-        let result = self
-            .exit_result
-            .lock()
-            .map_err(|_| "exit result lock poisoned")?;
-        let result = self
-            .exit_ready
-            .wait_while(result, |result| result.is_none())
-            .map_err(|_| "exit result lock poisoned")?;
-        result.as_ref().expect("exit result is available").clone()
+        self.exit.wait(PROCESS_TERMINATION_TIMEOUT)
     }
 
     fn kill(&self) -> Result<(), String> {
-        if self.exited.load(Ordering::Acquire) {
-            return Ok(());
-        }
         // Every managed command is a process-group leader, so a kill cannot
         // leave attacker-controlled descendants behind in the microVM.
         let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
@@ -529,7 +536,11 @@ impl AgentState {
             Err(_) => return Response::error("process map lock poisoned"),
         };
         let Some(process) = process else {
-            return Response::error(format!("unknown process: {process_id}"));
+            return if matches!(request, BridgeRequest::Terminate) {
+                Response::ok()
+            } else {
+                Response::error(format!("unknown process: {process_id}"))
+            };
         };
         match request {
             BridgeRequest::Ping => Response::ok(),
@@ -551,22 +562,12 @@ impl AgentState {
                     Err(error) => return Response::error(error),
                 };
                 match process.events.recv(timeout) {
-                    Ok((events, exited)) => {
-                        if exited {
-                            match self.processes.lock() {
-                                Ok(mut processes) => {
-                                    processes.remove(process_id);
-                                }
-                                Err(_) => return Response::error("process map lock poisoned"),
-                            }
-                        }
-                        Response {
-                            ok: true,
-                            timeout: events.is_empty().then_some(true),
-                            events: (!events.is_empty()).then_some(events),
-                            ..Response::default()
-                        }
-                    }
+                    Ok((events, _exited)) => Response {
+                        ok: true,
+                        timeout: events.is_empty().then_some(true),
+                        events: (!events.is_empty()).then_some(events),
+                        ..Response::default()
+                    },
                     Err(error) => Response::error(error),
                 }
             }
@@ -579,16 +580,22 @@ impl AgentState {
 
     fn kill_process(&self, process_id: &str) -> Response {
         let process = match self.processes.lock() {
-            Ok(mut processes) => processes.remove(process_id),
+            Ok(processes) => processes.get(process_id).cloned(),
             Err(_) => return Response::error("process map lock poisoned"),
         };
         let Some(process) = process else {
-            return Response::error(format!("unknown process: {process_id}"));
+            return Response::ok();
         };
-        match process.kill() {
-            Ok(()) => Response::ok(),
-            Err(error) => Response::error(error),
+        if let Err(error) = process.terminate() {
+            return Response::error(error);
         }
+        match self.processes.lock() {
+            Ok(mut processes) => {
+                processes.remove(process_id);
+            }
+            Err(_) => return Response::error("process map lock poisoned"),
+        }
+        Response::ok()
     }
 }
 
@@ -1571,33 +1578,115 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminate_confirms_exit_without_consuming_output_events() {
+    fn termination_wait_is_bounded() {
+        let exit = ProcessExit::default();
+        let start = Instant::now();
+        assert!(
+            exit.wait(Duration::from_millis(10))
+                .unwrap_err()
+                .contains("timed out")
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn kill_and_terminate_remove_descendants_after_leader_exit() {
+        let mut previous = 0;
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut previous) },
+            0
+        );
+        assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+        struct GroupCleanup(i32);
+        impl Drop for GroupCleanup {
+            fn drop(&mut self) {
+                if unsafe { libc::kill(-self.0, libc::SIGKILL) } != 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::ESRCH)
+                    );
+                }
+            }
+        }
+        for terminate in [false, true] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 600 & printf ready"]);
+            command.process_group(0);
+            let process = ManagedProcess::spawn_command(command).unwrap();
+            let _cleanup = GroupCleanup(process.process_group);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while unsafe { libc::kill(process.process_group, 0) } == 0 {
+                assert!(Instant::now() < deadline, "leader did not exit");
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(unsafe { libc::kill(-process.process_group, 0) }, 0);
+            if terminate {
+                process.terminate().unwrap();
+            } else {
+                process.kill().unwrap();
+            }
+            loop {
+                let mut status = 0;
+                unsafe { libc::waitpid(-process.process_group, &mut status, libc::WNOHANG) };
+                if unsafe { libc::kill(-process.process_group, 0) } != 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::ESRCH)
+                    );
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "descendant survived group termination"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            let mut exited = false;
+            while !exited {
+                let (_, observed) = process.events.recv(Duration::from_millis(10)).unwrap();
+                exited = observed;
+                assert!(Instant::now() < deadline, "exit event was lost");
+            }
+        }
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, previous) },
+            0
+        );
+    }
+
+    #[test]
+    fn termination_survives_observed_exit_and_repeated_cleanup() {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf ready; exec sleep 600"]);
+        command.args(["-c", "printf ready"]);
         command.process_group(0);
         let process = ManagedProcess::spawn_command(command).unwrap();
-        let (events, _) = process.events.recv(Duration::from_secs(5)).unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, ProcessEvent::Stdout { .. }))
-        );
-        process.close_stdin().unwrap();
-        assert!(!process.exited.load(Ordering::Acquire));
-        process.terminate().unwrap();
-        assert_eq!(unsafe { libc::kill(process.process_group, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
-        process.terminate().unwrap();
-        let (events, exited) = process.events.recv(Duration::from_secs(5)).unwrap();
-        assert!(exited);
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, ProcessEvent::Exit { .. }))
-        );
+        let state = AgentState::default();
+        state
+            .processes
+            .lock()
+            .unwrap()
+            .insert("test".into(), process);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = state.process_bridge(
+                "test",
+                BridgeRequest::Recv {
+                    timeout_seconds: Some(0.01),
+                },
+            );
+            assert!(response.ok);
+            if response
+                .events
+                .is_some_and(|events| events.iter().any(ProcessEventExt::is_exit))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "exit was not delivered");
+        }
+        assert!(state.process_bridge("test", BridgeRequest::Terminate).ok);
+        assert!(state.kill_process("test").ok);
+        assert!(state.process_bridge("test", BridgeRequest::Terminate).ok);
+        assert!(state.kill_process("test").ok);
     }
 
     #[test]

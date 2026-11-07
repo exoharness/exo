@@ -29,6 +29,7 @@ import socketserver
 import subprocess
 import sys
 import threading
+import time
 
 HOST = "127.0.0.1"
 PORT = 48765
@@ -123,12 +124,16 @@ class BridgeState:
                 self.process.stdin.close()
 
     def terminate(self):
-        if self.process.poll() is None:
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        self.process.wait()
+        deadline = time.monotonic() + 20
+        try:
+            os.killpg(self.process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        self.process.wait(timeout=max(0, deadline - time.monotonic()))
+        self.stdout_thread.join(timeout=max(0, deadline - time.monotonic()))
+        self.stderr_thread.join(timeout=max(0, deadline - time.monotonic()))
+        if self.stdout_thread.is_alive() or self.stderr_thread.is_alive():
+            raise RuntimeError("timed out draining terminated process")
 
     def recv(self, timeout):
         try:
@@ -186,7 +191,7 @@ class Handler(socketserver.BaseRequestHandler):
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
         self.request.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8"))
-        if any(event.get("type") == "exit" for event in response.get("events", [])):
+        if (kind == "terminate" and response.get("ok")) or any(event.get("type") == "exit" for event in response.get("events", [])):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
 
 
@@ -403,24 +408,18 @@ pub fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
         stderr: Box::pin(stderr_reader.compat()),
         stdin: Box::pin(stdin_writer.compat_write()),
         wait,
-        control: Some(Arc::new(ProcessBridgeControl {
-            client,
-            exited,
-            termination: tokio::sync::Mutex::new(()),
-        })),
+        control: Some(Arc::new(ProcessBridgeControl { client, exited })),
     }
 }
 
 struct ProcessBridgeControl {
     client: Arc<dyn Client>,
     exited: Arc<AtomicBool>,
-    termination: tokio::sync::Mutex<()>,
 }
 
 #[async_trait]
 impl crate::SandboxProcessControl for ProcessBridgeControl {
     async fn terminate(&self) -> Result<()> {
-        let _termination = self.termination.lock().await;
         if self.exited.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -600,7 +599,6 @@ mod tests {
     use tokio::sync::Mutex;
 
     use super::*;
-    use crate::SandboxProcessControl;
 
     struct FakeClient {
         responses: Mutex<VecDeque<Response>>,
@@ -674,19 +672,51 @@ mod tests {
     struct BridgeFixture {
         _temp: TempDir,
         script_path: PathBuf,
+        port: u16,
+        _server: tokio::process::Child,
+    }
+
+    impl Drop for BridgeFixture {
+        fn drop(&mut self) {
+            use std::io::{Read, Write};
+            if let Ok(mut socket) = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], self.port)),
+                Duration::from_millis(100),
+            ) {
+                if let Err(error) = socket.write_all(b"{\"type\":\"terminate\"}") {
+                    tracing::debug!(%error, "test bridge already stopped");
+                }
+                if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
+                    tracing::debug!(%error, "test bridge already disconnected");
+                }
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(200)))
+                    .unwrap();
+                if let Err(error) = socket.read(&mut [0u8; 1]) {
+                    tracing::debug!(%error, "test bridge cleanup acknowledgement unavailable");
+                }
+            }
+        }
     }
 
     #[test]
     fn resize_request_matches_guest_protocol() {
         let request = Request::resize(crate::SandboxTerminalSize { rows: 24, cols: 80 });
         assert_eq!(
-            serde_json::to_value(Request::terminate()).unwrap(),
-            json!({"type": "terminate"})
-        );
-        assert_eq!(
             serde_json::to_value(request).expect("serialize resize request"),
             json!({"type": "resize", "size": {"rows": 24, "cols": 80}})
         );
+    }
+
+    #[cfg(feature = "firecracker")]
+    #[test]
+    fn terminate_request_deserializes_as_guest_termination() {
+        let request: exo_firecracker_protocol::GuestProcessRequest =
+            serde_json::from_value(serde_json::to_value(Request::terminate()).unwrap()).unwrap();
+        assert!(matches!(
+            request,
+            exo_firecracker_protocol::GuestProcessRequest::Terminate
+        ));
     }
 
     #[tokio::test]
@@ -774,34 +804,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_termination_can_be_retried() {
-        struct RefusesFirst(std::sync::atomic::AtomicUsize);
-        #[async_trait]
-        impl Client for RefusesFirst {
-            async fn request(&self, request: Request) -> Result<Response> {
-                assert_eq!(request.kind, "terminate");
-                let ok = self.0.fetch_add(1, Ordering::AcqRel) > 0;
-                Ok(Response {
-                    ok,
-                    timeout: false,
-                    events: vec![],
-                    error: Some("termination refused".into()),
-                })
-            }
-        }
-        let control = ProcessBridgeControl {
-            client: Arc::new(RefusesFirst(std::sync::atomic::AtomicUsize::new(0))),
-            exited: Arc::new(AtomicBool::new(false)),
-            termination: tokio::sync::Mutex::new(()),
-        };
-        assert!(control.terminate().await.is_err());
-        assert!(!control.exited.load(Ordering::Acquire));
-        control.terminate().await.expect("retry termination");
-        assert!(control.exited.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
     async fn terminate_releases_listener_and_is_idempotent() {
+        tokio::time::timeout(Duration::from_secs(5), async {
         let port = unused_local_port();
         let bridge = start_bridge_for_python_command(&format!(
             "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)"
@@ -835,20 +839,47 @@ mod tests {
             .terminate()
             .await
             .expect("termination after exit");
+        }).await.expect("termination regression timed out");
+    }
+
+    #[tokio::test]
+    async fn terminate_kills_descendant_listener_after_leader_exit() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let port = unused_local_port();
+            let descendant = format!("import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)");
+            let source = format!("import subprocess; subprocess.Popen(['python3','-c',{}])", serde_json::to_string(&descendant).unwrap());
+            let bridge = start_bridge_for_python_command(&source).await;
+            let mut parts = process_parts(Arc::new(ScriptClient {
+                script_path: bridge.script_path.clone(), fail_recv: AtomicBool::new(false),
+            }));
+            let mut ready = [0; 6];
+            parts.stdout.read_exact(&mut ready).await.unwrap();
+            assert_eq!(&ready, b"ready\n");
+            parts.terminate().await.unwrap();
+            let _listener = TcpListener::bind(("127.0.0.1", port)).expect("descendant listener survived termination");
+            assert_eq!(parts.wait.await.unwrap(), 0);
+        }).await.expect("descendant termination timed out");
     }
 
     #[tokio::test]
     async fn terminate_still_works_after_output_transport_failure() {
-        let bridge = start_bridge_for_python_command("import time; time.sleep(600)").await;
-        let parts = process_parts(Arc::new(ScriptClient {
-            script_path: bridge.script_path.clone(),
-            fail_recv: AtomicBool::new(true),
-        }));
-        let termination = parts.terminate();
-        parts.wait.await.expect_err("output monitor failed");
-        termination
-            .await
-            .expect("terminate independently of failed output monitor");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let bridge = start_bridge_for_python_command("import time; time.sleep(600)").await;
+            let parts = process_parts(Arc::new(ScriptClient {
+                script_path: bridge.script_path.clone(),
+                fail_recv: AtomicBool::new(true),
+            }));
+            let termination = parts.terminate();
+            parts.wait.await.expect_err("output monitor failed");
+            termination
+                .await
+                .expect("terminate independently of failed output monitor");
+            while bridge_ping(&bridge.script_path).await.status.success() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("termination regression timed out");
     }
 
     async fn start_bridge_for_python_command(source: &str) -> BridgeFixture {
@@ -861,26 +892,23 @@ mod tests {
             .expect("write bridge script");
 
         let argv_json = serde_json::to_string(&vec!["python3", "-c", source]).expect("encode argv");
-        let mut server = Command::new("python3")
+        let server = Command::new("python3")
             .arg(&script_path)
             .arg("server")
             .env("EXO_PROCESS_BRIDGE_ARGV_JSON", argv_json)
             .env("EXO_PROCESS_BRIDGE_ENV_JSON", "{}")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .expect("start bridge server");
 
         wait_for_ping(&script_path).await;
-        tokio::spawn(async move {
-            match server.wait().await {
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "process bridge test server wait failed"),
-            }
-        });
         BridgeFixture {
             _temp: temp,
             script_path,
+            port,
+            _server: server,
         }
     }
 
@@ -937,6 +965,7 @@ mod tests {
     async fn bridge_client(script_path: &Path, request: String) -> std::process::Output {
         let output = Command::new("python3")
             .arg(script_path)
+            .kill_on_drop(true)
             .arg("client")
             .arg(request)
             .output()

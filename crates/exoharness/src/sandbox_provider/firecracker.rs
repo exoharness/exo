@@ -5448,19 +5448,20 @@ impl GuestClient {
             process_id: process_id.clone(),
         });
         let SandboxProcessParts {
-            control,
+            control: _control,
             stdout,
             stderr,
             stdin,
             wait,
         } = process_bridge::process_parts(bridge);
-        let cleanup = ProcessCleanup {
+        let cleanup = Arc::new(ProcessCleanup {
             guest: self.clone(),
             process_id,
             machine_id: cleanup_machine_id,
-        };
+            terminated: tokio::sync::Mutex::new(false),
+        });
         Ok(SandboxProcessParts {
-            control,
+            control: Some(cleanup.clone()),
             stdout,
             stderr,
             stdin,
@@ -5512,11 +5513,12 @@ impl GuestClient {
             wait,
             control,
         } = process_bridge::terminal_parts(bridge);
-        let cleanup = ProcessCleanup {
+        let cleanup = Arc::new(ProcessCleanup {
             guest: self.clone(),
             process_id,
             machine_id: cleanup_machine_id,
-        };
+            terminated: tokio::sync::Mutex::new(false),
+        });
         Ok(SandboxTerminalParts {
             output,
             input,
@@ -5653,38 +5655,49 @@ struct ProcessCleanup {
     guest: GuestClient,
     process_id: String,
     machine_id: Option<String>,
+    terminated: tokio::sync::Mutex<bool>,
 }
 
-impl Drop for ProcessCleanup {
-    fn drop(&mut self) {
-        let guest = self.guest.clone();
-        let process_id = self.process_id.clone();
-        let machine_id = self.machine_id.clone();
+impl ProcessCleanup {
+    fn request(self: Arc<Self>) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         runtime.spawn(async move {
-            if let Err(error) = guest.kill_process(&process_id).await {
-                tracing::debug!(%error, process_id, "failed to clean up Firecracker guest process");
-            }
-            if let Some(machine_id) = machine_id
-            {
-                let _lifecycle_guard = guest
-                    .shared
-                    .lifecycle_locks
-                    .lock_machine(&machine_id)
-                    .await;
-                if let Err(error) = guest.shared.cleanup_machine(&machine_id, true).await {
-                    tracing::warn!(%error, machine_id, "failed to clean up one-shot Firecracker machine");
-                }
+            if let Err(error) = crate::SandboxProcessControl::terminate(self.as_ref()).await {
+                tracing::warn!(%error, process_id = %self.process_id, "failed to clean up Firecracker process");
             }
         });
     }
 }
 
+#[async_trait]
+impl crate::SandboxProcessControl for ProcessCleanup {
+    async fn terminate(&self) -> Result<()> {
+        let mut terminated = self.terminated.lock().await;
+        if *terminated {
+            return Ok(());
+        }
+        let process_result = self.guest.kill_process(&self.process_id).await;
+        if let Some(machine_id) = &self.machine_id {
+            let _lifecycle_guard = self
+                .guest
+                .shared
+                .lifecycle_locks
+                .lock_machine(machine_id)
+                .await;
+            self.guest.shared.cleanup_machine(machine_id, true).await?;
+        } else {
+            process_result?;
+        }
+        *terminated = true;
+        Ok(())
+    }
+}
+
 struct ProcessWait {
     wait: Pin<Box<dyn Future<Output = Result<i32>> + Send>>,
-    cleanup: Option<ProcessCleanup>,
+    cleanup: Option<Arc<ProcessCleanup>>,
 }
 
 impl Future for ProcessWait {
@@ -5693,7 +5706,9 @@ impl Future for ProcessWait {
     fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Self::Output> {
         match self.wait.as_mut().poll(context) {
             Poll::Ready(result) => {
-                self.cleanup.take();
+                if let Some(cleanup) = self.cleanup.take() {
+                    cleanup.request();
+                }
                 Poll::Ready(result)
             }
             Poll::Pending => Poll::Pending,
@@ -5703,7 +5718,9 @@ impl Future for ProcessWait {
 
 impl Drop for ProcessWait {
     fn drop(&mut self) {
-        self.cleanup.take();
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup.request();
+        }
     }
 }
 
