@@ -669,12 +669,7 @@ mod tests {
             if request.kind == "recv" {
                 tokio::time::sleep(self.recv_delay).await;
             }
-            let output = bridge_client(&self.script_path, serde_json::to_string(&request)?).await;
-            anyhow::ensure!(
-                output.status.success(),
-                "bridge request failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+            let output = bridge_client(&self.script_path, serde_json::to_string(&request)?).await?;
             Ok(serde_json::from_slice(&output.stdout)?)
         }
     }
@@ -683,7 +678,7 @@ mod tests {
         _temp: TempDir,
         script_path: PathBuf,
         port: u16,
-        server: tokio::process::Child,
+        _server: tokio::process::Child,
     }
 
     impl Drop for BridgeFixture {
@@ -716,17 +711,6 @@ mod tests {
             serde_json::to_value(request).expect("serialize resize request"),
             json!({"type": "resize", "size": {"rows": 24, "cols": 80}})
         );
-    }
-
-    #[cfg(feature = "firecracker")]
-    #[test]
-    fn terminate_request_deserializes_as_guest_termination() {
-        let request: exo_firecracker_protocol::GuestProcessRequest =
-            serde_json::from_value(serde_json::to_value(Request::terminate()).unwrap()).unwrap();
-        assert!(matches!(
-            request,
-            exo_firecracker_protocol::GuestProcessRequest::Terminate
-        ));
     }
 
     #[tokio::test]
@@ -799,6 +783,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_bridge_exit_preserves_descendant_output() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let bridge = start_bridge_for_python_command(
+                "import subprocess; subprocess.Popen(['sh','-c','(sleep 0.3; printf late) & printf early'])",
+            )
+            .await;
+            let mut output = String::new();
+            assert_eq!(recv_until_exit(&bridge.script_path, &mut output).await, 0);
+            assert_eq!(output, "earlylate");
+        })
+        .await
+        .expect("normal bridge completion timed out");
+    }
+
+    #[tokio::test]
     async fn bridge_server_stops_after_exit_is_observed() {
         let bridge = start_bridge_for_python_command("import sys; sys.stdout.write('done')").await;
         let mut output = String::new();
@@ -816,69 +815,84 @@ mod tests {
     #[tokio::test]
     async fn terminate_releases_listener_and_is_idempotent() {
         tokio::time::timeout(Duration::from_secs(5), async {
-        let port = unused_local_port();
-        let bridge = start_bridge_for_python_command(&format!(
-            "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)"
-        )).await;
-        let mut parts = process_parts(Arc::new(ScriptClient {
-            script_path: bridge.script_path.clone(),
-            fail_recv: AtomicBool::new(false),
-            recv_delay: Duration::from_secs(1),
-        }));
-        let mut ready = [0; 6];
-        parts
-            .stdout
-            .read_exact(&mut ready)
-            .await
-            .expect("listener ready");
-        assert_eq!(&ready, b"ready\n");
-        futures::AsyncWriteExt::close(&mut parts.stdin)
-            .await
-            .expect("close stdin");
-        assert!(
-            TcpListener::bind(("127.0.0.1", port)).is_err(),
-            "stdin EOF unexpectedly stopped listener"
-        );
-        let (first, second) = tokio::join!(parts.terminate(), parts.terminate());
-        first.expect("terminate process");
-        second.expect("concurrent termination");
-        let _listener = TcpListener::bind(("127.0.0.1", port)).expect("termination released port");
-        assert_eq!(parts.wait.await.expect("observe exit"), -9);
-        parts
-            .control
-            .expect("termination supported")
-            .terminate()
-            .await
-            .expect("termination after exit");
-        }).await.expect("termination regression timed out");
+            let port = unused_local_port();
+            let source = format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)"
+            );
+            let bridge = start_bridge_for_python_command(&source).await;
+            let mut parts = process_parts(Arc::new(ScriptClient {
+                script_path: bridge.script_path.clone(),
+                fail_recv: AtomicBool::new(false),
+                recv_delay: Duration::from_secs(1),
+            }));
+            let mut ready = [0; 6];
+            parts
+                .stdout
+                .read_exact(&mut ready)
+                .await
+                .expect("listener ready");
+            assert_eq!(&ready, b"ready\n");
+            futures::AsyncWriteExt::close(&mut parts.stdin)
+                .await
+                .expect("close stdin");
+            assert!(
+                TcpListener::bind(("127.0.0.1", port)).is_err(),
+                "stdin EOF unexpectedly stopped listener"
+            );
+            let (first, second) = tokio::join!(parts.terminate(), parts.terminate());
+            first.expect("terminate process");
+            second.expect("concurrent termination");
+            let _listener = TcpListener::bind(("127.0.0.1", port))
+                .expect("termination released port");
+            assert_eq!(parts.wait.await.expect("observe exit"), -9);
+            parts
+                .control
+                .expect("termination supported")
+                .terminate()
+                .await
+                .expect("termination after exit");
+        })
+        .await
+        .expect("termination regression timed out");
     }
 
     #[tokio::test]
     async fn terminate_kills_descendant_listener_after_leader_exit() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let port = unused_local_port();
-            let descendant = format!("import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)");
-            let source = format!("import subprocess; subprocess.Popen(['python3','-c',{}])", serde_json::to_string(&descendant).unwrap());
+            let descendant = format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)"
+            );
+            let source = format!(
+                "import subprocess; subprocess.Popen(['python3','-c',{}])",
+                serde_json::to_string(&descendant).unwrap()
+            );
             let bridge = start_bridge_for_python_command(&source).await;
             let mut parts = process_parts(Arc::new(ScriptClient {
-                script_path: bridge.script_path.clone(), fail_recv: AtomicBool::new(false), recv_delay: Duration::ZERO,
+                script_path: bridge.script_path.clone(),
+                fail_recv: AtomicBool::new(false),
+                recv_delay: Duration::ZERO,
             }));
             let mut ready = [0; 6];
             parts.stdout.read_exact(&mut ready).await.unwrap();
             assert_eq!(&ready, b"ready\n");
             parts.terminate().await.unwrap();
-            let _listener = TcpListener::bind(("127.0.0.1", port)).expect("descendant listener survived termination");
+            let _listener = TcpListener::bind(("127.0.0.1", port))
+                .expect("descendant listener survived termination");
             assert_eq!(parts.wait.await.unwrap(), 0);
-        }).await.expect("descendant termination timed out");
+        })
+        .await
+        .expect("descendant termination timed out");
     }
 
     #[tokio::test]
     async fn terminate_still_works_after_output_transport_failure() {
         tokio::time::timeout(Duration::from_secs(5), async {
             let port = unused_local_port();
-            let mut bridge = start_bridge_for_python_command(&format!(
+            let source = format!(
                 "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(600)"
-            )).await;
+            );
+            let bridge = start_bridge_for_python_command(&source).await;
             while TcpListener::bind(("127.0.0.1", port)).is_ok() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -894,7 +908,6 @@ mod tests {
                 .expect("terminate independently of failed output monitor");
             let _listener = TcpListener::bind(("127.0.0.1", port))
                 .expect("listener survived termination after monitor failure");
-            bridge.server.kill().await.expect("clean up bridge server");
         })
         .await
         .expect("termination regression timed out");
@@ -926,7 +939,7 @@ mod tests {
             _temp: temp,
             script_path,
             port,
-            server,
+            _server: server,
         }
     }
 
@@ -936,7 +949,8 @@ mod tests {
                 script_path,
                 json!({"type": "recv", "timeout_seconds": 1.0}).to_string(),
             )
-            .await;
+            .await
+            .expect("run bridge recv");
             let response: Response =
                 serde_json::from_slice(&response.stdout).expect("decode bridge recv response");
             for event in response.events {
@@ -980,15 +994,21 @@ mod tests {
             .expect("run bridge ping")
     }
 
-    async fn bridge_client(script_path: &Path, request: String) -> std::process::Output {
-        Command::new("python3")
+    async fn bridge_client(script_path: &Path, request: String) -> Result<std::process::Output> {
+        let output = Command::new("python3")
             .arg(script_path)
             .kill_on_drop(true)
             .arg("client")
             .arg(request)
             .output()
             .await
-            .expect("run bridge client")
+            .context("run bridge client")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "bridge request failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(output)
     }
 
     fn unused_local_port() -> u16 {

@@ -1775,6 +1775,9 @@ impl LocalChild {
 
 impl Drop for LocalChild {
     fn drop(&mut self) {
+        if self.child.id().is_none() {
+            return;
+        }
         if let Err(error) = self.kill() {
             tracing::warn!(%error, "failed to kill local sandbox process group");
         }
@@ -2335,6 +2338,36 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[tokio::test]
+    async fn normal_local_exit_preserves_descendant_output() {
+        use futures::AsyncReadExt;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let command = SandboxCommand {
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "(sleep 0.3; printf late) & printf early".into(),
+                ],
+                env: HashMap::new(),
+                display_argv: None,
+                cwd: None,
+                timeout: None,
+            };
+            let mut child = Command::new(&command.argv[0]);
+            child.args(&command.argv[1..]);
+            let mut parts = spawn_sandbox_process(child, &command, ProcessTermination::Local)
+                .await
+                .unwrap();
+            assert_eq!(parts.wait.await.unwrap(), 0);
+            parts.control.unwrap().terminate().await.unwrap();
+            let mut output = String::new();
+            parts.stdout.read_to_string(&mut output).await.unwrap();
+            assert_eq!(output, "earlylate");
+        })
+        .await
+        .expect("normal process completion timed out");
+    }
+
+    #[tokio::test]
     async fn terminate_local_process_survives_dropped_waiter() {
         use futures::AsyncReadExt;
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -2386,13 +2419,23 @@ mod tests {
             let port = listener.local_addr().unwrap().port();
             drop(listener);
             let command = SandboxCommand {
-                argv: vec!["sh".into(), "-c".into(), format!(
-                    "python3 -c 'import socket,time; s=socket.socket(); s.bind((\"127.0.0.1\",{port})); s.listen(); print(\"ready\",flush=True); time.sleep(600)' & wait"
-                )], env: HashMap::new(), display_argv: None, cwd: None, timeout: None,
+                argv: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!(
+                        "python3 -c 'import socket,time; s=socket.socket(); s.bind((\"127.0.0.1\",{port})); s.listen(); print(\"ready\",flush=True); time.sleep(600)' & wait"
+                    ),
+                ],
+                env: HashMap::new(),
+                display_argv: None,
+                cwd: None,
+                timeout: None,
             };
             let mut child = Command::new(&command.argv[0]);
             child.args(&command.argv[1..]);
-            let mut parts = spawn_sandbox_process(child, &command, ProcessTermination::Local).await.unwrap();
+            let mut parts = spawn_sandbox_process(child, &command, ProcessTermination::Local)
+                .await
+                .unwrap();
             let mut ready = [0; 6];
             parts.stdout.read_exact(&mut ready).await.unwrap();
             assert_eq!(&ready, b"ready\n");
@@ -2400,7 +2443,9 @@ mod tests {
             while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-        }).await.expect("descendant survived dropping process parts");
+        })
+        .await
+        .expect("descendant survived dropping process parts");
     }
 
     #[tokio::test]

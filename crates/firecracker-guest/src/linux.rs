@@ -416,7 +416,9 @@ impl ManagedProcess {
     }
 
     fn terminate(&self) -> Result<(), String> {
-        self.kill()?;
+        if !self.exit.is_complete()? {
+            self.kill()?;
+        }
         self.exit.wait(PROCESS_TERMINATION_TIMEOUT)
     }
 
@@ -536,11 +538,7 @@ impl AgentState {
             Err(_) => return Response::error("process map lock poisoned"),
         };
         let Some(process) = process else {
-            return if matches!(request, BridgeRequest::Terminate) {
-                Response::ok()
-            } else {
-                Response::error(format!("unknown process: {process_id}"))
-            };
+            return Response::error(format!("unknown process: {process_id}"));
         };
         match request {
             BridgeRequest::Ping => Response::ok(),
@@ -552,22 +550,28 @@ impl AgentState {
                 Ok(()) => Response::ok(),
                 Err(error) => Response::error(error),
             },
-            BridgeRequest::Terminate => match process.terminate() {
-                Ok(()) => Response::ok(),
-                Err(error) => Response::error(error),
-            },
             BridgeRequest::Recv { timeout_seconds } => {
                 let timeout = match recv_timeout(timeout_seconds) {
                     Ok(timeout) => timeout,
                     Err(error) => return Response::error(error),
                 };
                 match process.events.recv(timeout) {
-                    Ok((events, _exited)) => Response {
-                        ok: true,
-                        timeout: events.is_empty().then_some(true),
-                        events: (!events.is_empty()).then_some(events),
-                        ..Response::default()
-                    },
+                    Ok((events, exited)) => {
+                        if exited {
+                            match self.processes.lock() {
+                                Ok(mut processes) => {
+                                    processes.remove(process_id);
+                                }
+                                Err(_) => return Response::error("process map lock poisoned"),
+                            }
+                        }
+                        Response {
+                            ok: true,
+                            timeout: events.is_empty().then_some(true),
+                            events: (!events.is_empty()).then_some(events),
+                            ..Response::default()
+                        }
+                    }
                     Err(error) => Response::error(error),
                 }
             }
@@ -1655,11 +1659,29 @@ mod tests {
     }
 
     #[test]
-    fn termination_survives_observed_exit_and_repeated_cleanup() {
+    fn normal_exit_releases_entry_and_preserves_detached_descendant() {
+        use std::os::unix::net::UnixStream;
+
+        let (mut output, writer) = UnixStream::pair().unwrap();
+        output
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf ready"]);
+        command.args([
+            "-c",
+            "(sleep 0.3; printf late >&3) >/dev/null 2>&1 & printf early",
+        ]);
         command.process_group(0);
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(writer.as_raw_fd(), 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         let process = ManagedProcess::spawn_command(command).unwrap();
+        let released = Arc::downgrade(&process);
         let state = AgentState::default();
         state
             .processes
@@ -1683,10 +1705,13 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "exit was not delivered");
         }
-        assert!(state.process_bridge("test", BridgeRequest::Terminate).ok);
+        assert!(state.processes.lock().unwrap().is_empty());
         assert!(state.kill_process("test").ok);
-        assert!(state.process_bridge("test", BridgeRequest::Terminate).ok);
         assert!(state.kill_process("test").ok);
+        let mut late = [0; 4];
+        output.read_exact(&mut late).unwrap();
+        assert_eq!(&late, b"late");
+        assert!(released.upgrade().is_none());
     }
 
     #[test]

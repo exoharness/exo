@@ -1273,7 +1273,7 @@ pub trait SandboxProcess: Send {
 
 #[async_trait]
 pub trait SandboxProcessControl: Send + Sync {
-    /// Terminate the process and return only after its exit is confirmed.
+    /// Terminate an active process and confirm its exit; completed processes are a no-op.
     /// Errors must not be treated as evidence that the process has exited.
     async fn terminate(&self) -> Result<()>;
 }
