@@ -234,6 +234,20 @@ jobs:
           else
             "$test_binary" --ignored --nocapture
           fi
+      - name: Run Firecracker guest capability check
+        if: matrix.sandbox-backend == 'firecracker'
+        run: |
+          cargo test --locked --package exoharness --features firecracker \
+            --test firecracker_guest_capabilities --no-run --message-format=json-render-diagnostics \
+            > "$RUNNER_TEMP/guest-capabilities-build.jsonl"
+          test_binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "firecracker_guest_capabilities") | .executable // empty' "$RUNNER_TEMP/guest-capabilities-build.jsonl")"
+          test -x "$test_binary"
+          sudo -n env TMPDIR=/exo-test \
+            EXO_FIRECRACKER_BINARY="$EXO_FIRECRACKER_BINARY" \
+            EXO_FIRECRACKER_JAILER="$EXO_FIRECRACKER_JAILER" \
+            EXO_TEST_FIRECRACKER_SUDO_IMAGE="$EXO_TEST_FIRECRACKER_SUDO_IMAGE" \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            "$test_binary" --ignored --nocapture
       - name: Run Firecracker clock regression
         if: matrix.sandbox-backend == 'firecracker'
         run: |

@@ -122,7 +122,11 @@ initramfs. It mounts the immutable base and sparse upper with OverlayFS, mounts
 the pseudo filesystems, configures the guest network, mounts an optional
 workspace, reaps orphaned descendants like an init should, and serves the
 bounded process protocol only to the host vsock CID. Every workload child
-clears supplementary groups and starts as UID/GID 10001. The root filesystem
+clears supplementary groups and starts as UID/GID 10001. It also removes
+`CAP_SYS_MODULE`, `CAP_SYS_RAWIO`, `CAP_SYS_BOOT`, `CAP_PERFMON`, and `CAP_BPF`
+from its capability bounding set, so root regained through `sudo` cannot use
+them. Root keeps every other capability, including `CAP_SYS_ADMIN` for
+container runtimes. The root filesystem
 permits setuid tools when guest root is enabled; repository
 resource mounts remain `nosuid,nodev`.
 Cgroup v2 and a writable `/dev/shm` tmpfs are mounted inside the guest.

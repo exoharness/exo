@@ -59,10 +59,22 @@ case "$sandbox_backend" in
       --guest-runtime "$guest_runtime" --output "$artifact_dir/initramfs.cpio"
     sudo install -o root -g root -m 0644 \
       "$artifact_dir/initramfs.cpio" /var/lib/exo/firecracker/exo-firecracker-initramfs.cpio
+    # Docker only assembles the guest-root test filesystem; Exo boots the
+    # resulting ext4 image. Extract as root to keep ownership and setuid bits.
+    sudo_image=/var/lib/exo/firecracker/sudo-rootfs.ext4
+    docker build --quiet --tag exo-ci-sudo-rootfs support/ci/sudo-rootfs
+    sudo_container="$(docker create exo-ci-sudo-rootfs)"
+    sudo install -d -m 0755 "$artifact_dir/sudo-rootfs"
+    docker export "$sudo_container" |
+      sudo tar -x --same-owner --preserve-permissions -C "$artifact_dir/sudo-rootfs"
+    docker rm "$sudo_container"
+    sudo truncate -s 1G "$sudo_image"
+    sudo mkfs.ext4 -q -F -d "$artifact_dir/sudo-rootfs" "$sudo_image"
     "$runtime_dir/firecracker" --version
     "$runtime_dir/jailer" --version
     printf 'EXO_FIRECRACKER_BINARY=%s/firecracker\n' "$runtime_dir" >> "$GITHUB_ENV"
     printf 'EXO_FIRECRACKER_JAILER=%s/jailer\n' "$runtime_dir" >> "$GITHUB_ENV"
+    printf 'EXO_TEST_FIRECRACKER_SUDO_IMAGE=%s\n' "$sudo_image" >> "$GITHUB_ENV"
     ;;
   *)
     echo "Unsupported CI sandbox backend: $sandbox_backend" >&2
