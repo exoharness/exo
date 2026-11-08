@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GuestResourceMount {
     pub device: String,
@@ -33,6 +33,10 @@ impl<T> Message<T> {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GuestRequest<B> {
     Ping,
+    SyncClock {
+        unix_seconds: u64,
+        nanoseconds: u32,
+    },
     Exec {
         argv: Vec<String>,
         env: HashMap<String, String>,
