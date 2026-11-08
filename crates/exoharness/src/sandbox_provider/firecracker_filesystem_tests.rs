@@ -169,6 +169,198 @@ fn malformed_references_fail_before_accessing_host_paths() -> Result<()> {
     Ok(())
 }
 
+struct CaptureSource {
+    config: FirecrackerConfig,
+    record: MachineRecord,
+    request: SandboxRequest,
+    jail: PathBuf,
+}
+
+// A source VM as launched: a fresh overlay created in its jail, and workspace,
+// resource, and base image disks hard-linked into it from host-owned files.
+fn capture_source(state_root: &Path) -> Result<CaptureSource> {
+    let config = FirecrackerConfig {
+        state_root: state_root.into(),
+        jailer_uid_base: rustix::process::getuid().as_raw(),
+        ..Default::default()
+    };
+    let agent_id = crate::Uuid7::now();
+    let thread_id = crate::Uuid7::now();
+    let resource = state_root
+        .join("resources/threads")
+        .join(agent_id.to_string())
+        .join(thread_id.to_string())
+        .join("repo");
+    fs::create_dir_all(&resource)?;
+    fs::write(resource.join("volume.ext4"), b"resource disk")?;
+    let workspace = state_root.join("workspaces/workspace-id.ext4");
+    fs::create_dir_all(state_root.join("workspaces"))?;
+    fs::write(&workspace, b"workspace disk")?;
+    let image = state_root.join("images/base.ext4");
+    fs::create_dir_all(state_root.join("images"))?;
+    fs::write(&image, b"base image")?;
+    fs::set_permissions(&image, Permissions::from_mode(0o444))?;
+    let record = MachineRecord {
+        machine_id: "fc-0123456789abcdef-01234567".into(),
+        spec_hash: "spec".into(),
+        runtime: super::super::tests::test_runtime(),
+        resolved_image: image.to_string_lossy().into_owned(),
+        slot: 0,
+        network_enabled: false,
+        workspace_id: Some("workspace-id".into()),
+        resource_paths: vec!["/repo".into()],
+        idle_ttl_seconds: Some(60),
+        snapshot_template: None,
+        snapshot_network_slot: None,
+    };
+    let request = SandboxRequest {
+        sandbox_id: "filesystem-source".into(),
+        scope: crate::ResourceScope::Thread {
+            agent_id,
+            thread_id,
+        },
+        provider_state: None,
+        lifecycle: crate::SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(60)),
+        },
+        spec: SandboxSpec {
+            image: record.resolved_image.clone(),
+            resources: None,
+            default_workdir: "/workspace".into(),
+            mounts: vec![crate::SandboxMount {
+                host_path: resource.clone(),
+                guest_path: "/repo".into(),
+                access: crate::SandboxMountAccess::ReadWrite,
+                internal: true,
+            }],
+            durable_file_systems: vec![crate::DurableFileSystem {
+                name: "workspace".into(),
+                mount_path: "/workspace".into(),
+                mode: FileSystemMountMode::ReadWrite,
+            }],
+            policy: SandboxNetworkPolicy::Disabled.into(),
+            tcp_ports: vec![],
+        },
+    };
+    let jail = jail_root(&config, &record.machine_id);
+    fs::create_dir_all(&jail)?;
+    fs::write(jail.join("overlay.ext4"), b"overlay disk")?;
+    fs::hard_link(&workspace, jail.join("workspace.ext4"))?;
+    fs::hard_link(resource.join("volume.ext4"), jail.join("resource-0.ext4"))?;
+    fs::hard_link(&image, jail.join("rootfs.ext4"))?;
+    Ok(CaptureSource {
+        config,
+        record,
+        request,
+        jail,
+    })
+}
+
+#[test]
+fn capture_opens_only_the_disks_the_host_linked_into_the_jail() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source = capture_source(temp.path())?;
+    let links = host_disk_links(&source.config, &source.record, &source.request)?;
+    let names = FilesystemLayout::from_spec(&source.request.spec).disk_names();
+    assert_eq!(names, ["overlay.ext4", "workspace.ext4", "resource-0.ext4"]);
+    assert!(links[0].is_none());
+    let jail = open_directory_nofollow(&source.jail)?;
+    let uid = jailer_uid(&source.config, &source.record)?;
+    let open = |name: &str, link: &Option<PathBuf>| -> Result<Vec<u8>> {
+        let mut contents = Vec::new();
+        open_jailed_disk(&jail, name, uid, link.as_deref())?
+            .0
+            .read_to_end(&mut contents)?;
+        Ok(contents)
+    };
+    let rejection =
+        |name: &str, link: &Option<PathBuf>| format!("{:#}", open(name, link).unwrap_err());
+    for ((name, link), contents) in
+        names
+            .iter()
+            .zip(&links)
+            .zip([&b"overlay disk"[..], b"workspace disk", b"resource disk"])
+    {
+        assert_eq!(open(name, link)?, contents);
+    }
+
+    let other_vm = temp.path().join("other-vm.ext4");
+    fs::write(&other_vm, b"another sandbox")?;
+    for (name, link) in names.iter().zip(&links).skip(1) {
+        let host = link.as_deref().context("linked disk has no host file")?;
+        let jailed = source.jail.join(name);
+        fs::remove_file(&jailed)?;
+        std::os::unix::fs::symlink(host, &jailed)?;
+        let error = open(name, link).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<rustix::io::Errno>(),
+            Some(&rustix::io::Errno::LOOP)
+        );
+        fs::remove_file(&jailed)?;
+        fs::copy(host, &jailed)?;
+        assert!(rejection(name, link).contains("is not a link to"));
+        fs::remove_file(&jailed)?;
+        fs::hard_link(&other_vm, &jailed)?;
+        assert!(rejection(name, link).contains("is not a link to"));
+        fs::remove_file(&jailed)?;
+        fs::hard_link(host, &jailed)?;
+        assert!(open(name, link).is_ok());
+    }
+
+    let overlay = source.jail.join("overlay.ext4");
+    fs::hard_link(&overlay, temp.path().join("overlay-alias"))?;
+    assert!(rejection("overlay.ext4", &links[0]).contains("has 2 links"));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires root and TMPDIR on XFS with reflinks enabled"]
+fn capture_takes_the_base_image_from_the_host_not_the_jail() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let source = capture_source(temp.path())?;
+    for directory in ["snapshots", "filesystem-snapshots"] {
+        fs::create_dir_all(source.config.state_root.join(directory))?;
+    }
+    let sentinel = temp.path().join("host-file");
+    fs::write(&sentinel, b"host file")?;
+    fs::set_permissions(&sentinel, Permissions::from_mode(0o640))?;
+    chown(&sentinel, Some(65_534), Some(65_534))?;
+    let identity = |path: &Path| -> Result<(u32, u32, u32)> {
+        let metadata = fs::metadata(path)?;
+        Ok((metadata.uid(), metadata.gid(), metadata.mode()))
+    };
+    let before = identity(&sentinel)?;
+    fs::remove_file(source.jail.join("rootfs.ext4"))?;
+    std::os::unix::fs::symlink(&sentinel, source.jail.join("rootfs.ext4"))?;
+
+    let manifest = FilesystemManifest {
+        template: false,
+        key: new_capture_key(),
+        sandbox_id: source.request.sandbox_id.clone(),
+        base_image_sha256: "b".repeat(64),
+        layout: FilesystemLayout::from_spec(&source.request.spec),
+        disk_sizes: Vec::new(),
+    };
+    let links = host_disk_links(&source.config, &source.record, &source.request)?;
+    let captured = capture_disks(&source.config, &source.record, &links, manifest, false);
+    assert_eq!(identity(&sentinel)?, before);
+    let payload = captured?;
+    let capture = open_capture(&source.config, payload)?;
+    let base = fs::symlink_metadata(&capture.base_image)?;
+    let image = fs::metadata(&source.record.resolved_image)?;
+    assert_eq!((base.dev(), base.ino()), (image.dev(), image.ino()));
+    for (disk, contents) in
+        capture
+            .disks
+            .iter()
+            .zip([&b"overlay disk"[..], b"workspace disk", b"resource disk"])
+    {
+        assert_eq!(fs::read(disk)?, contents);
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn native_request(config: &FirecrackerConfig, id: &str, image: &str) -> Result<SandboxRequest> {
     let agent_id = crate::Uuid7::now();

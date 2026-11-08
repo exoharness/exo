@@ -17,7 +17,7 @@ fn test_host_runtime() -> FirecrackerHostFingerprint {
     }
 }
 
-fn test_runtime() -> FirecrackerRuntimeFingerprint {
+pub(super) fn test_runtime() -> FirecrackerRuntimeFingerprint {
     test_host_runtime().for_resources(SandboxResourceShape::default())
 }
 
@@ -925,6 +925,194 @@ fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
         allocated,
     );
     assert!(enforce_snapshot_budget(&config).is_ok());
+}
+
+#[test]
+fn snapshot_publish_rejects_files_the_vmm_did_not_write() -> Result<()> {
+    let uid = rustix::process::getuid().as_raw();
+    let temp = tempfile::tempdir()?;
+    let other_vm = temp.path().join("other-vm-memory");
+    fs::write(&other_vm, b"another sandbox")?;
+    let output = temp.path().join("snapshot-output");
+    fs::create_dir(&output)?;
+    let directory = open_directory_nofollow(&output)?;
+    let rejection =
+        |name: &str, uid: u32| format!("{:#}", open_vmm_file(&directory, name, uid).unwrap_err());
+    for name in ["state", "memory"] {
+        let path = output.join(name);
+        std::os::unix::fs::symlink(&other_vm, &path)?;
+        let error = open_vmm_file(&directory, name, uid).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<rustix::io::Errno>(),
+            Some(&rustix::io::Errno::LOOP)
+        );
+        fs::remove_file(&path)?;
+
+        fs::hard_link(&other_vm, &path)?;
+        assert!(rejection(name, uid).contains("has 2 links"));
+        fs::remove_file(&path)?;
+
+        #[cfg(target_os = "linux")]
+        {
+            rustix::fs::mkfifoat(&directory, name, rustix::fs::Mode::RUSR)?;
+            assert!(rejection(name, uid).contains("is not a regular file"));
+            fs::remove_file(&path)?;
+        }
+
+        fs::create_dir(&path)?;
+        assert!(rejection(name, uid).contains("is not a regular file"));
+        fs::remove_dir(&path)?;
+
+        fs::write(&path, b"snapshot")?;
+        assert!(rejection(name, uid + 1).contains(&format!("owned by uid {uid}, not {}", uid + 1)));
+        let (mut file, metadata) = open_vmm_file(&directory, name, uid)?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+        assert_eq!((contents.as_slice(), metadata.len()), (&b"snapshot"[..], 8));
+    }
+    let linked_output = temp.path().join("linked-output");
+    std::os::unix::fs::symlink(&output, &linked_output)?;
+    assert!(open_directory_nofollow(&linked_output).is_err());
+    Ok(())
+}
+
+#[test]
+fn snapshot_source_overlay_must_be_the_vms_own_disk() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: temp.path().to_path_buf(),
+        jailer_uid_base: rustix::process::getuid().as_raw(),
+        ..Default::default()
+    };
+    let mut record = MachineRecord {
+        machine_id: "fc-0123456789abcdef-01234567".to_string(),
+        spec_hash: "spec".to_string(),
+        runtime: test_runtime(),
+        resolved_image: "/images/base.ext4".to_string(),
+        slot: 0,
+        network_enabled: false,
+        workspace_id: None,
+        resource_paths: Vec::new(),
+        idle_ttl_seconds: None,
+        snapshot_template: None,
+        snapshot_network_slot: None,
+    };
+    let read = |record: &MachineRecord| -> Result<Vec<u8>> {
+        let mut contents = Vec::new();
+        open_source_overlay(&config, record)?
+            .0
+            .read_to_end(&mut contents)?;
+        Ok(contents)
+    };
+    let root = jail_root(&config, &record.machine_id);
+    fs::create_dir_all(&root)?;
+    let overlay = root.join("overlay.ext4");
+    let other_vm = temp.path().join("other-vm.ext4");
+    fs::write(&other_vm, b"another sandbox")?;
+    std::os::unix::fs::symlink(&other_vm, &overlay)?;
+    assert!(read(&record).is_err());
+    fs::remove_file(&overlay)?;
+    fs::write(&overlay, b"fresh disk")?;
+    assert_eq!(read(&record)?, b"fresh disk");
+
+    record.snapshot_template = Some(SnapshotTemplateReference {
+        key: "a".repeat(64),
+        lifecycle: SnapshotTemplateLifecycle::Machine,
+    });
+    let cow = snapshot_cow_path(&config, &record.machine_id);
+    fs::create_dir_all(cow.parent().context("copy-on-write disk has no parent")?)?;
+    fs::write(&cow, b"clone disk")?;
+    fs::remove_file(&overlay)?;
+    std::os::unix::fs::symlink(&cow, &overlay)?;
+    assert!(read(&record).is_err());
+    fs::remove_file(&overlay)?;
+    fs::copy(&cow, &overlay)?;
+    assert!(read(&record).is_err());
+    fs::remove_file(&overlay)?;
+    fs::hard_link(&cow, &overlay)?;
+    assert_eq!(read(&record)?, b"clone disk");
+    Ok(())
+}
+
+#[test]
+fn snapshot_sealing_never_follows_a_symlink() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sentinel = temp.path().join("host-file");
+    fs::write(&sentinel, b"host file")?;
+    fs::set_permissions(&sentinel, Permissions::from_mode(0o640))?;
+    let identity = |path: &Path| -> Result<(u32, u32, u32)> {
+        let metadata = fs::metadata(path)?;
+        Ok((metadata.uid(), metadata.gid(), metadata.mode()))
+    };
+    let before = identity(&sentinel)?;
+    for name in ["base.ext4", SNAPSHOT_LEASE_FILE] {
+        let staging = temp.path().join(format!("staging-{name}"));
+        fs::create_dir(&staging)?;
+        std::os::unix::fs::symlink(&sentinel, staging.join(name))?;
+        let sealed = if name == SNAPSHOT_LEASE_FILE {
+            vec![]
+        } else {
+            vec![name]
+        };
+        let error = seal_snapshot_files(&staging, &sealed).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<rustix::io::Errno>(),
+            Some(&rustix::io::Errno::LOOP)
+        );
+        assert_eq!(identity(&sentinel)?, before);
+    }
+    let linked_staging = temp.path().join("linked-staging");
+    std::os::unix::fs::symlink(temp.path().join("staging-base.ext4"), &linked_staging)?;
+    assert!(seal_snapshot_files(&linked_staging, &[]).is_err());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires TMPDIR on XFS with reflinks enabled"]
+fn snapshot_publish_clones_sparse_vmm_files_exactly() -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    fn data_ranges(file: &File) -> Result<Vec<(u64, u64)>> {
+        let length = file.metadata()?.len();
+        let mut ranges = Vec::new();
+        let mut offset = 0;
+        while offset < length {
+            let start = match rustix::fs::seek(file, rustix::fs::SeekFrom::Data(offset)) {
+                Ok(start) => start,
+                Err(rustix::io::Errno::NXIO) => break,
+                Err(error) => return Err(error.into()),
+            };
+            offset = rustix::fs::seek(file, rustix::fs::SeekFrom::Hole(start))?;
+            ranges.push((start, offset));
+        }
+        Ok(ranges)
+    }
+
+    let uid = rustix::process::getuid().as_raw();
+    let temp = tempfile::tempdir()?;
+    let output = temp.path().join("snapshot-output");
+    let staging = temp.path().join("staging");
+    fs::create_dir(&output)?;
+    fs::create_dir(&staging)?;
+    fs::write(output.join("state"), b"firecracker microvm state")?;
+    let memory = File::create(output.join("memory"))?;
+    memory.set_len(64 * 1024 * 1024)?;
+    memory.write_all_at(&[1; 64 * 1024], 0)?;
+    memory.write_all_at(&[2; 64 * 1024], 40 * 1024 * 1024)?;
+    memory.sync_all()?;
+    let directory = open_directory_nofollow(&output)?;
+    for name in ["state", "memory"] {
+        reflink_file(
+            &open_vmm_file(&directory, name, uid)?.0,
+            &staging.join(name),
+        )?;
+        assert_eq!(fs::read(staging.join(name))?, fs::read(output.join(name))?);
+    }
+    let clone = File::open(staging.join("memory"))?;
+    let ranges = data_ranges(&clone)?;
+    assert_eq!(ranges, data_ranges(&memory)?);
+    assert!(ranges.iter().map(|(start, end)| end - start).sum::<u64>() < 8 * 1024 * 1024);
+    Ok(())
 }
 
 fn test_shared(

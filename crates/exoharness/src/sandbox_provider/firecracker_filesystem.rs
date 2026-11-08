@@ -219,18 +219,67 @@ fn publish_capture(
     )
 }
 
+/// The host-owned file each jailed disk is hard-linked from, in `disk_names`
+/// order.
+fn host_disk_links(
+    config: &FirecrackerConfig,
+    source: &MachineRecord,
+    request: &SandboxRequest,
+) -> Result<Vec<Option<PathBuf>>> {
+    let mut links = vec![overlay_host_link(config, source)];
+    if !request.spec.durable_file_systems.is_empty() {
+        let workspace = source
+            .workspace_id
+            .as_ref()
+            .context("filesystem capture source has no workspace disk")?;
+        links.push(Some(
+            config
+                .state_root
+                .join("workspaces")
+                .join(format!("{workspace}.ext4")),
+        ));
+    }
+    for mount in &request.spec.mounts {
+        links.push(Some(resource_disk(
+            config,
+            request.scope,
+            &mount.host_path,
+        )?));
+    }
+    Ok(links)
+}
+
 fn capture_disks(
     config: &FirecrackerConfig,
     source: &MachineRecord,
+    host_links: &[Option<PathBuf>],
     mut manifest: FilesystemManifest,
     suspend: bool,
 ) -> Result<SnapshotPayload> {
+    let names = manifest.layout.disk_names();
+    ensure!(
+        names.len() == host_links.len(),
+        "filesystem capture disk links do not match its layout"
+    );
     let (temporary, staging_lease) = manifest.staging_directory(config)?;
+    // The VMM can replace the shared base image's name in its jail, so the base
+    // always comes from the host's immutable image cache.
+    fs::hard_link(&source.resolved_image, temporary.path().join("base.ext4"))?;
     let root = jail_root(config, &source.machine_id);
-    fs::hard_link(root.join("rootfs.ext4"), temporary.path().join("base.ext4"))?;
+    let jail = open_directory_nofollow(&root)?;
+    let uid = jailer_uid(config, source)?;
+    let disks = names
+        .iter()
+        .zip(host_links)
+        .map(|(name, host_link)| {
+            open_jailed_disk(&jail, name, uid, host_link.as_deref())
+                .map(|(disk, _)| disk)
+                .with_context(|| format!("capturing required filesystem disk {name}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let captured = with_paused_snapshot_source(&root, &source.machine_id, suspend, || {
-        for name in manifest.layout.disk_names() {
-            copy_sparse_reflink(&root.join(&name), &temporary.path().join(&name))
+        for (name, disk) in names.iter().zip(&disks) {
+            reflink_file(disk, &temporary.path().join(name))
                 .with_context(|| format!("capturing required filesystem disk {name}"))?;
             manifest
                 .disk_sizes
@@ -552,20 +601,21 @@ pub(super) async fn snapshot_filesystem(
         let capture_shared = Arc::clone(&shared);
         let source_for_capture = source.clone();
         let payload = tokio::task::spawn_blocking(move || {
+            let host_links =
+                host_disk_links(&capture_shared.config, &source_for_capture, &request)?;
             let manifest = FilesystemManifest {
                 template,
                 key: new_capture_key(),
                 sandbox_id: request.sandbox_id,
-                base_image_sha256: capture_shared.base_image_digest(
-                    &jail_root(&capture_shared.config, &source_for_capture.machine_id)
-                        .join("rootfs.ext4"),
-                )?,
+                base_image_sha256: capture_shared
+                    .base_image_digest(Path::new(&source_for_capture.resolved_image))?,
                 layout,
                 disk_sizes: Vec::new(),
             };
             capture_disks(
                 &capture_shared.config,
                 &source_for_capture,
+                &host_links,
                 manifest,
                 suspend,
             )
