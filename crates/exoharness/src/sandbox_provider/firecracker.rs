@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader as StdBufReader, Read, Seek, SeekFrom, Write};
 use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, fchown};
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -2899,6 +2899,77 @@ fn copy_sparse_reflink(source: &Path, destination: &Path) -> Result<()> {
     copy_sparse_with_mode(source, destination, SparseCopyMode::ReflinkRequired)
 }
 
+/// Clones an open file into a new file, as `cp --reflink=always` does, so a
+/// file the VMM can rename is never reopened by path.
+#[cfg(target_os = "linux")]
+#[tracing::instrument(name = "firecracker.copy_snapshot_file", skip_all)]
+fn reflink_file(source: &File, destination: &Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+        .with_context(|| format!("creating {}", destination.display()))?;
+    rustix::fs::ioctl_ficlone(&target, source)
+        .with_context(|| format!("reflinking {}", destination.display()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reflink_file(_source: &File, _destination: &Path) -> Result<()> {
+    bail!("Firecracker sandbox execution is only supported on Linux")
+}
+
+fn open_directory_nofollow(path: &Path) -> Result<std::os::fd::OwnedFd> {
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .with_context(|| format!("opening directory {}", path.display()))
+}
+
+/// Opens a file the jailed VMM wrote, for host root to read. A compromised
+/// VMM can replace any name in a directory it owns with a link to another
+/// sandbox's files, so the open never follows a symlink, and the inode must be
+/// a regular file owned by the VMM's `uid` with no other name. The checks run
+/// on the descriptor, so a later rename cannot change what is read.
+fn open_vmm_file(
+    directory: impl std::os::fd::AsFd,
+    name: &str,
+    uid: u32,
+) -> Result<(File, fs::Metadata)> {
+    // O_NONBLOCK keeps a planted FIFO from blocking the open.
+    let file = File::from(
+        rustix::fs::openat(
+            directory,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .with_context(|| format!("opening VMM file {name}"))?,
+    );
+    let metadata = file.metadata()?;
+    ensure!(metadata.is_file(), "VMM file {name} is not a regular file");
+    ensure!(
+        metadata.uid() == uid,
+        "VMM file {name} is owned by uid {}, not {uid}",
+        metadata.uid()
+    );
+    ensure!(
+        metadata.nlink() == 1,
+        "VMM file {name} has {} links",
+        metadata.nlink()
+    );
+    Ok((file, metadata))
+}
+
 fn binary_version(path: &Path) -> Result<String> {
     let output = Command::new(path)
         .arg("--version")
@@ -4876,6 +4947,25 @@ fn seal_snapshot_files(directory: &Path, names: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Opens the snapshot source's writable disk. A clone's jailed disk is a hard
+/// link to its host-owned copy-on-write file, so only a VM that created its
+/// disk inside the jail has it read from there.
+fn open_source_overlay(
+    config: &FirecrackerConfig,
+    source: &MachineRecord,
+) -> Result<(File, fs::Metadata)> {
+    if source.snapshot_template.is_some() {
+        let file = File::open(snapshot_cow_path(config, &source.machine_id))?;
+        let metadata = file.metadata()?;
+        return Ok((file, metadata));
+    }
+    open_vmm_file(
+        open_directory_nofollow(&jail_root(config, &source.machine_id))?,
+        "overlay.ext4",
+        jailer_uid(config, source)?,
+    )
+}
+
 #[tracing::instrument(name = "firecracker.capture_template", skip_all)]
 fn capture_snapshot_template(
     config: &FirecrackerConfig,
@@ -4905,8 +4995,8 @@ fn capture_snapshot_template(
         .open(config.state_root.join("snapshot-capture.lock"))?;
     flock(&capture_lock, FlockOperation::LockExclusive)?;
     reap_orphaned_fork_snapshot_templates_blocking(config)?;
-    let root = jail_root(config, &source.machine_id);
-    let disk_bytes = fs::metadata(root.join("overlay.ext4"))?.len();
+    let (overlay, overlay_metadata) = open_source_overlay(config, source)?;
+    let disk_bytes = overlay_metadata.len();
     let capture_bytes = u64::from(source.runtime.memory_mib)
         .checked_mul(1024 * 1024)
         .and_then(|bytes| bytes.checked_add(SNAPSHOT_STATE_RESERVE_BYTES))
@@ -4943,9 +5033,12 @@ fn capture_snapshot_template(
     let output = root.join(&output_name);
     remove_directory_if_present(&output)?;
     fs::create_dir(&output)?;
+    // The VMM owns the jail root and can swap `output` for a symlink, so it
+    // is chowned, linked into, and read only through this descriptor.
+    let output_dir = open_directory_nofollow(&output)?;
     let uid = jailer_uid(config, source)?;
-    chown(&output, Some(uid), Some(uid))?;
-    fs::set_permissions(&output, Permissions::from_mode(0o700))?;
+    fchown(&output_dir, Some(uid), Some(uid))?;
+    rustix::fs::fchmod(&output_dir, rustix::fs::Mode::RWXU)?;
 
     let api = wait_for_firecracker_api(&root, &source.machine_id)?;
     let snapshot_path = format!("/{output_name}/state");
@@ -4965,14 +5058,6 @@ fn capture_snapshot_template(
             copy_sparse_reflink(&base, &memory)?;
             chown(&memory, Some(uid), Some(uid))?;
             fs::set_permissions(&memory, Permissions::from_mode(0o600))?;
-            let output_dir = rustix::fs::open(
-                &output,
-                rustix::fs::OFlags::RDONLY
-                    | rustix::fs::OFlags::DIRECTORY
-                    | rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::CLOEXEC,
-                rustix::fs::Mode::empty(),
-            )?;
             rustix::fs::linkat(
                 rustix::fs::CWD,
                 &memory,
@@ -5005,19 +5090,19 @@ fn capture_snapshot_template(
             )
             .context("creating Firecracker snapshot")
         })?;
-        let memory = fs::metadata(output.join("memory"))?;
+        let (memory, metadata) = open_vmm_file(&output_dir, "memory", uid)?;
         tracing::info!(
-            memory_bytes = memory.len(),
-            allocated_bytes = memory.blocks() * 512,
+            memory_bytes = metadata.len(),
+            allocated_bytes = metadata.blocks() * 512,
             "captured Firecracker snapshot memory"
         );
         // Only the disk copy must happen inside the pause window: the overlay
         // has to match the memory image byte-for-byte, and the source starts
         // writing to it again the moment it resumes.
-        copy_sparse_reflink(&root.join("overlay.ext4"), &temporary.join("overlay.ext4"))?;
-        Ok::<(), anyhow::Error>(())
+        reflink_file(&overlay, &temporary.join("overlay.ext4"))?;
+        Ok::<File, anyhow::Error>(memory)
     });
-    let result = result.and_then(|()| {
+    let result = result.and_then(|memory| {
         // Copy -- never hard-link -- the snapshot out of the source VM's jail.
         // The state and memory files were created by the jailed VMM under its
         // unprivileged uid, so a compromised VMM can hold an open fd to them; a
@@ -5026,9 +5111,9 @@ fn capture_snapshot_template(
         // trusted VMM input when a clone loads them. The copy runs after the
         // source resumed, so it costs no pause time, and reflink makes it
         // metadata-only on XFS/btrfs.
-        for name in ["state", "memory"] {
-            copy_sparse_reflink(&output.join(name), &temporary.join(name))?;
-        }
+        let (state, _) = open_vmm_file(&output_dir, "state", uid)?;
+        reflink_file(&state, &temporary.join("state"))?;
+        reflink_file(&memory, &temporary.join("memory"))?;
         seal_snapshot_files(&temporary, &["state", "memory", "overlay.ext4"])?;
         if lifecycle == SnapshotTemplateLifecycle::Machine {
             let marker = temporary.join(SNAPSHOT_FORK_TEMPLATE_FILE);
