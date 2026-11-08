@@ -752,6 +752,78 @@ async fn vsock_request_uses_firecracker_handshake_and_framing() {
     server.await.unwrap();
 }
 
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "Firecracker sandbox execution is only supported on Linux"
+)]
+async fn process_termination_survives_wait_cleanup_and_one_shot_shutdown() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for completed in [false, true] {
+            for one_shot in [false, true] {
+                let directory = tempfile::tempdir()?;
+                let socket = directory.path().join("guest.vsock");
+                let listener = UnixListener::bind(&socket)?;
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await?;
+                    let mut stream = AsyncBufReader::new(stream);
+                    let mut handshake = String::new();
+                    stream.read_line(&mut handshake).await?;
+                    assert_eq!(handshake, "CONNECT 10052\n");
+                    stream.get_mut().write_all(b"OK 1073741824\n").await?;
+                    let mut stream = stream.into_inner();
+                    let length = stream.read_u32().await? as usize;
+                    let mut payload = vec![0; length];
+                    stream.read_exact(&mut payload).await?;
+                    let request: Message<ProtocolGuestRequest<()>> =
+                        serde_json::from_slice(&payload)?;
+                    assert!(matches!(
+                        request.payload,
+                        ProtocolGuestRequest::KillProcess { process_id }
+                            if process_id == "test-process"
+                    ));
+                    let response = serde_json::to_vec(&Message::new(GuestResponse::ok()))?;
+                    stream.write_u32(response.len() as u32).await?;
+                    stream.write_all(&response).await?;
+                    Ok::<(), anyhow::Error>(())
+                });
+                let shared = test_shared(
+                    FirecrackerConfig {
+                        state_root: directory.path().into(),
+                        ..Default::default()
+                    },
+                    HashMap::new(),
+                )?;
+                let cleanup = Arc::new(ProcessCleanup {
+                    guest: GuestClient::new(shared, socket),
+                    process_id: "test-process".into(),
+                    machine_id: one_shot.then(|| "fc-termination-test".into()),
+                    terminated: tokio::sync::Mutex::new(false),
+                });
+                let wait: futures::future::BoxFuture<'static, Result<i32>> = if completed {
+                    Box::pin(async { Ok(0) })
+                } else {
+                    Box::pin(std::future::pending())
+                };
+                let waiter = ProcessWait {
+                    wait,
+                    cleanup: Some(cleanup.clone()),
+                };
+                if completed {
+                    assert_eq!(waiter.await?, 0);
+                } else {
+                    drop(waiter);
+                }
+                crate::SandboxProcessControl::terminate(cleanup.as_ref()).await?;
+                server.await??;
+                crate::SandboxProcessControl::terminate(cleanup.as_ref()).await?;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await?
+}
+
 #[test]
 fn deleted_snapshot_waits_for_restore_lease_and_refuses_new_restores() {
     let directory = tempfile::tempdir().unwrap();

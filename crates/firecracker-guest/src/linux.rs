@@ -34,6 +34,7 @@ const MAX_RECV_BYTES: usize = 1024 * 1024;
 const MAX_QUEUED_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CAPTURE_BYTES: usize = 4 * 1024 * 1024;
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(45);
+const PROCESS_TERMINATION_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Request = GuestRequest<BridgeRequest>;
 
@@ -230,12 +231,49 @@ fn reap_orphans() {
     }
 }
 
+#[derive(Default)]
+struct ProcessExit {
+    result: Mutex<Option<Result<(), String>>>,
+    ready: Condvar,
+}
+
+impl ProcessExit {
+    fn record(&self, result: &std::io::Result<std::process::ExitStatus>) {
+        *self.result.lock().expect("exit result lock poisoned") =
+            Some(result.as_ref().map(|_| ()).map_err(ToString::to_string));
+        self.ready.notify_all();
+    }
+
+    fn is_complete(&self) -> Result<bool, String> {
+        Ok(self
+            .result
+            .lock()
+            .map_err(|_| "exit result lock poisoned")?
+            .is_some())
+    }
+
+    fn wait(&self, timeout: Duration) -> Result<(), String> {
+        let result = self
+            .result
+            .lock()
+            .map_err(|_| "exit result lock poisoned")?;
+        let (result, _) = self
+            .ready
+            .wait_timeout_while(result, timeout, |result| result.is_none())
+            .map_err(|_| "exit result lock poisoned")?;
+        result
+            .as_ref()
+            .ok_or_else(|| "timed out waiting for process termination".to_string())?
+            .clone()
+    }
+}
+
 struct ManagedProcess {
     process_group: i32,
     stdin: Mutex<Option<Box<dyn Write + Send>>>,
     terminal: Option<File>,
     events: Arc<EventQueue>,
-    exited: AtomicBool,
+    exit: ProcessExit,
 }
 
 impl ManagedProcess {
@@ -245,7 +283,10 @@ impl ManagedProcess {
         env: &HashMap<String, String>,
     ) -> Result<Arc<Self>, String> {
         validate_command(argv, cwd)?;
-        let mut command = command(argv, cwd, env);
+        Self::spawn_command(command(argv, cwd, env))
+    }
+
+    fn spawn_command(mut command: Command) -> Result<Arc<Self>, String> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -259,7 +300,7 @@ impl ManagedProcess {
             stdin: Mutex::new(Some(Box::new(stdin))),
             terminal: None,
             events: Arc::new(EventQueue::default()),
-            exited: AtomicBool::new(false),
+            exit: ProcessExit::default(),
         });
         let stdout_thread = stream_thread(stdout, Arc::clone(&process.events), true);
         let stderr_thread = stream_thread(stderr, Arc::clone(&process.events), false);
@@ -269,7 +310,7 @@ impl ManagedProcess {
             drop(registration);
             let stdout_result = stdout_thread.join();
             let stderr_result = stderr_thread.join();
-            wait_process.exited.store(true, Ordering::Release);
+            wait_process.exit.record(&result);
             match result {
                 Ok(status) if stdout_result.is_ok() && stderr_result.is_ok() => {
                     wait_process.events.push(ProcessEvent::Exit {
@@ -313,7 +354,7 @@ impl ManagedProcess {
             stdin: Mutex::new(Some(Box::new(master))),
             terminal: Some(terminal),
             events: Arc::new(EventQueue::default()),
-            exited: AtomicBool::new(false),
+            exit: ProcessExit::default(),
         });
         let output_thread = terminal_stream_thread(output, Arc::clone(&process.events));
         let wait_process = Arc::clone(&process);
@@ -321,7 +362,7 @@ impl ManagedProcess {
             let result = child.wait();
             drop(registration);
             let output_result = output_thread.join();
-            wait_process.exited.store(true, Ordering::Release);
+            wait_process.exit.record(&result);
             match result {
                 Ok(status) if output_result.is_ok() => {
                     wait_process.events.push(ProcessEvent::Exit {
@@ -340,7 +381,7 @@ impl ManagedProcess {
     }
 
     fn write(&self, encoded: &str) -> Result<(), String> {
-        if self.exited.load(Ordering::Acquire) {
+        if self.exit.is_complete()? {
             return Err("process is not running".to_string());
         }
         let bytes = STANDARD
@@ -364,22 +405,24 @@ impl ManagedProcess {
             .as_ref()
             .ok_or("process does not have a terminal")?;
         set_terminal_size(terminal.as_raw_fd(), size)?;
-        if !self.exited.load(Ordering::Acquire) {
-            let result = unsafe { libc::kill(-self.process_group, libc::SIGWINCH) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(error.to_string());
-                }
+        let result = unsafe { libc::kill(-self.process_group, libc::SIGWINCH) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.to_string());
             }
         }
         Ok(())
     }
 
-    fn kill(&self) -> Result<(), String> {
-        if self.exited.load(Ordering::Acquire) {
-            return Ok(());
+    fn terminate(&self) -> Result<(), String> {
+        if !self.exit.is_complete()? {
+            self.kill()?;
         }
+        self.exit.wait(PROCESS_TERMINATION_TIMEOUT)
+    }
+
+    fn kill(&self) -> Result<(), String> {
         // Every managed command is a process-group leader, so a kill cannot
         // leave attacker-controlled descendants behind in the microVM.
         let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
@@ -545,16 +588,22 @@ impl AgentState {
 
     fn kill_process(&self, process_id: &str) -> Response {
         let process = match self.processes.lock() {
-            Ok(mut processes) => processes.remove(process_id),
+            Ok(processes) => processes.get(process_id).cloned(),
             Err(_) => return Response::error("process map lock poisoned"),
         };
         let Some(process) = process else {
-            return Response::error(format!("unknown process: {process_id}"));
+            return Response::ok();
         };
-        match process.kill() {
-            Ok(()) => Response::ok(),
-            Err(error) => Response::error(error),
+        if let Err(error) = process.terminate() {
+            return Response::error(error);
         }
+        match self.processes.lock() {
+            Ok(mut processes) => {
+                processes.remove(process_id);
+            }
+            Err(_) => return Response::error("process map lock poisoned"),
+        }
+        Response::ok()
     }
 }
 
@@ -1567,6 +1616,139 @@ mod tests {
         let seconds = sync_clock(u64::MAX, 0);
         assert!(!seconds.ok);
         assert!(seconds.error.unwrap().contains("invalid guest clock time"));
+    }
+
+    #[test]
+    fn termination_wait_is_bounded() {
+        let exit = ProcessExit::default();
+        let start = Instant::now();
+        assert!(
+            exit.wait(Duration::from_millis(10))
+                .unwrap_err()
+                .contains("timed out")
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn kill_and_terminate_remove_descendants_after_leader_exit() {
+        let mut previous = 0;
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_CHILD_SUBREAPER, &mut previous) },
+            0
+        );
+        assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
+        struct GroupCleanup(i32);
+        impl Drop for GroupCleanup {
+            fn drop(&mut self) {
+                if unsafe { libc::kill(-self.0, libc::SIGKILL) } != 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::ESRCH)
+                    );
+                }
+            }
+        }
+        for terminate in [false, true] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 600 & printf ready"]);
+            command.process_group(0);
+            let process = ManagedProcess::spawn_command(command).unwrap();
+            let _cleanup = GroupCleanup(process.process_group);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while unsafe { libc::kill(process.process_group, 0) } == 0 {
+                assert!(Instant::now() < deadline, "leader did not exit");
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(unsafe { libc::kill(-process.process_group, 0) }, 0);
+            if terminate {
+                process.terminate().unwrap();
+            } else {
+                process.kill().unwrap();
+            }
+            loop {
+                let mut status = 0;
+                unsafe { libc::waitpid(-process.process_group, &mut status, libc::WNOHANG) };
+                if unsafe { libc::kill(-process.process_group, 0) } != 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::ESRCH)
+                    );
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "descendant survived group termination"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+            let mut exited = false;
+            while !exited {
+                let (_, observed) = process.events.recv(Duration::from_millis(10)).unwrap();
+                exited = observed;
+                assert!(Instant::now() < deadline, "exit event was lost");
+            }
+        }
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, previous) },
+            0
+        );
+    }
+
+    #[test]
+    fn normal_exit_releases_entry_and_preserves_detached_descendant() {
+        use std::os::unix::net::UnixStream;
+
+        let (mut output, writer) = UnixStream::pair().unwrap();
+        output
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "(sleep 0.3; printf late >&3) >/dev/null 2>&1 & printf early",
+        ]);
+        command.process_group(0);
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(writer.as_raw_fd(), 3) < 0 || libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let process = ManagedProcess::spawn_command(command).unwrap();
+        let released = Arc::downgrade(&process);
+        let state = AgentState::default();
+        state
+            .processes
+            .lock()
+            .unwrap()
+            .insert("test".into(), process);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let response = state.process_bridge(
+                "test",
+                BridgeRequest::Recv {
+                    timeout_seconds: Some(0.01),
+                },
+            );
+            assert!(response.ok);
+            if response
+                .events
+                .is_some_and(|events| events.iter().any(ProcessEventExt::is_exit))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "exit was not delivered");
+        }
+        assert!(state.processes.lock().unwrap().is_empty());
+        assert!(state.kill_process("test").ok);
+        assert!(state.kill_process("test").ok);
+        let mut late = [0; 4];
+        output.read_exact(&mut late).unwrap();
+        assert_eq!(&late, b"late");
+        assert!(released.upgrade().is_none());
     }
 
     #[test]

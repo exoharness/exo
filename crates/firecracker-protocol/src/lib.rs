@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GuestResourceMount {
     pub device: String,

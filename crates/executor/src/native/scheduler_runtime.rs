@@ -608,6 +608,7 @@ mod tests {
     impl SandboxProcess for HangingSandboxProcess {
         fn into_parts(self: Box<Self>) -> exoharness::SandboxProcessParts {
             exoharness::SandboxProcessParts {
+                control: None,
                 stdout: Box::pin(Cursor::new(Vec::new())),
                 stderr: Box::pin(Cursor::new(Vec::new())),
                 stdin: Box::pin(Cursor::new(Vec::new())),

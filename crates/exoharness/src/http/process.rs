@@ -93,6 +93,7 @@ pub(super) fn open(
         }
     }));
     Box::new(LiveHttpSandboxProcess(SandboxProcessParts {
+        control: None,
         stdout: reader(stdout_rx),
         stderr: reader(stderr_rx),
         stdin: Box::pin(ProcessInput(stdin_tx)),

@@ -1110,6 +1110,7 @@ impl LimaBridgeConnection {
             result
         });
         Ok(SandboxProcessParts {
+            control: None,
             stdout: Box::pin(bridge_read_stream(stdout_receiver).compat()),
             stderr: Box::pin(bridge_read_stream(stderr_receiver).compat()),
             stdin: Box::pin(BridgeWriteStream::new(id, self.outgoing.clone()).compat_write()),

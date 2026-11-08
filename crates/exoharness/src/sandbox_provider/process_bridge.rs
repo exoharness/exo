@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -22,11 +23,13 @@ import base64
 import json
 import os
 import queue
+import signal
 import socket
 import socketserver
 import subprocess
 import sys
 import threading
+import time
 
 HOST = "127.0.0.1"
 PORT = 48765
@@ -75,9 +78,12 @@ class BridgeState:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
+            start_new_session=True,
         )
         self.events = queue.Queue()
         self.write_lock = threading.Lock()
+        self.exit_lock = threading.Lock()
+        self.exit_complete = False
         self.stdout_thread = threading.Thread(target=self._read_stream, args=("stdout", self.process.stdout), daemon=True)
         self.stderr_thread = threading.Thread(target=self._read_stream, args=("stderr", self.process.stderr), daemon=True)
         self.stdout_thread.start()
@@ -102,7 +108,9 @@ class BridgeState:
             exit_code = self.process.wait()
             self.stdout_thread.join()
             self.stderr_thread.join()
-            self.events.put({"type": "exit", "exit_code": exit_code})
+            with self.exit_lock:
+                self.exit_complete = True
+                self.events.put({"type": "exit", "exit_code": exit_code})
         except Exception as exc:
             self.events.put({"type": "error", "message": f"wait failed: {exc}"})
 
@@ -118,6 +126,20 @@ class BridgeState:
         with self.write_lock:
             if self.process.stdin:
                 self.process.stdin.close()
+
+    def terminate(self):
+        deadline = time.monotonic() + 20
+        with self.exit_lock:
+            if not self.exit_complete:
+                try:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        self.process.wait(timeout=max(0, deadline - time.monotonic()))
+        self.stdout_thread.join(timeout=max(0, deadline - time.monotonic()))
+        self.stderr_thread.join(timeout=max(0, deadline - time.monotonic()))
+        if self.stdout_thread.is_alive() or self.stderr_thread.is_alive():
+            raise RuntimeError("timed out draining terminated process")
 
     def recv(self, timeout):
         try:
@@ -164,6 +186,9 @@ class Handler(socketserver.BaseRequestHandler):
                 response = {"ok": True}
             elif kind == "close_stdin":
                 STATE.close_stdin()
+                response = {"ok": True}
+            elif kind == "terminate":
+                STATE.terminate()
                 response = {"ok": True}
             elif kind == "recv":
                 response = STATE.recv(float(request.get("timeout_seconds", 30)))
@@ -235,6 +260,15 @@ pub struct Request {
 }
 
 impl Request {
+    pub fn terminate() -> Self {
+        Self {
+            kind: "terminate",
+            data: None,
+            timeout_seconds: None,
+            size: None,
+        }
+    }
+
     pub fn ping() -> Self {
         Self {
             kind: "ping",
@@ -343,14 +377,16 @@ pub fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
     let (wait_tx, wait_rx) = oneshot::channel();
     let (error_tx, mut error_rx) = mpsc::unbounded_channel();
 
+    let exited = Arc::new(AtomicBool::new(false));
     let output_poller = spawn_output_poller(
         Arc::clone(&client),
         stdout_writer,
         stderr_writer,
         wait_tx,
         error_tx.clone(),
+        Arc::clone(&exited),
     );
-    let stdin_forwarder = spawn_stdin_forwarder(client, stdin_reader, error_tx);
+    let stdin_forwarder = spawn_stdin_forwarder(Arc::clone(&client), stdin_reader, error_tx);
     let tasks = [output_poller, stdin_forwarder].map(AbortOnDropHandle::new);
 
     let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
@@ -378,11 +414,48 @@ pub fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
         stderr: Box::pin(stderr_reader.compat()),
         stdin: Box::pin(stdin_writer.compat_write()),
         wait,
+        control: Some(Arc::new(ProcessBridgeControl {
+            client,
+            exited,
+            termination: tokio::sync::Mutex::new(()),
+        })),
+    }
+}
+
+struct ProcessBridgeControl {
+    client: Arc<dyn Client>,
+    exited: Arc<AtomicBool>,
+    termination: tokio::sync::Mutex<()>,
+}
+
+#[async_trait]
+impl crate::SandboxProcessControl for ProcessBridgeControl {
+    async fn terminate(&self) -> Result<()> {
+        let _termination = self.termination.lock().await;
+        if self.exited.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let response = self.client.request(Request::terminate()).await;
+        if self.exited.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let response = response?;
+        anyhow::ensure!(
+            response.ok,
+            "terminating sandbox process failed: {}",
+            response
+                .error
+                .as_deref()
+                .unwrap_or("missing acknowledgement")
+        );
+        self.exited.store(true, Ordering::Release);
+        Ok(())
     }
 }
 
 pub fn terminal_parts(client: Arc<dyn Client>) -> crate::SandboxTerminalParts {
     let crate::SandboxProcessParts {
+        control: _control,
         stdout,
         stderr,
         stdin,
@@ -421,9 +494,10 @@ fn spawn_output_poller(
     stderr_writer: tokio::io::DuplexStream,
     wait_tx: oneshot::Sender<i32>,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
+    exited: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = poll_output(client, stdout_writer, stderr_writer, wait_tx).await
+        if let Err(error) = poll_output(client, stdout_writer, stderr_writer, wait_tx, exited).await
             && error_tx.send(error).is_err()
         {
             tracing::debug!("process bridge waiter stopped before output error could be reported");
@@ -450,6 +524,7 @@ async fn poll_output(
     mut stdout_writer: tokio::io::DuplexStream,
     mut stderr_writer: tokio::io::DuplexStream,
     wait_tx: oneshot::Sender<i32>,
+    exited: Arc<AtomicBool>,
 ) -> Result<()> {
     loop {
         let response = client.request(Request::recv()).await?;
@@ -465,6 +540,7 @@ async fn poll_output(
                     write_bridge_output(&mut stderr_writer, &data, "stderr").await?;
                 }
                 Event::Exit { exit_code } => {
+                    exited.store(true, Ordering::Release);
                     if wait_tx.send(exit_code).is_err() {
                         tracing::debug!(
                             "process bridge waiter dropped before exit could be reported"
@@ -584,9 +660,54 @@ mod tests {
         }
     }
 
+    struct ScriptClient {
+        script_path: PathBuf,
+        fail_recv: AtomicBool,
+        recv_delay: Duration,
+    }
+
+    #[async_trait]
+    impl Client for ScriptClient {
+        async fn request(&self, request: Request) -> Result<Response> {
+            if request.kind == "recv" && self.fail_recv.swap(false, Ordering::AcqRel) {
+                anyhow::bail!("injected output transport failure");
+            }
+            if request.kind == "recv" {
+                tokio::time::sleep(self.recv_delay).await;
+            }
+            let output = bridge_client(&self.script_path, serde_json::to_string(&request)?).await?;
+            Ok(serde_json::from_slice(&output.stdout)?)
+        }
+    }
+
     struct BridgeFixture {
         _temp: TempDir,
         script_path: PathBuf,
+        port: u16,
+        _server: tokio::process::Child,
+    }
+
+    impl Drop for BridgeFixture {
+        fn drop(&mut self) {
+            use std::io::{Read, Write};
+            if let Ok(mut socket) = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], self.port)),
+                Duration::from_millis(100),
+            ) {
+                if let Err(error) = socket.write_all(b"{\"type\":\"terminate\"}") {
+                    tracing::debug!(%error, "test bridge already stopped");
+                }
+                if let Err(error) = socket.shutdown(std::net::Shutdown::Write) {
+                    tracing::debug!(%error, "test bridge already disconnected");
+                }
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(200)))
+                    .unwrap();
+                if let Err(error) = socket.read(&mut [0u8; 1]) {
+                    tracing::debug!(%error, "test bridge cleanup acknowledgement unavailable");
+                }
+            }
+        }
     }
 
     #[test]
@@ -668,6 +789,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminate_preserves_detached_descendant_after_exit_is_queued() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let port = unused_local_port();
+            let descendant = format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(600)"
+            );
+            let parent = format!(
+                "import subprocess,socket,time; subprocess.Popen(['python3','-c',{}],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nwhile True:\n try:\n  socket.create_connection(('127.0.0.1',{port}),timeout=0.1).close(); break\n except OSError: time.sleep(0.001)",
+                serde_json::to_string(&descendant).unwrap()
+            );
+            let probe = r#"
+import os,signal,socket,sys
+runtime = {"__name__": "test"}
+exec(sys.argv[1], runtime)
+state = runtime["BridgeState"]()
+try:
+    event = state.events.get(timeout=3)
+    assert event["type"] == "exit", event
+    state.events.put(event)
+    state.terminate()
+    with socket.create_connection(("127.0.0.1", int(sys.argv[2])), timeout=1):
+        pass
+finally:
+    try: os.killpg(state.process.pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+"#;
+            let output = Command::new("python3")
+                .args(["-c", probe, SCRIPT, &port.to_string()])
+                .env(
+                    "EXO_PROCESS_BRIDGE_ARGV_JSON",
+                    serde_json::to_string(&["python3", "-c", &parent]).unwrap(),
+                )
+                .kill_on_drop(true)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        })
+        .await
+        .expect("bridge completion race timed out");
+    }
+
+    #[tokio::test]
     async fn bridge_server_stops_after_exit_is_observed() {
         let bridge = start_bridge_for_python_command("import sys; sys.stdout.write('done')").await;
         let mut output = String::new();
@@ -682,6 +850,107 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn terminate_releases_listener_and_is_idempotent() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let port = unused_local_port();
+            let source = format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)"
+            );
+            let bridge = start_bridge_for_python_command(&source).await;
+            let mut parts = process_parts(Arc::new(ScriptClient {
+                script_path: bridge.script_path.clone(),
+                fail_recv: AtomicBool::new(false),
+                recv_delay: Duration::from_secs(1),
+            }));
+            let mut ready = [0; 6];
+            parts
+                .stdout
+                .read_exact(&mut ready)
+                .await
+                .expect("listener ready");
+            assert_eq!(&ready, b"ready\n");
+            futures::AsyncWriteExt::close(&mut parts.stdin)
+                .await
+                .expect("close stdin");
+            assert!(
+                TcpListener::bind(("127.0.0.1", port)).is_err(),
+                "stdin EOF unexpectedly stopped listener"
+            );
+            let (first, second) = tokio::join!(parts.terminate(), parts.terminate());
+            first.expect("terminate process");
+            second.expect("concurrent termination");
+            let _listener = TcpListener::bind(("127.0.0.1", port))
+                .expect("termination released port");
+            assert_eq!(parts.wait.await.expect("observe exit"), -9);
+            parts
+                .control
+                .expect("termination supported")
+                .terminate()
+                .await
+                .expect("termination after exit");
+        })
+        .await
+        .expect("termination regression timed out");
+    }
+
+    #[tokio::test]
+    async fn terminate_kills_descendant_listener_after_leader_exit() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let port = unused_local_port();
+            let descendant = format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); print('ready',flush=True); time.sleep(600)"
+            );
+            let source = format!(
+                "import subprocess; subprocess.Popen(['python3','-c',{}])",
+                serde_json::to_string(&descendant).unwrap()
+            );
+            let bridge = start_bridge_for_python_command(&source).await;
+            let mut parts = process_parts(Arc::new(ScriptClient {
+                script_path: bridge.script_path.clone(),
+                fail_recv: AtomicBool::new(false),
+                recv_delay: Duration::ZERO,
+            }));
+            let mut ready = [0; 6];
+            parts.stdout.read_exact(&mut ready).await.unwrap();
+            assert_eq!(&ready, b"ready\n");
+            parts.terminate().await.unwrap();
+            let _listener = TcpListener::bind(("127.0.0.1", port))
+                .expect("descendant listener survived termination");
+            assert_eq!(parts.wait.await.unwrap(), 0);
+        })
+        .await
+        .expect("descendant termination timed out");
+    }
+
+    #[tokio::test]
+    async fn terminate_still_works_after_output_transport_failure() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let port = unused_local_port();
+            let source = format!(
+                "import socket,time; s=socket.socket(); s.bind(('127.0.0.1',{port})); s.listen(); time.sleep(600)"
+            );
+            let bridge = start_bridge_for_python_command(&source).await;
+            while TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let parts = process_parts(Arc::new(ScriptClient {
+                script_path: bridge.script_path.clone(),
+                fail_recv: AtomicBool::new(true),
+                recv_delay: Duration::ZERO,
+            }));
+            let termination = parts.terminate();
+            parts.wait.await.expect_err("output monitor failed");
+            termination
+                .await
+                .expect("terminate independently of failed output monitor");
+            let _listener = TcpListener::bind(("127.0.0.1", port))
+                .expect("listener survived termination after monitor failure");
+        })
+        .await
+        .expect("termination regression timed out");
+    }
+
     async fn start_bridge_for_python_command(source: &str) -> BridgeFixture {
         let port = unused_local_port();
         let temp = tempdir().expect("create temp dir");
@@ -692,26 +961,23 @@ mod tests {
             .expect("write bridge script");
 
         let argv_json = serde_json::to_string(&vec!["python3", "-c", source]).expect("encode argv");
-        let mut server = Command::new("python3")
+        let server = Command::new("python3")
             .arg(&script_path)
             .arg("server")
             .env("EXO_PROCESS_BRIDGE_ARGV_JSON", argv_json)
             .env("EXO_PROCESS_BRIDGE_ENV_JSON", "{}")
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .expect("start bridge server");
 
         wait_for_ping(&script_path).await;
-        tokio::spawn(async move {
-            match server.wait().await {
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "process bridge test server wait failed"),
-            }
-        });
         BridgeFixture {
             _temp: temp,
             script_path,
+            port,
+            _server: server,
         }
     }
 
@@ -721,7 +987,8 @@ mod tests {
                 script_path,
                 json!({"type": "recv", "timeout_seconds": 1.0}).to_string(),
             )
-            .await;
+            .await
+            .expect("run bridge recv");
             let response: Response =
                 serde_json::from_slice(&response.stdout).expect("decode bridge recv response");
             for event in response.events {
@@ -765,20 +1032,21 @@ mod tests {
             .expect("run bridge ping")
     }
 
-    async fn bridge_client(script_path: &Path, request: String) -> std::process::Output {
+    async fn bridge_client(script_path: &Path, request: String) -> Result<std::process::Output> {
         let output = Command::new("python3")
             .arg(script_path)
+            .kill_on_drop(true)
             .arg("client")
             .arg(request)
             .output()
             .await
-            .expect("run bridge client");
-        assert!(
+            .context("run bridge client")?;
+        anyhow::ensure!(
             output.status.success(),
-            "bridge client failed: {}",
+            "bridge request failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        output
+        Ok(output)
     }
 
     fn unused_local_port() -> u16 {
