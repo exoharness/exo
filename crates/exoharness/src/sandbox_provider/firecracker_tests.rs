@@ -1508,6 +1508,10 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
     let configuration =
         firecracker_vm_configuration(&FirecrackerConfig::default(), &request, &record)?;
     assert!(
+        serde_json::to_string(&configuration)?
+            .contains(r#""metrics":{"metrics_path":"/firecracker.metrics"}"#)
+    );
+    assert!(
         !configuration
             .boot_source
             .boot_args
