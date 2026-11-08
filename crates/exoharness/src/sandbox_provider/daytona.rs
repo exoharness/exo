@@ -660,6 +660,7 @@ async fn start_process_in_sandbox(
     });
 
     Ok(crate::SandboxProcessParts {
+        control: None,
         stdout: Box::pin(stdout_reader.compat()),
         stderr: Box::pin(stderr_reader.compat()),
         stdin: Box::pin(stdin_writer.compat_write()),

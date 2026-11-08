@@ -2255,6 +2255,7 @@ pub(super) async fn prepare_sandbox_process(
         .await
         .with_context(|| format!("failed to start process in sandbox {}", request.sandbox_id))?;
     let SandboxProcessParts {
+        control: _control,
         stdout,
         stderr,
         stdin,

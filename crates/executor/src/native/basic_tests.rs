@@ -1260,6 +1260,7 @@ struct FakeSandboxProcess;
 impl SandboxProcess for FakeSandboxProcess {
     fn into_parts(self: Box<Self>) -> SandboxProcessParts {
         SandboxProcessParts {
+            control: None,
             stdout: Box::pin(Cursor::new(Vec::new())),
             stderr: Box::pin(Cursor::new(Vec::new())),
             stdin: Box::pin(Cursor::new(Vec::new())),
