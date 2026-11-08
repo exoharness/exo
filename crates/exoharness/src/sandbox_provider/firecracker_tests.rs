@@ -17,7 +17,7 @@ fn test_host_runtime() -> FirecrackerHostFingerprint {
     }
 }
 
-fn test_runtime() -> FirecrackerRuntimeFingerprint {
+pub(super) fn test_runtime() -> FirecrackerRuntimeFingerprint {
     test_host_runtime().for_resources(SandboxResourceShape::default())
 }
 
@@ -977,7 +977,7 @@ fn snapshot_publish_rejects_files_the_vmm_did_not_write() -> Result<()> {
 }
 
 #[test]
-fn snapshot_source_overlay_ignores_links_in_the_jail() -> Result<()> {
+fn snapshot_source_overlay_must_be_the_vms_own_disk() -> Result<()> {
     let temp = tempfile::tempdir()?;
     let config = FirecrackerConfig {
         state_root: temp.path().to_path_buf(),
@@ -1023,8 +1023,47 @@ fn snapshot_source_overlay_ignores_links_in_the_jail() -> Result<()> {
     fs::create_dir_all(cow.parent().context("copy-on-write disk has no parent")?)?;
     fs::write(&cow, b"clone disk")?;
     fs::remove_file(&overlay)?;
-    std::os::unix::fs::symlink(&other_vm, &overlay)?;
+    std::os::unix::fs::symlink(&cow, &overlay)?;
+    assert!(read(&record).is_err());
+    fs::remove_file(&overlay)?;
+    fs::copy(&cow, &overlay)?;
+    assert!(read(&record).is_err());
+    fs::remove_file(&overlay)?;
+    fs::hard_link(&cow, &overlay)?;
     assert_eq!(read(&record)?, b"clone disk");
+    Ok(())
+}
+
+#[test]
+fn snapshot_sealing_never_follows_a_symlink() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let sentinel = temp.path().join("host-file");
+    fs::write(&sentinel, b"host file")?;
+    fs::set_permissions(&sentinel, Permissions::from_mode(0o640))?;
+    let identity = |path: &Path| -> Result<(u32, u32, u32)> {
+        let metadata = fs::metadata(path)?;
+        Ok((metadata.uid(), metadata.gid(), metadata.mode()))
+    };
+    let before = identity(&sentinel)?;
+    for name in ["base.ext4", SNAPSHOT_LEASE_FILE] {
+        let staging = temp.path().join(format!("staging-{name}"));
+        fs::create_dir(&staging)?;
+        std::os::unix::fs::symlink(&sentinel, staging.join(name))?;
+        let sealed = if name == SNAPSHOT_LEASE_FILE {
+            vec![]
+        } else {
+            vec![name]
+        };
+        let error = seal_snapshot_files(&staging, &sealed).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<rustix::io::Errno>(),
+            Some(&rustix::io::Errno::LOOP)
+        );
+        assert_eq!(identity(&sentinel)?, before);
+    }
+    let linked_staging = temp.path().join("linked-staging");
+    std::os::unix::fs::symlink(temp.path().join("staging-base.ext4"), &linked_staging)?;
+    assert!(seal_snapshot_files(&linked_staging, &[]).is_err());
     Ok(())
 }
 

@@ -2932,6 +2932,22 @@ fn open_directory_nofollow(path: &Path) -> Result<std::os::fd::OwnedFd> {
     .with_context(|| format!("opening directory {}", path.display()))
 }
 
+fn open_nofollow(directory: impl std::os::fd::AsFd, name: &str) -> Result<File> {
+    // O_NONBLOCK keeps a planted FIFO from blocking the open.
+    Ok(File::from(
+        rustix::fs::openat(
+            directory,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .with_context(|| format!("opening {name}"))?,
+    ))
+}
+
 /// Opens a file the jailed VMM wrote, for host root to read. A compromised
 /// VMM can replace any name in a directory it owns with a link to another
 /// sandbox's files, so the open never follows a symlink, and the inode must be
@@ -2942,19 +2958,7 @@ fn open_vmm_file(
     name: &str,
     uid: u32,
 ) -> Result<(File, fs::Metadata)> {
-    // O_NONBLOCK keeps a planted FIFO from blocking the open.
-    let file = File::from(
-        rustix::fs::openat(
-            directory,
-            name,
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC,
-            rustix::fs::Mode::empty(),
-        )
-        .with_context(|| format!("opening VMM file {name}"))?,
-    );
+    let file = open_nofollow(directory, name)?;
     let metadata = file.metadata()?;
     ensure!(metadata.is_file(), "VMM file {name} is not a regular file");
     ensure!(
@@ -2966,6 +2970,30 @@ fn open_vmm_file(
         metadata.nlink() == 1,
         "VMM file {name} has {} links",
         metadata.nlink()
+    );
+    Ok((file, metadata))
+}
+
+/// Opens a disk in a VM's jail. A disk the host hard-linked into the jail from
+/// `host_link` has a second name, so instead of the single-link rule it must
+/// be that host-owned file's own inode.
+fn open_jailed_disk(
+    directory: impl std::os::fd::AsFd,
+    name: &str,
+    uid: u32,
+    host_link: Option<&Path>,
+) -> Result<(File, fs::Metadata)> {
+    let Some(host_link) = host_link else {
+        return open_vmm_file(directory, name, uid);
+    };
+    let host = fs::metadata(host_link)
+        .with_context(|| format!("reading host disk {}", host_link.display()))?;
+    let file = open_nofollow(directory, name)?;
+    let metadata = file.metadata()?;
+    ensure!(
+        metadata.is_file() && (metadata.dev(), metadata.ino()) == (host.dev(), host.ino()),
+        "jailed disk {name} is not a link to {}",
+        host_link.display()
     );
     Ok((file, metadata))
 }
@@ -4928,41 +4956,52 @@ fn with_paused_snapshot_source<T>(
     }
 }
 
+// Ownership and mode change through descriptors opened without following
+// links, so a symlink in the staging directory can never redirect them.
 fn seal_snapshot_files(directory: &Path, names: &[&str]) -> Result<()> {
+    let directory = open_directory_nofollow(directory)?;
     for name in names {
-        let path = directory.join(name);
-        chown(&path, Some(0), Some(0))?;
-        fs::set_permissions(&path, Permissions::from_mode(0o444))?;
-        File::open(path)?.sync_all()?;
+        let file = open_nofollow(&directory, name)?;
+        ensure!(
+            file.metadata()?.is_file(),
+            "snapshot file {name} is not a regular file"
+        );
+        fchown(&file, Some(0), Some(0))?;
+        file.set_permissions(Permissions::from_mode(0o444))?;
+        file.sync_all()?;
     }
-    let lease = directory.join(SNAPSHOT_LEASE_FILE);
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lease)?;
-    fs::set_permissions(lease, Permissions::from_mode(0o600))?;
-    file.sync_all()?;
+    let lease = File::from(rustix::fs::openat(
+        &directory,
+        SNAPSHOT_LEASE_FILE,
+        rustix::fs::OFlags::RDWR
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )?);
+    lease.set_permissions(Permissions::from_mode(0o600))?;
+    lease.sync_all()?;
     Ok(())
 }
 
-/// Opens the snapshot source's writable disk. A clone's jailed disk is a hard
-/// link to its host-owned copy-on-write file, so only a VM that created its
-/// disk inside the jail has it read from there.
+/// The host-owned file a VM's jailed overlay is hard-linked from: a clone's
+/// copy-on-write disk. Every other VM created its overlay inside the jail.
+fn overlay_host_link(config: &FirecrackerConfig, record: &MachineRecord) -> Option<PathBuf> {
+    record
+        .snapshot_template
+        .is_some()
+        .then(|| snapshot_cow_path(config, &record.machine_id))
+}
+
 fn open_source_overlay(
     config: &FirecrackerConfig,
     source: &MachineRecord,
 ) -> Result<(File, fs::Metadata)> {
-    if source.snapshot_template.is_some() {
-        let file = File::open(snapshot_cow_path(config, &source.machine_id))?;
-        let metadata = file.metadata()?;
-        return Ok((file, metadata));
-    }
-    open_vmm_file(
+    open_jailed_disk(
         open_directory_nofollow(&jail_root(config, &source.machine_id))?,
         "overlay.ext4",
         jailer_uid(config, source)?,
+        overlay_host_link(config, source).as_deref(),
     )
 }
 
