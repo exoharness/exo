@@ -69,6 +69,9 @@ pub(super) mod lima_storage;
 mod filesystem;
 pub use filesystem::FirecrackerFilesystemCapture;
 
+#[path = "firecracker_metrics.rs"]
+mod metrics;
+
 const GUEST_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PID_FILE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -470,6 +473,7 @@ struct FirecrackerVmConfiguration {
     network_interfaces: Vec<FirecrackerNetworkInterface>,
     vsock: FirecrackerVsock,
     entropy: FirecrackerEntropy,
+    metrics: FirecrackerMetricsConfiguration,
 }
 
 #[derive(Serialize)]
@@ -526,6 +530,11 @@ struct FirecrackerNetworkInterface {
 struct FirecrackerVsock {
     guest_cid: u32,
     uds_path: &'static str,
+}
+
+#[derive(Serialize)]
+struct FirecrackerMetricsConfiguration {
+    metrics_path: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -4062,7 +4071,13 @@ fn prepare_and_launch_blocking(
     // Keep the API available so fork() can pause and snapshot the running VM.
     // The config file still starts the VM atomically without a sequence of API
     // setup requests.
-    spawn_jailed_firecracker(config, record, &root, &["--config-file", "/vm-config.json"])?;
+    spawn_jailed_firecracker(
+        config,
+        &request.sandbox_id,
+        record,
+        &root,
+        &["--config-file", "/vm-config.json"],
+    )?;
     Ok(GuestReadiness::Signal(ready_listener))
 }
 
@@ -4152,6 +4167,7 @@ fn resource_disk(
 #[tracing::instrument(name = "firecracker.launch_vmm", skip_all)]
 fn spawn_jailed_firecracker(
     config: &FirecrackerConfig,
+    sandbox_id: &str,
     record: &MachineRecord,
     jail_root: &Path,
     firecracker_arguments: &[&str],
@@ -4221,21 +4237,42 @@ fn spawn_jailed_firecracker(
     let log_path = jail_root.join("firecracker.stderr");
     File::create(&log_path)?;
     fs::set_permissions(&log_path, Permissions::from_mode(0o600))?;
+    // Unlike a stdio pipe, the metrics FIFO does not tie the VMM to this
+    // process: Firecracker holds it open read-write, so a later controller can
+    // still adopt the VM. Only this process reads the VM's metrics.
+    let metrics = metrics::MetricsPipe::create(
+        &jailed_path_on_host(jail_root, metrics::JAILED_METRICS),
+        host_uid,
+        host_uid,
+    )?;
     // Deliberately do not pass --no-seccomp or a custom filter. Release builds'
     // embedded default filters are Firecracker's recommended production setting.
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/seccomp.md#default-filters-recommended
     let mut child = command
         .spawn()
         .context("launching Firecracker through jailer")?;
+    let sandbox_id = sandbox_id.to_owned();
     let machine_id = record.machine_id.clone();
-    std::thread::spawn(move || match child.wait() {
-        Ok(status) if !status.success() => {
-            tracing::warn!(machine_id, %status, "Firecracker process exited unsuccessfully");
-        }
-        Err(error) => {
-            tracing::warn!(machine_id, %error, "failed waiting for Firecracker process");
-        }
-        _ => {}
+    let pid_path = jail_root.join("firecracker.pid");
+    std::thread::spawn(move || {
+        // With --new-pid-ns the jailer exits as soon as it has written the
+        // host PID of the Firecracker process it cloned.
+        let launched = match child.wait() {
+            Ok(status) if status.success() => true,
+            Ok(status) => {
+                tracing::warn!(machine_id, %status, "Firecracker process exited unsuccessfully");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(machine_id, %error, "failed waiting for Firecracker process");
+                false
+            }
+        };
+        metrics.watch(
+            &sandbox_id,
+            &machine_id,
+            launched.then_some(pid_path.as_path()),
+        );
     });
     Ok(())
 }
@@ -4389,6 +4426,9 @@ fn firecracker_vm_configuration(
                     refill_time: 1000,
                 },
             },
+        },
+        metrics: FirecrackerMetricsConfiguration {
+            metrics_path: metrics::JAILED_METRICS,
         },
     })
 }
@@ -5114,7 +5154,16 @@ fn launch_snapshot_clone(
         fs::set_permissions(path, Permissions::from_mode(0o444))?;
     }
     fs::set_permissions(&snapshot, Permissions::from_mode(0o555))?;
-    spawn_jailed_firecracker(config, record, &root, &[])?;
+    // Metrics configuration is not part of a snapshot, so the restored VMM
+    // needs its own.
+    // https://github.com/firecracker-microvm/firecracker/blob/v1.16.2/docs/metrics.md
+    spawn_jailed_firecracker(
+        config,
+        &request.sandbox_id,
+        record,
+        &root,
+        &["--metrics-path", metrics::JAILED_METRICS],
+    )?;
     let api = wait_for_firecracker_api(&root, &record.machine_id)?;
     // Firecracker updates VMGenID before resuming vCPUs, so supported Linux
     // kernels reseed their CSPRNG before cloned workloads consume randomness.

@@ -256,6 +256,19 @@ guest agent accepts connections only from the host CID. VMM console output is
 captured through a pipe and bounded on disk, because upstream documents that a
 compromised guest kernel can reactivate the serial device.
 
+Exo reads each VMM's
+[metrics](https://github.com/firecracker-microvm/firecracker/blob/main/docs/metrics.md)
+from a FIFO it opens before the VMM starts, and emits a `sandbox.vmm_metrics`
+event on the `sandbox_signal` tracing target when a record shows a seccomp
+fault, a `SIGSEGV` or `SIGBUS`, a vCPU failure, or a block, network, vsock, or
+entropy device error, or when the VMM exits other than by guest poweroff or an
+Exo stop. Seccomp evidence, including Firecracker's bad-syscall exit code, has
+severity `exploit`; everything else has severity `signal`. Exit statuses need
+Linux 6.15 or later. A compromised VMM can forge or drop its own records, so
+these events catch attempts that trip seccomp or a device error, not a
+completed compromise. Only the Exo process that launched a VMM reads its
+metrics.
+
 Enabled networking permits public IPv4 egress and nothing else: source
 addresses are anti-spoofed, guest-to-host and guest-to-guest traffic is
 blocked (guest-to-guest cannot be opened even by the allow-list), link-local
