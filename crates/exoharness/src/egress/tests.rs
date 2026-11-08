@@ -278,6 +278,7 @@ impl Upstream {
     ) -> Result<EgressProxy> {
         let transport = Arc::new(
             LocalEgressTransport::for_policy(
+                sandbox_id,
                 &policy.networking,
                 Some(crate::EgressListenConfig {
                     bind_address: host_ip,
@@ -1079,7 +1080,7 @@ fn dns_only_answers_exact_allowed_names() -> Result<()> {
         query
             .set_id(123)
             .add_query(Query::query(Name::from_ascii(host)?, kind));
-        let response = Message::from_vec(&dns_response(Some(&state.hosts), &query.to_vec()?)?)?;
+        let response = dns_response(Some(&state.hosts), &query.to_vec()?)?;
         assert_eq!(response.id(), 123);
         assert_eq!(
             response.response_code(),
@@ -1457,6 +1458,7 @@ async fn configured_listener_advertises_a_separate_address_and_binds_source() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let advertised_address = Ipv4Addr::new(192, 0, 2, 2);
     let transport = LocalEgressTransport::with_config(
+        "advertised",
         crate::EgressListenConfig {
             bind_address: Ipv4Addr::LOCALHOST,
             advertised_address,
@@ -1490,13 +1492,15 @@ async fn configured_listener_advertises_a_separate_address_and_binds_source() {
 #[tokio::test]
 async fn closing_transport_releases_fixed_ports_with_retained_handles() -> Result<()> {
     let address = host_ip()?;
-    let transport = Arc::new(LocalEgressTransport::bind(address, &HashSet::new()).await?);
+    let transport =
+        Arc::new(LocalEgressTransport::bind("fixed-ports", address, &HashSet::new()).await?);
     let endpoints = transport.endpoints();
     let accepting_transport = transport.clone();
     let accepting = tokio::spawn(async move { accepting_transport.accept(false).await });
     tokio::task::yield_now().await;
     transport.close();
     let replacement = LocalEgressTransport::with_config(
+        "fixed-ports",
         crate::EgressListenConfig {
             bind_address: address,
             advertised_address: address,
@@ -1525,6 +1529,7 @@ async fn wildcard_listener_dns_replies_from_the_advertised_address_on_both_proto
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let address = host_ip()?;
     let transport = LocalEgressTransport::with_config(
+        "wildcard",
         crate::EgressListenConfig {
             bind_address: Ipv4Addr::UNSPECIFIED,
             advertised_address: address,
@@ -1759,7 +1764,8 @@ async fn credential_refresh_preserves_rejections_and_hides_internal_errors() -> 
 #[tokio::test]
 async fn proxy_starts_without_a_sandbox_backend() -> Result<()> {
     let transport = Arc::new(
-        LocalEgressTransport::bind(host_ip()?, &HashSet::from(["api.test".into()])).await?,
+        LocalEgressTransport::bind("hosted", host_ip()?, &HashSet::from(["api.test".into()]))
+            .await?,
     );
     let proxy = EgressProxy::start(
         identity("hosted"),
@@ -1875,11 +1881,321 @@ fn unrestricted_dns_answers_without_adding_credential_hosts() -> Result<()> {
         Name::from_ascii("public.test")?,
         RecordType::A,
     ));
-    let unrestricted = Message::from_vec(&dns_response(None, &query.to_vec()?)?)?;
+    let unrestricted = dns_response(None, &query.to_vec()?)?;
     assert_eq!(unrestricted.answers().len(), 1);
     let empty = HashSet::new();
-    let restricted = Message::from_vec(&dns_response(Some(&empty), &query.to_vec()?)?)?;
+    let restricted = dns_response(Some(&empty), &query.to_vec()?)?;
     assert_eq!(restricted.response_code(), ResponseCode::NXDomain);
+    Ok(())
+}
+
+// Runs `test` on a current-thread runtime so the proxy's tasks emit on the
+// capturing thread, and returns the sandbox signals it emitted.
+fn capture_signals(
+    test: impl std::future::Future<Output = Result<()>>,
+) -> Result<Vec<crate::sandbox_signal::tests::Captured>> {
+    let mut result = Ok(());
+    let events = crate::sandbox_signal::tests::capture(|| {
+        result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(anyhow::Error::from)
+            .and_then(|runtime| runtime.block_on(test));
+    });
+    result?;
+    Ok(events
+        .into_iter()
+        .filter(|event| event.target == crate::sandbox_signal::TARGET)
+        .collect())
+}
+
+fn request_fields(fields: &std::collections::BTreeMap<String, String>) -> Vec<Option<&str>> {
+    [
+        "verdict", "host", "sni", "method", "port", "path", "binding", "reason",
+    ]
+    .into_iter()
+    .map(|name| fields.get(name).map(String::as_str))
+    .collect()
+}
+
+fn signal_fields<'a>(
+    events: &'a [crate::sandbox_signal::tests::Captured],
+    signal: &str,
+    sandbox_id: &str,
+) -> Vec<&'a std::collections::BTreeMap<String, String>> {
+    events
+        .iter()
+        .map(|event| &event.fields)
+        .filter(|fields| fields["signal"] == signal && fields["sandbox_id"] == sandbox_id)
+        .collect()
+}
+
+#[test]
+fn dns_listener_reports_answers_by_name_type_and_verdict() -> Result<()> {
+    use hickory_proto::{op::Query, rr::Name};
+    let events = capture_signals(async {
+        let address = host_ip()?;
+        let transport = LocalEgressTransport::with_config(
+            "signals-dns",
+            crate::EgressListenConfig {
+                bind_address: address,
+                advertised_address: address,
+                http_port: 0,
+                https_port: 0,
+                dns_port: 0,
+            },
+            &["api.test".into()],
+        )
+        .await?;
+        transport.bind_source(address).await?;
+        let udp = tokio::net::UdpSocket::bind((address, 0)).await?;
+        udp.connect(transport.endpoints().dns).await?;
+        for (name, kind) in [
+            ("api.test", RecordType::A),
+            ("API.test.", RecordType::A),
+            ("blocked.test", RecordType::A),
+            ("api.test", RecordType::AAAA),
+        ] {
+            let mut query = Message::new();
+            query.add_query(Query::query(Name::from_ascii(name)?, kind));
+            udp.send(&query.to_vec()?).await?;
+            let mut answer = [0; 4096];
+            tokio::time::timeout(Duration::from_secs(1), udp.recv(&mut answer)).await??;
+        }
+        transport.close();
+        // Closing the listener reports the partial window.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(())
+    })?;
+    let mut answers = signal_fields(&events, "sandbox.dns", "signals-dns")
+        .into_iter()
+        .map(|fields| {
+            assert_eq!(fields["source"], "exo.egress.dns");
+            assert_eq!(fields["severity"], "signal");
+            (
+                fields["name"].as_str(),
+                fields["record_type"].as_str(),
+                fields["verdict"].as_str(),
+                fields["count"].as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    answers.sort_unstable();
+    assert_eq!(
+        answers,
+        [
+            ("api.test", "A", "allow", "2"),
+            ("api.test", "AAAA", "allow", "1"),
+            ("blocked.test", "A", "deny", "1"),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn proxy_reports_each_decision_without_queries_or_credential_values() -> Result<()> {
+    use super::explicit::ExplicitProxy;
+    let events = capture_signals(async {
+        let upstream = Upstream::start().await?;
+        let (proxy, client) =
+            bound_proxy(&upstream, "signals-transparent", TestResolver::new()).await?;
+        let placeholder = &proxy.environment()["TEST_API_KEY"];
+        assert_eq!(
+            client
+                .get("https://api.test/auth?token=query-secret")
+                .bearer_auth(placeholder)
+                .send()
+                .await?
+                .text()
+                .await?,
+            "authenticated-v1"
+        );
+        let blocked = |endpoint: std::net::SocketAddrV4| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .add_root_certificate(reqwest::Certificate::from_pem(proxy.ca_pem().as_bytes())?)
+                .resolve("blocked.test", endpoint.into())
+                .timeout(Duration::from_secs(5))
+                .build()
+                .map_err(anyhow::Error::from)
+        };
+        let tls = blocked(proxy.endpoints().https)?;
+        assert!(tls.get("https://blocked.test/tls").send().await.is_err());
+        let plain = blocked(proxy.endpoints().http)?;
+        assert_eq!(
+            plain
+                .get("http://blocked.test/plain?q=query-secret")
+                .send()
+                .await?
+                .status(),
+            StatusCode::BAD_GATEWAY
+        );
+        proxy.shutdown().await?;
+
+        let mut open = policy();
+        open.networking = SandboxNetworkPolicy::Unrestricted;
+        let tunnel = upstream
+            .proxy_with_policy(
+                host_ip()?,
+                "signals-tunnel",
+                TestResolver::new(),
+                open.clone(),
+            )
+            .await?;
+        tunnel.bind_source(host_ip()?).await?;
+        let public = reqwest::Client::builder()
+            .no_proxy()
+            .add_root_certificate(reqwest::Certificate::from_pem(
+                upstream.config.ca_pem.as_bytes(),
+            )?)
+            .resolve("public.test", tunnel.endpoints().https.into())
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        assert_eq!(
+            public
+                .get("https://public.test/auth")
+                .send()
+                .await?
+                .text()
+                .await?,
+            "anonymous"
+        );
+        tunnel.shutdown().await?;
+
+        for (sandbox_id, networking, url) in [
+            (
+                "signals-connect-tunnel",
+                SandboxNetworkPolicy::Unrestricted,
+                "https://public.test/auth",
+            ),
+            (
+                "signals-connect-deny",
+                policy().networking,
+                "https://blocked.test/auth",
+            ),
+        ] {
+            let mut config = open.clone();
+            config.networking = networking;
+            let explicit = ExplicitProxy::with_listener(
+                State::new(
+                    identity(sandbox_id),
+                    config,
+                    Some(TestResolver::new()),
+                    Arc::new(upstream.config.clone()),
+                )?,
+                TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?,
+                "127.0.0.1",
+            )
+            .await?;
+            let client = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(&explicit.environment["HTTPS_PROXY"])?)
+                .add_root_certificate(reqwest::Certificate::from_pem(
+                    upstream.config.ca_pem.as_bytes(),
+                )?)
+                .timeout(Duration::from_secs(5))
+                .build()?;
+            let response = client.get(url).send().await;
+            assert_eq!(response.is_ok(), sandbox_id == "signals-connect-tunnel");
+            explicit.close();
+        }
+        Ok(())
+    })?;
+    for fields in &events {
+        assert!(
+            fields
+                .fields
+                .values()
+                .all(|value| !value.contains("canary") && !value.contains("query-secret")),
+            "signal exposes a secret: {fields:?}"
+        );
+    }
+    let request = |sandbox_id| signal_fields(&events, "sandbox.egress_request", sandbox_id);
+    assert_eq!(
+        request("signals-transparent")
+            .into_iter()
+            .map(request_fields)
+            .collect::<Vec<_>>(),
+        [
+            vec![
+                Some("allow"),
+                Some("api.test"),
+                Some("api.test"),
+                Some("GET"),
+                Some("443"),
+                Some("/auth"),
+                Some("test-credential"),
+                None,
+            ],
+            vec![
+                Some("deny"),
+                Some("blocked.test"),
+                Some("blocked.test"),
+                None,
+                Some("443"),
+                None,
+                None,
+                Some("host is not allowed"),
+            ],
+            vec![
+                Some("deny"),
+                Some("blocked.test"),
+                None,
+                Some("GET"),
+                Some("80"),
+                None,
+                None,
+                Some("host is not allowed"),
+            ],
+        ]
+    );
+    assert_eq!(
+        request("signals-tunnel")
+            .into_iter()
+            .map(request_fields)
+            .collect::<Vec<_>>(),
+        [vec![
+            Some("allow"),
+            Some("public.test"),
+            Some("public.test"),
+            None,
+            Some("443"),
+            None,
+            None,
+            None,
+        ]]
+    );
+    assert_eq!(
+        request("signals-connect-tunnel")
+            .into_iter()
+            .map(request_fields)
+            .collect::<Vec<_>>(),
+        [vec![
+            Some("allow"),
+            Some("public.test"),
+            None,
+            Some("CONNECT"),
+            Some("443"),
+            None,
+            None,
+            None,
+        ]]
+    );
+    assert_eq!(
+        request("signals-connect-deny")
+            .into_iter()
+            .map(request_fields)
+            .collect::<Vec<_>>(),
+        [vec![
+            Some("deny"),
+            Some("blocked.test"),
+            None,
+            Some("CONNECT"),
+            Some("443"),
+            None,
+            None,
+            Some("host is not allowed"),
+        ]]
+    );
     Ok(())
 }
 
@@ -2823,6 +3139,7 @@ async fn native_tls_uses_the_external_proxys_identity_and_credential_resolver() 
         assert!(state.resolver.is_none());
         let transport = Arc::new(
             LocalEgressTransport::with_config(
+                "worker",
                 crate::EgressListenConfig {
                     bind_address: host_ip()?,
                     advertised_address: host_ip()?,

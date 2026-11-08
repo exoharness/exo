@@ -45,6 +45,8 @@ pub(crate) use transport::NetworkDns;
 pub use transport::{EgressTransport, LocalEgressTransport};
 mod sandbox;
 pub(crate) use sandbox::{AcquisitionMode, EgressRuntime, SandboxEgress, SandboxProxy};
+mod signals;
+use signals::{EgressRequest, Verdict};
 
 use crate::egress_credentials::{Binding, strip_hop_headers};
 pub use crate::egress_credentials::{
@@ -304,18 +306,39 @@ impl State {
         &self,
         destination: SocketAddr,
     ) -> Result<tokio::net::TcpStream> {
-        ensure!(
-            self.network.unrestricted(),
-            "opaque TCP requires unrestricted networking"
+        let permitted = (|| {
+            ensure!(
+                self.network.unrestricted(),
+                "opaque TCP requires unrestricted networking"
+            );
+            self.check_port(destination.port())?;
+            ensure!(
+                public_ipv4(destination.ip()),
+                "TCP destination is not permitted"
+            );
+            Ok(())
+        })();
+        let address = destination.ip().to_string();
+        self.signal(
+            if permitted.is_ok() {
+                Verdict::Allow
+            } else {
+                Verdict::Deny
+            },
+            EgressRequest {
+                host: Some(&address),
+                port: destination.port(),
+                reason: permitted
+                    .as_ref()
+                    .err()
+                    .map(|error| error as &dyn std::fmt::Display),
+                ..Default::default()
+            },
         );
-        self.check_port(destination.port())?;
-        ensure!(
-            public_ipv4(destination.ip()),
-            "TCP destination is not permitted"
-        );
+        permitted?;
         let addresses = self
             .upstream
-            .resolve(&destination.ip().to_string(), destination.port())
+            .resolve(&address, destination.port())
             .await?
             .addresses;
         Ok(tokio::time::timeout(
@@ -326,15 +349,65 @@ impl State {
     }
 
     fn connect_host(&self, authority: &str) -> Result<String> {
-        self.check_port(443)?;
-        let authority: hyper::http::uri::Authority = authority.parse()?;
-        ensure!(
-            authority.port_u16() == Some(443),
-            "CONNECT requires port 443"
+        let host = (|| {
+            self.check_port(443)?;
+            let authority: hyper::http::uri::Authority = authority.parse()?;
+            ensure!(
+                authority.port_u16() == Some(443),
+                "CONNECT requires port 443"
+            );
+            let host = canonical_egress_host(authority.host())?;
+            ensure!(self.network.permits_host(&host), "host is not allowed");
+            Ok(host)
+        })();
+        if let Err(error) = &host {
+            let host = authority
+                .parse::<hyper::http::uri::Authority>()
+                .ok()
+                .and_then(|authority| canonical_egress_host(authority.host()).ok());
+            self.signal(
+                Verdict::Deny,
+                EgressRequest {
+                    host: host.as_deref(),
+                    method: Some(Method::CONNECT.as_str()),
+                    port: 443,
+                    reason: Some(error),
+                    ..Default::default()
+                },
+            );
+        }
+        host
+    }
+
+    fn signal(&self, verdict: Verdict, request: EgressRequest<'_>) {
+        signals::egress_request(&self.identity.sandbox_id, verdict, request);
+    }
+
+    // `host` is canonical when known. Paths are reported only for hosts whose
+    // traffic the proxy intercepts.
+    fn signal_http(
+        &self,
+        request: &Request<Incoming>,
+        host: Option<&str>,
+        sni: Option<&str>,
+        verdict: Verdict,
+        credentials: &[(String, String)],
+        reason: Option<&dyn std::fmt::Display>,
+    ) {
+        self.signal(
+            verdict,
+            EgressRequest {
+                host,
+                sni,
+                method: Some(request.method().as_str()),
+                port: if sni.is_some() { 443 } else { 80 },
+                path: host
+                    .is_some_and(|host| self.hosts.contains(host))
+                    .then(|| request.uri().path()),
+                credentials,
+                reason,
+            },
         );
-        let host = canonical_egress_host(authority.host())?;
-        ensure!(self.network.permits_host(&host), "host is not allowed");
-        Ok(host)
     }
 
     async fn forward(
@@ -342,10 +415,35 @@ impl State {
         mut request: Request<Incoming>,
         sni: Option<&str>,
     ) -> Result<Response<ProxyBody>, EgressError> {
-        let (destination, url) = self.destination(&request, sni)?;
+        let (destination, url) = self.destination(&request, sni).inspect_err(|error| {
+            let host = request
+                .headers()
+                .get(HOST)
+                .and_then(|host| {
+                    host.to_str()
+                        .ok()?
+                        .parse::<hyper::http::uri::Authority>()
+                        .ok()
+                })
+                .and_then(|authority| canonical_egress_host(authority.host()).ok());
+            self.signal_http(
+                &request,
+                host.as_deref(),
+                sni,
+                Verdict::Deny,
+                &[],
+                Some(error),
+            );
+        })?;
         let mut headers = request.headers().clone();
 
-        let client = self.client(&destination.host, destination.port).await?;
+        let client = self
+            .client(&destination.host, destination.port)
+            .await
+            .inspect_err(|error| {
+                let host = Some(destination.host.as_str());
+                self.signal_http(&request, host, sni, Verdict::Error, &[], Some(error));
+            })?;
         let original_headers = headers.clone();
         let credentials = crate::egress_credentials::rewrite_headers(
             &self.bindings,
@@ -355,7 +453,18 @@ impl State {
             &self.identity,
             &TimedResolver(self.resolver.as_deref().unwrap_or(&NoCredentials)),
         )
-        .await?;
+        .await
+        .inspect_err(|error| {
+            // Internal failures can carry resolver diagnostics; report only the verdict.
+            let (verdict, reason) = match error {
+                EgressError::Internal(_) => (Verdict::Error, None),
+                _ => (Verdict::Deny, Some(error as &dyn std::fmt::Display)),
+            };
+            let host = Some(destination.host.as_str());
+            self.signal_http(&request, host, sni, verdict, &[], reason);
+        })?;
+        let host = Some(destination.host.as_str());
+        self.signal_http(&request, host, sni, Verdict::Allow, &credentials, None);
         let body = tokio::time::timeout(
             IO_TIMEOUT,
             Limited::new(request.body_mut(), self.max_request_body_bytes).collect(),
@@ -661,13 +770,24 @@ async fn transparent_https_connection<T>(
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    state.check_port(443)?;
-    if !state.network.unrestricted()
-        && let Some(tls) = &tls
-    {
-        return https_connection(stream, tls.clone(), state, None).await;
-    }
-    let (host, prefix) = tokio::time::timeout(IO_TIMEOUT, async {
+    let deny = |sni: Option<&str>, host: Option<&str>, reason: &dyn std::fmt::Display| {
+        state.signal(
+            Verdict::Deny,
+            EgressRequest {
+                host,
+                sni,
+                port: 443,
+                reason: Some(reason),
+                ..Default::default()
+            },
+        );
+    };
+    state
+        .check_port(443)
+        .inspect_err(|error| deny(None, None, error))?;
+    // Read SNI before any handshake so a denied name is recorded even when
+    // the client rejects the proxy certificate.
+    let (sni, prefix) = tokio::time::timeout(IO_TIMEOUT, async {
         let mut acceptor = rustls::server::Acceptor::default();
         let mut prefix = Vec::new();
         let mut buffer = [0; 4096];
@@ -681,25 +801,39 @@ where
             prefix.extend_from_slice(&buffer[..count]);
             acceptor.read_tls(&mut &buffer[..count])?;
             if let Some(accepted) = acceptor.accept().map_err(|(error, _alert)| error)? {
-                let host = canonical_egress_host(
-                    accepted
-                        .client_hello()
-                        .server_name()
-                        .context("TLS SNI is required")?,
-                )?;
-                return Ok::<_, anyhow::Error>((host, prefix));
+                let sni = accepted.client_hello().server_name().map(str::to_owned);
+                return Ok::<_, anyhow::Error>((sni, prefix));
             }
         }
     })
     .await??;
     let (read, write) = tokio::io::split(stream);
     let mut stream = tokio::io::join(std::io::Cursor::new(prefix).chain(read), write);
-    ensure!(state.network.permits_host(&host), "host is not allowed");
+    let Some(sni) = sni else {
+        let error = anyhow!("TLS SNI is required");
+        deny(None, None, &error);
+        return Err(error);
+    };
+    let host = canonical_egress_host(&sni).inspect_err(|error| deny(Some(&sni), None, error))?;
+    if !state.network.permits_host(&host) {
+        let error = anyhow!("host is not allowed");
+        deny(Some(&sni), Some(&host), &error);
+        return Err(error);
+    }
     if state.hosts.contains(&host)
         && let Some(tls) = tls
     {
         return https_connection(stream, tls, state, Some(&host)).await;
     }
+    state.signal(
+        Verdict::Allow,
+        EgressRequest {
+            host: Some(&host),
+            sni: Some(&sni),
+            port: 443,
+            ..Default::default()
+        },
+    );
     let mut upstream = if let Some(proxy) = &state.external {
         proxy.connect(&host).await?
     } else {
