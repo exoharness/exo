@@ -1104,7 +1104,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
     let pid_path = shared.pid_path(&record.machine_id);
     fs::create_dir_all(pid_path.parent().unwrap())?;
     fs::write(&pid_path, "invalid-pid")?;
-    let listener = Arc::new(LocalEgressTransport::for_hosts(&["api.test".into()]).await?);
+    let listener = Arc::new(LocalEgressTransport::for_hosts("reaped", &["api.test".into()]).await?);
     shared
         .egress_transports
         .lock()
@@ -1121,6 +1121,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
     assert!(shared.egress_transports.lock().unwrap().is_empty());
     let endpoints = listener.endpoints();
     let replacement = LocalEgressTransport::with_config(
+        "reaped",
         crate::EgressListenConfig {
             bind_address: *endpoints.http.ip(),
             advertised_address: *endpoints.http.ip(),
@@ -1216,8 +1217,9 @@ impl DurableStopFixture {
             shared,
             egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
         };
-        let egress_transport =
-            Arc::new(LocalEgressTransport::for_hosts(&["api.test".into()]).await?);
+        let egress_transport = Arc::new(
+            LocalEgressTransport::for_hosts(&request.sandbox_id, &["api.test".into()]).await?,
+        );
         backend
             .shared
             .egress_transports

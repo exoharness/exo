@@ -324,12 +324,13 @@ impl FirecrackerSandboxBackend {
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
+        let sandbox_id = request.sandbox_id.clone();
         self.egress
             .acquire(
                 crate::egress::AcquisitionMode::Restore,
                 request.clone(),
                 self.external_proxy.as_ref(),
-                |policy| async move { self.egress_transport(&policy).await },
+                |policy| async move { self.egress_transport(&sandbox_id, &policy).await },
                 |egress| {
                     let backend = self.clone();
                     async move {

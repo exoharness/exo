@@ -833,10 +833,11 @@ impl FirecrackerSandboxBackend {
 
     async fn egress_transport(
         &self,
+        sandbox_id: &str,
         policy: &crate::SandboxNetworkPolicy,
     ) -> Result<Arc<dyn crate::egress::EgressTransport>> {
         Ok(Arc::new(
-            native_egress_transport(policy, self.shared.config.egress_listen).await?,
+            native_egress_transport(sandbox_id, policy, self.shared.config.egress_listen).await?,
         ))
     }
 
@@ -1413,12 +1414,13 @@ impl FirecrackerSandboxBackend {
         snapshot: Option<FirecrackerSnapshotManifest>,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
+        let sandbox_id = request.sandbox_id.clone();
         self.egress
             .acquire(
                 crate::egress::AcquisitionMode::Acquire,
                 request.clone(),
                 self.external_proxy.as_ref(),
-                |policy| async move { self.egress_transport(&policy).await },
+                |policy| async move { self.egress_transport(&sandbox_id, &policy).await },
                 |egress| async move {
                     let request = FirecrackerRequest {
                         sandbox: request,
@@ -3608,10 +3610,12 @@ fn network_firewall_rules(
 }
 
 pub(super) async fn native_egress_transport(
+    sandbox_id: &str,
     policy: &SandboxNetworkPolicy,
     listen: Option<crate::EgressListenConfig>,
 ) -> Result<crate::egress::LocalEgressTransport> {
     crate::egress::LocalEgressTransport::for_policy_with_dns(
+        sandbox_id,
         policy,
         listen,
         Some(Arc::new(FirecrackerDns {

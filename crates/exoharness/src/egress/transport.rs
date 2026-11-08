@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::IO_TIMEOUT;
+use super::signals::{self, DnsSignals};
 use crate::types::canonical_egress_hosts;
 use crate::{BoxSandboxTcpStream, SandboxEgressProxy};
 
@@ -130,8 +131,9 @@ async fn bind_dns(config: &crate::EgressListenConfig) -> io::Result<(TcpListener
 }
 
 impl LocalEgressTransport {
-    pub async fn for_hosts(hosts: &[String]) -> Result<Self> {
+    pub async fn for_hosts(sandbox_id: &str, hosts: &[String]) -> Result<Self> {
         Self::for_policy(
+            sandbox_id,
             &crate::SandboxNetworkPolicy::Limited {
                 allowed_hosts: hosts.to_vec(),
             },
@@ -140,8 +142,13 @@ impl LocalEgressTransport {
         .await
     }
 
-    pub async fn with_config(config: crate::EgressListenConfig, hosts: &[String]) -> Result<Self> {
+    pub async fn with_config(
+        sandbox_id: &str,
+        config: crate::EgressListenConfig,
+        hosts: &[String],
+    ) -> Result<Self> {
         Self::for_policy(
+            sandbox_id,
             &crate::SandboxNetworkPolicy::Limited {
                 allowed_hosts: hosts.to_vec(),
             },
@@ -151,13 +158,15 @@ impl LocalEgressTransport {
     }
 
     pub(crate) async fn for_policy(
+        sandbox_id: &str,
         policy: &crate::SandboxNetworkPolicy,
         config: Option<crate::EgressListenConfig>,
     ) -> Result<Self> {
-        Self::for_policy_with_dns(policy, config, None).await
+        Self::for_policy_with_dns(sandbox_id, policy, config, None).await
     }
 
     pub(crate) async fn for_policy_with_dns(
+        sandbox_id: &str,
         policy: &crate::SandboxNetworkPolicy,
         config: Option<crate::EgressListenConfig>,
         resolver: Option<Arc<dyn NetworkDns>>,
@@ -188,12 +197,17 @@ impl LocalEgressTransport {
                 }
             }
         };
-        Self::listen(config, hosts, resolver).await
+        Self::listen(sandbox_id, config, hosts, resolver).await
     }
 
     #[cfg(test)]
-    pub(super) async fn bind(host_ip: Ipv4Addr, hosts: &HashSet<String>) -> Result<Self> {
+    pub(super) async fn bind(
+        sandbox_id: &str,
+        host_ip: Ipv4Addr,
+        hosts: &HashSet<String>,
+    ) -> Result<Self> {
         Self::listen(
+            sandbox_id,
             crate::EgressListenConfig {
                 bind_address: host_ip,
                 advertised_address: host_ip,
@@ -208,6 +222,7 @@ impl LocalEgressTransport {
     }
 
     async fn listen(
+        sandbox_id: &str,
         config: crate::EgressListenConfig,
         hosts: Option<HashSet<String>>,
         resolver: Option<Arc<dyn NetworkDns>>,
@@ -231,6 +246,7 @@ impl LocalEgressTransport {
             dns_tcp.clone(),
             hosts.clone(),
             resolver,
+            Arc::new(DnsSignals::new(sandbox_id)),
             source.clone(),
             cancel.clone(),
         ));
@@ -326,15 +342,21 @@ async fn serve_dns(
     tcp: Arc<Socket<TcpListener>>,
     hosts: Option<HashSet<String>>,
     resolver: Option<Arc<dyn NetworkDns>>,
+    signals: Arc<DnsSignals>,
     source: Arc<AtomicU32>,
     cancel: CancellationToken,
 ) {
     let hosts = Arc::new(hosts);
     let mut tasks = JoinSet::new();
     let mut buffer = [0u8; DNS_BUFFER_SIZE];
+    let mut flush = tokio::time::interval_at(
+        tokio::time::Instant::now() + signals::WINDOW,
+        signals::WINDOW,
+    );
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
+            _ = flush.tick() => signals.flush(),
             Some(result) = tasks.join_next(), if !tasks.is_empty() => {
                 if !matches!(result, Ok(Ok(()))) { tracing::debug!("egress DNS connection failed"); }
             }
@@ -352,10 +374,11 @@ async fn serve_dns(
                 if !accepts_peer(&source, peer) || tasks.len() >= MAX_DNS_TASKS { continue; }
                 let hosts = hosts.clone();
                 let resolver = resolver.clone();
+                let signals = signals.clone();
                 let dns = dns.clone();
                 let query = buffer[..size].to_vec();
                 tasks.spawn(async move {
-                    let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), peer.ip(), &query).await?;
+                    let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), &signals, peer.ip(), &query).await?;
                     dns.send_to(&answer, peer).await?;
                     Ok::<_, anyhow::Error>(())
                 });
@@ -374,13 +397,14 @@ async fn serve_dns(
                 if !accepts_peer(&source, peer) || tasks.len() >= MAX_DNS_TASKS { continue; }
                 let hosts = hosts.clone();
                 let resolver = resolver.clone();
+                let signals = signals.clone();
                 tasks.spawn(async move {
                     tokio::time::timeout(IO_TIMEOUT, async {
                         let size = stream.read_u16().await?;
                         ensure!(usize::from(size) <= DNS_BUFFER_SIZE, "DNS request too large");
                         let mut bytes = vec![0; size as usize];
                         stream.read_exact(&mut bytes).await?;
-                        let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), peer.ip(), &bytes).await?;
+                        let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), &signals, peer.ip(), &bytes).await?;
                         stream.write_u16(answer.len().try_into()?).await?;
                         stream.write_all(&answer).await?;
                         Ok::<_, anyhow::Error>(())
@@ -390,20 +414,32 @@ async fn serve_dns(
         }
     }
     tasks.shutdown().await;
+    signals.flush();
 }
 async fn network_dns_response(
     hosts: Option<&HashSet<String>>,
     resolver: Option<&dyn NetworkDns>,
+    signals: &DnsSignals,
     source: IpAddr,
     query: &[u8],
 ) -> Result<Vec<u8>> {
-    let answer = dns_response(hosts, query)?;
+    let answer = network_dns_answer(hosts, resolver, source, query).await?;
+    signals.record(&answer);
+    Ok(answer.to_vec()?)
+}
+
+async fn network_dns_answer(
+    hosts: Option<&HashSet<String>>,
+    resolver: Option<&dyn NetworkDns>,
+    source: IpAddr,
+    query: &[u8],
+) -> Result<Message> {
+    let mut answer = dns_response(hosts, query)?;
     let Some(resolver) = resolver else {
         return Ok(answer);
     };
-    let mut answer = Message::from_vec(&answer)?;
     let Some(record) = answer.answers().first() else {
-        return Ok(answer.to_vec()?);
+        return Ok(answer);
     };
     let name = record.name().clone();
     let host = name.to_ascii().trim_end_matches('.').to_owned();
@@ -423,10 +459,10 @@ async fn network_dns_response(
             answer.set_response_code(ResponseCode::ServFail);
         }
     }
-    Ok(answer.to_vec()?)
+    Ok(answer)
 }
 
-pub(super) fn dns_response(hosts: Option<&HashSet<String>>, bytes: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn dns_response(hosts: Option<&HashSet<String>>, bytes: &[u8]) -> Result<Message> {
     let query = Message::from_vec(bytes)?;
     ensure!(
         query.message_type() == MessageType::Query
@@ -458,5 +494,5 @@ pub(super) fn dns_response(hosts: Option<&HashSet<String>>, bytes: &[u8]) -> Res
             RData::A(A(SYNTHETIC_IP)),
         ));
     }
-    Ok(response.to_vec()?)
+    Ok(response)
 }

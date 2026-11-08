@@ -101,6 +101,7 @@ impl LimaFirecrackerSandboxBackend {
 
     async fn egress_transport(
         &self,
+        sandbox_id: &str,
         policy: &crate::SandboxNetworkPolicy,
     ) -> Result<Arc<dyn crate::egress::EgressTransport>> {
         let connection = self.bridge.connection().await?;
@@ -109,6 +110,7 @@ impl LimaFirecrackerSandboxBackend {
             endpoints,
         } = connection
             .request(FirecrackerBridgeRequest::EgressCreate {
+                sandbox_id: sandbox_id.to_owned(),
                 listen: self.config.egress_listen,
                 networking: policy.clone(),
             })
@@ -350,12 +352,13 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
     async fn acquire(&self, mut request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.resources.get_or_insert_with(Default::default);
         let terminate = self.terminate_request(request.clone());
+        let sandbox_id = request.sandbox_id.clone();
         self.egress
             .acquire(
                 crate::egress::AcquisitionMode::Acquire,
                 request.clone(),
                 self.external_proxy.as_ref(),
-                |policy| async move { self.egress_transport(&policy).await },
+                |policy| async move { self.egress_transport(&sandbox_id, &policy).await },
                 |egress| self.acquire_with_egress(request, None, egress),
                 terminate,
             )
@@ -471,12 +474,13 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
             return Ok(Arc::new(handle));
         }
         let terminate = self.terminate_request(request.clone());
+        let sandbox_id = request.sandbox_id.clone();
         self.egress
             .acquire(
                 crate::egress::AcquisitionMode::Restore,
                 request.clone(),
                 self.external_proxy.as_ref(),
-                |policy| async move { self.egress_transport(&policy).await },
+                |policy| async move { self.egress_transport(&sandbox_id, &policy).await },
                 |egress| self.acquire_with_egress(request, Some(payload), egress),
                 terminate,
             )
@@ -1962,8 +1966,13 @@ mod egress_cleanup_tests {
                 idle_ttl: Some(std::time::Duration::from_secs(60)),
             },
         };
-        let transport =
-            Arc::new(crate::egress::LocalEgressTransport::for_hosts(&["api.test".into()]).await?);
+        let transport = Arc::new(
+            crate::egress::LocalEgressTransport::for_hosts(
+                &request.sandbox_id,
+                &["api.test".into()],
+            )
+            .await?,
+        );
         let runtime = EgressRuntime::new(None, Arc::new(PublicUpstreamResolver));
         let handle = runtime
             .acquire(

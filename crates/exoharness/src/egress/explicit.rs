@@ -443,6 +443,15 @@ async fn connect(
     let upstream = if intercept {
         None
     } else {
+        state.signal(
+            Verdict::Allow,
+            EgressRequest {
+                host: Some(&host),
+                method: Some(Method::CONNECT.as_str()),
+                port: 443,
+                ..Default::default()
+            },
+        );
         let addresses = state.upstream.resolve(&host, 443).await?.addresses;
         Some(
             tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addresses.as_slice()))

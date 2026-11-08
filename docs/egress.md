@@ -312,6 +312,28 @@ the node relays opaque streams. Relay authorization must bind the stream to the
 sandbox allocation and its generation; raw source-IP binding is only suitable
 before NAT on a trusted local host. The production relay is not implemented here.
 
+## Decision signals
+
+Egress decisions are emitted as sandbox signals: `tracing` events on the
+`sandbox_signal` target. They never include query strings, header values, or
+credential values.
+
+- `sandbox.dns`: the host DNS listener counts answers per lowercase `name`,
+  `record_type`, and `verdict` (`allow`; `deny` for NXDOMAIN or REFUSED; `error`
+  when an allowed name does not resolve). Each `count` is reported when its
+  60-second window closes or the listener stops. A window reports at most 256
+  names; `sandbox.dns_dropped` counts the rest by verdict.
+- `sandbox.egress_request`: one event per proxy decision with `verdict`, `host`,
+  `sni`, `method`, `port`, `binding` (substituted binding names), and a `reason`
+  for denials and errors. `path` is included only for hosts the proxy
+  intercepts. Each sandbox reports at most 100 decisions per verdict per minute;
+  `sandbox.egress_request_dropped` counts the rest. Transparent HTTPS checks the
+  TLS SNI before the handshake, so a client that rejects the proxy certificate
+  still produces a denial.
+
+Unrestricted networking without credentials or port limits uses neither the
+proxy nor host DNS, so it produces neither signal.
+
 ## SmolVM
 
 SmolVM requires version 1.19.0 or newer with `machine start --egress-interceptor` for

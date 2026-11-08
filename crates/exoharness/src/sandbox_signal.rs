@@ -42,7 +42,7 @@ macro_rules! sandbox_signal {
 pub(crate) use sandbox_signal;
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
@@ -51,10 +51,10 @@ mod tests {
     use tracing_subscriber::layer::{Context, SubscriberExt};
 
     #[derive(Debug)]
-    struct Captured {
-        target: String,
-        level: tracing::Level,
-        fields: BTreeMap<String, String>,
+    pub(crate) struct Captured {
+        pub(crate) target: String,
+        pub(crate) level: tracing::Level,
+        pub(crate) fields: BTreeMap<String, String>,
     }
 
     #[derive(Clone, Default)]
@@ -85,7 +85,7 @@ mod tests {
         }
     }
 
-    fn capture(emit: impl FnOnce()) -> Vec<Captured> {
+    pub(crate) fn capture(emit: impl FnOnce()) -> Vec<Captured> {
         let capture = Capture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         tracing::subscriber::with_default(subscriber, emit);
