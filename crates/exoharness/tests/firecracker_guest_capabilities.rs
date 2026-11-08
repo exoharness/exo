@@ -71,7 +71,11 @@ async fn firecracker_guest_root_lacks_device_and_boot_capabilities() -> anyhow::
         sandbox_id: "guest-capabilities".into(),
         scope: exoharness::ResourceScope::Global,
         provider_state: None,
-        lifecycle: SandboxLifecycleConfig::default(),
+        // Without an idle TTL the VM is one-shot and is torn down after the
+        // first command; this test runs two.
+        lifecycle: SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(300)),
+        },
         spec: SandboxSpec {
             image,
             resources: SandboxResourceShape::new(1, 512),
