@@ -17,7 +17,7 @@ fn test_host_runtime() -> FirecrackerHostFingerprint {
     }
 }
 
-fn test_runtime() -> FirecrackerRuntimeFingerprint {
+pub(super) fn test_runtime() -> FirecrackerRuntimeFingerprint {
     test_host_runtime().for_resources(SandboxResourceShape::default())
 }
 
@@ -942,6 +942,7 @@ fn test_shared(
         capacity_gate: Mutex::new(()),
         starting_machines: Arc::new(StdMutex::new(HashSet::new())),
         base_image_digests: StdMutex::new(HashMap::new()),
+        process_monitor: Arc::new(ProcessMonitor::inert()),
     }))
 }
 

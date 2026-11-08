@@ -69,6 +69,14 @@ pub(super) mod lima_storage;
 mod filesystem;
 pub use filesystem::FirecrackerFilesystemCapture;
 
+#[cfg(target_os = "linux")]
+#[path = "firecracker_process_monitor.rs"]
+mod process_monitor;
+#[cfg(not(target_os = "linux"))]
+#[path = "firecracker_process_monitor_unsupported.rs"]
+mod process_monitor;
+use process_monitor::ProcessMonitor;
+
 const GUEST_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PID_FILE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -670,6 +678,7 @@ struct Shared {
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
     base_image_digests: StdMutex<HashMap<ImageIdentity, String>>,
+    process_monitor: Arc<ProcessMonitor>,
 }
 
 impl Drop for Shared {
@@ -956,6 +965,11 @@ impl FirecrackerSandboxBackend {
             cache_immutable_artifact(&config.state_root, "initramfs", &config.initramfs)?;
         let host_fingerprint = firecracker_host_fingerprint(&config, firecracker_version)?;
         validate_jailed_socket_paths(&config)?;
+        // Host-side detection has to cover every VMM this backend runs, so a
+        // backend that cannot observe its VMMs refuses to start.
+        let process_monitor = Arc::new(
+            ProcessMonitor::start().context("starting Firecracker host process monitoring")?,
+        );
 
         Ok(Self {
             external_proxy: None,
@@ -970,6 +984,7 @@ impl FirecrackerSandboxBackend {
                 capacity_gate: Mutex::new(()),
                 starting_machines: Arc::new(StdMutex::new(HashSet::new())),
                 base_image_digests: StdMutex::new(HashMap::new()),
+                process_monitor,
             }),
         })
     }
@@ -2076,6 +2091,11 @@ impl Shared {
                         .await
                         .is_ok()
                 {
+                    self.process_monitor.adopt(monitored_vmm(
+                        &self.config,
+                        &request.sandbox_id,
+                        machine_id,
+                    ))?;
                     if let Some(proxy) = request.egress_proxy
                         && self
                             .warm_machines
@@ -2312,6 +2332,7 @@ impl Shared {
         let config = self.config.clone();
         let request = request.clone();
         let record = record.clone();
+        let process_monitor = Arc::clone(&self.process_monitor);
         let span = tracing::Span::current();
         tokio::task::spawn_blocking(move || {
             let _entered = span.enter();
@@ -2326,7 +2347,13 @@ impl Shared {
                         jailer_uid(&config, &record)?,
                     )?;
                 }
-                prepare_and_launch_blocking(&config, &request, &record, pre_staged)
+                prepare_and_launch_blocking(
+                    &config,
+                    &request,
+                    &record,
+                    pre_staged,
+                    &process_monitor,
+                )
             })();
             if result.is_err() && record.network_enabled {
                 cleanup_network_blocking(&network);
@@ -2387,10 +2414,14 @@ impl Shared {
     #[tracing::instrument(name = "firecracker.stop_process", skip_all)]
     async fn stop_machine_process(&self, machine_id: &str) -> Result<()> {
         let pid_path = self.pid_path(machine_id);
-        let machine_id = machine_id.to_string();
-        tokio::task::spawn_blocking(move || stop_machine_process_blocking(&machine_id, &pid_path))
-            .await
-            .context("joining Firecracker stop task")?
+        let stopped_machine_id = machine_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            stop_machine_process_blocking(&stopped_machine_id, &pid_path)
+        })
+        .await
+        .context("joining Firecracker stop task")??;
+        self.process_monitor.forget(machine_id);
+        Ok(())
     }
 
     #[tracing::instrument(name = "firecracker.cleanup_network", skip_all)]
@@ -3926,6 +3957,23 @@ fn jail_root(config: &FirecrackerConfig, machine_id: &str) -> PathBuf {
     jail_dir(config, machine_id).join("root")
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct MonitoredVmm {
+    sandbox_id: SandboxId,
+    machine_id: String,
+    pid_file: PathBuf,
+    cgroup: PathBuf,
+}
+
+fn monitored_vmm(config: &FirecrackerConfig, sandbox_id: &str, machine_id: &str) -> MonitoredVmm {
+    MonitoredVmm {
+        sandbox_id: sandbox_id.to_string(),
+        machine_id: machine_id.to_string(),
+        pid_file: jail_root(config, machine_id).join("firecracker.pid"),
+        cgroup: firecracker_cgroup_dir(config, machine_id),
+    }
+}
+
 fn firecracker_cgroup_dir(config: &FirecrackerConfig, machine_id: &str) -> PathBuf {
     let executable_name = config
         .firecracker_bin
@@ -3962,11 +4010,12 @@ fn prepare_and_launch_blocking(
     request: &FirecrackerRequest,
     record: &MachineRecord,
     pre_staged: bool,
+    process_monitor: &ProcessMonitor,
 ) -> Result<GuestReadiness> {
     if let Some(template) = record.snapshot_template.as_ref()
         && prepare_snapshot_overlay(config, record, &template.key)?
     {
-        return launch_snapshot_clone(config, request, record, &template.key);
+        return launch_snapshot_clone(config, request, record, &template.key, process_monitor);
     }
     let root = jail_root(config, &record.machine_id);
     fs::create_dir_all(&root)?;
@@ -4062,7 +4111,14 @@ fn prepare_and_launch_blocking(
     // Keep the API available so fork() can pause and snapshot the running VM.
     // The config file still starts the VM atomically without a sequence of API
     // setup requests.
-    spawn_jailed_firecracker(config, record, &root, &["--config-file", "/vm-config.json"])?;
+    spawn_jailed_firecracker(
+        config,
+        record,
+        &root,
+        &["--config-file", "/vm-config.json"],
+        process_monitor,
+        &request.sandbox_id,
+    )?;
     Ok(GuestReadiness::Signal(ready_listener))
 }
 
@@ -4155,6 +4211,8 @@ fn spawn_jailed_firecracker(
     record: &MachineRecord,
     jail_root: &Path,
     firecracker_arguments: &[&str],
+    process_monitor: &ProcessMonitor,
+    sandbox_id: &str,
 ) -> Result<()> {
     let host_uid = jailer_uid(config, record)?;
     let memory_max = u64::from(
@@ -4221,12 +4279,17 @@ fn spawn_jailed_firecracker(
     let log_path = jail_root.join("firecracker.stderr");
     File::create(&log_path)?;
     fs::set_permissions(&log_path, Permissions::from_mode(0o600))?;
+    // The kernel names this thread as the jailer's parent, which is how the
+    // monitor recognizes the jailer before this function learns its PID.
+    let launch =
+        process_monitor.expect_launch(monitored_vmm(config, sandbox_id, &record.machine_id))?;
     // Deliberately do not pass --no-seccomp or a custom filter. Release builds'
     // embedded default filters are Firecracker's recommended production setting.
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/seccomp.md#default-filters-recommended
     let mut child = command
         .spawn()
         .context("launching Firecracker through jailer")?;
+    launch.spawned(child.id());
     let machine_id = record.machine_id.clone();
     std::thread::spawn(move || match child.wait() {
         Ok(status) if !status.success() => {
@@ -5100,6 +5163,7 @@ fn launch_snapshot_clone(
     request: &FirecrackerRequest,
     record: &MachineRecord,
     template_key: &str,
+    process_monitor: &ProcessMonitor,
 ) -> Result<GuestReadiness> {
     let root = prepare_snapshot_jail_files(config, request, record)?;
     prepare_resource_drives(config, request, record, &root, false)?;
@@ -5114,7 +5178,14 @@ fn launch_snapshot_clone(
         fs::set_permissions(path, Permissions::from_mode(0o444))?;
     }
     fs::set_permissions(&snapshot, Permissions::from_mode(0o555))?;
-    spawn_jailed_firecracker(config, record, &root, &[])?;
+    spawn_jailed_firecracker(
+        config,
+        record,
+        &root,
+        &[],
+        process_monitor,
+        &request.sandbox_id,
+    )?;
     let api = wait_for_firecracker_api(&root, &record.machine_id)?;
     // Firecracker updates VMGenID before resuming vCPUs, so supported Linux
     // kernels reseed their CSPRNG before cloned workloads consume randomness.
