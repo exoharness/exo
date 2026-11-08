@@ -69,6 +69,10 @@ pub(super) mod lima_storage;
 mod filesystem;
 pub use filesystem::FirecrackerFilesystemCapture;
 
+#[path = "firecracker_firewall.rs"]
+mod firewall;
+use firewall::RejectCounter;
+
 const GUEST_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PID_FILE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_STOP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -140,13 +144,14 @@ const SNAPSHOT_LEASE_FILE: &str = "lease";
 const SNAPSHOT_FORK_TEMPLATE_FILE: &str = "fork-template";
 // Firecracker forwards guest packets without filtering them. Keep special-use,
 // link-local, host-private, and cross-VM ranges closed unless explicitly admitted.
+// Link-local holds cloud instance metadata, so its rejects are counted apart.
 // https://github.com/firecracker-microvm/firecracker/blob/main/docs/prod-host-setup.md#filtering-guest-egress-network-traffic
+const METADATA_EGRESS_CIDR: &str = "169.254.0.0/16";
 const BLOCKED_EGRESS_CIDRS: &[&str] = &[
     "0.0.0.0/8",
     "10.0.0.0/8",
     "100.64.0.0/10",
     "127.0.0.0/8",
-    "169.254.0.0/16",
     "172.16.0.0/12",
     "192.0.0.0/24",
     "192.168.0.0/16",
@@ -666,6 +671,8 @@ struct Shared {
     // VM cleanup owns listener closure, including listeners supplied by Lima.
     // Close these before releasing a VM's address for another allocation.
     egress_transports: StdMutex<HashMap<String, Arc<dyn crate::egress::EgressTransport>>>,
+    // Read before a VM's nftables table is destroyed or replaced.
+    firewall_counters: Arc<firewall::FirewallCounters>,
     lifecycle_locks: MachineLifecycleLocks,
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
@@ -851,9 +858,13 @@ impl FirecrackerSandboxBackend {
         upstream: Arc<dyn UpstreamResolver>,
     ) -> Result<Self> {
         let egress = Arc::new(EgressRuntime::new(resolver, upstream));
-        tokio::task::spawn_blocking(move || Self::new_blocking(config, egress))
+        let backend = tokio::task::spawn_blocking(move || Self::new_blocking(config, egress))
             .await
-            .context("joining Firecracker backend construction")?
+            .context("joining Firecracker backend construction")??;
+        tokio::spawn(firewall::poll(Arc::downgrade(
+            &backend.shared.firewall_counters,
+        )));
+        Ok(backend)
     }
 
     pub async fn terminate_all(&self) -> Result<usize> {
@@ -967,6 +978,7 @@ impl FirecrackerSandboxBackend {
                 _state_lock: state_lock,
                 warm_machines: Mutex::new(HashMap::new()),
                 egress_transports: StdMutex::new(HashMap::new()),
+                firewall_counters: Arc::default(),
                 lifecycle_locks: MachineLifecycleLocks::default(),
                 capacity_gate: Mutex::new(()),
                 starting_machines: Arc::new(StdMutex::new(HashSet::new())),
@@ -2078,6 +2090,7 @@ impl Shared {
                         .await
                         .is_ok()
                 {
+                    let mut replaced_table = false;
                     if let Some(proxy) = request.egress_proxy
                         && self
                             .warm_machines
@@ -2086,6 +2099,7 @@ impl Shared {
                             .get(&request.sandbox_id)
                             .is_none_or(|entry| entry.egress_proxy != Some(proxy))
                     {
+                        self.firewall_counters.finish(machine_id).await;
                         let network = machine.record.network();
                         let policy = request.spec.policy.clone();
                         tokio::task::spawn_blocking(move || {
@@ -2097,7 +2111,9 @@ impl Shared {
                             run_checked_input("nft", &["-f", "-"], rules.as_bytes())
                         })
                         .await??;
+                        replaced_table = true;
                     }
+                    self.watch_firewall(request, &machine.record, replaced_table);
 
                     return Ok(machine);
                 }
@@ -2113,7 +2129,10 @@ impl Shared {
             }
         };
         let readiness = match self.prepare_and_launch(request, &record, pre_staged).await {
-            Ok(readiness) => readiness,
+            Ok(readiness) => {
+                self.watch_firewall(request, &record, true);
+                readiness
+            }
             Err(error) => {
                 if let Err(cleanup_error) = self
                     .cleanup_machine(machine_id, !reusing_existing_machine)
@@ -2182,6 +2201,19 @@ impl Shared {
                 .await?;
         }
         Ok(machine)
+    }
+
+    // `created` means this controller just installed the table, so its
+    // counters start at zero.
+    fn watch_firewall(&self, request: &FirecrackerRequest, record: &MachineRecord, created: bool) {
+        if record.network_enabled {
+            self.firewall_counters.watch(
+                &request.sandbox_id,
+                &record.machine_id,
+                &record.network().nft_table,
+                created,
+            );
+        }
     }
 
     #[tracing::instrument(name = "firecracker.restore_network", skip_all)]
@@ -2443,6 +2475,7 @@ impl Shared {
             .await
             .context("joining Firecracker snapshot overlay cleanup")??;
         }
+        self.firewall_counters.finish(machine_id).await;
         if let Some(record) = record.as_ref().filter(|record| record.network_enabled) {
             self.cleanup_network(&record.network()).await;
         }
@@ -3536,6 +3569,7 @@ fn network_firewall_rules(
     let table = &network.nft_table;
     let interface = &network.host_veth;
     writeln!(rules, "add table inet {table}")?;
+    add_reject_counters(&mut rules, table)?;
     writeln!(
         rules,
         "add chain inet {table} input {{ type filter hook input priority filter; policy accept; }}"
@@ -3552,9 +3586,16 @@ fn network_firewall_rules(
         rules,
         "add rule inet {table} input iifname {interface} ct state established,related counter accept"
     )?;
+    // A host that forwards IPv6 receives the VM namespace's router
+    // solicitations here. Drop them apart from the guest IPv4 host counter.
     writeln!(
         rules,
-        "add rule inet {table} input iifname {interface} counter drop"
+        "add rule inet {table} input iifname {interface} meta nfproto ipv6 counter drop"
+    )?;
+    writeln!(
+        rules,
+        "add rule inet {table} input iifname {interface} counter name {} drop",
+        RejectCounter::Host.name()
     )?;
     // Every forward rule below matches with `ip ...` selectors, which only
     // match IPv4. Without this drop, an IPv6 frame from the guest would fall
@@ -3566,12 +3607,14 @@ fn network_firewall_rules(
     )?;
     writeln!(
         rules,
-        "add rule inet {table} forward iifname {interface} ip saddr != {} counter drop",
-        network.guest_cidr
+        "add rule inet {table} forward iifname {interface} ip saddr != {} counter name {} drop",
+        network.guest_cidr,
+        RejectCounter::SpoofedSource.name()
     )?;
     writeln!(
         rules,
-        "add rule inet {table} forward iifname {interface} ip daddr {EXO_NETWORK_CIDR} counter reject"
+        "add rule inet {table} forward iifname {interface} ip daddr {EXO_NETWORK_CIDR} counter name {} reject",
+        RejectCounter::OtherVm.name()
     )?;
     for cidr in &config.allowed_egress_cidrs {
         writeln!(
@@ -3579,20 +3622,19 @@ fn network_firewall_rules(
             "add rule inet {table} forward iifname {interface} ip daddr {cidr} counter accept"
         )?;
     }
-    writeln!(
-        rules,
-        "add rule inet {table} forward iifname {interface} ip daddr {{ {} }} counter reject",
-        BLOCKED_EGRESS_CIDRS.join(", ")
-    )?;
-    let final_egress_verdict = if policy.networking == SandboxNetworkPolicy::Unrestricted {
-        "accept"
+    write_blocked_destination_rules(&mut rules, table, "forward", interface)?;
+    if policy.networking == SandboxNetworkPolicy::Unrestricted {
+        writeln!(
+            rules,
+            "add rule inet {table} forward iifname {interface} counter accept"
+        )?;
     } else {
-        "reject"
-    };
-    writeln!(
-        rules,
-        "add rule inet {table} forward iifname {interface} counter {final_egress_verdict}"
-    )?;
+        writeln!(
+            rules,
+            "add rule inet {table} forward iifname {interface} counter name {} reject",
+            RejectCounter::EgressPolicy.name()
+        )?;
+    }
     writeln!(
         rules,
         "add rule inet {table} forward oifname {interface} ct state established,related counter accept"
@@ -3607,6 +3649,33 @@ fn network_firewall_rules(
         network.guest_cidr
     )?;
     Ok(rules)
+}
+
+fn add_reject_counters(rules: &mut String, table: &str) -> Result<()> {
+    for counter in RejectCounter::ALL {
+        writeln!(rules, "add counter inet {table} {}", counter.name())?;
+    }
+    Ok(())
+}
+
+fn write_blocked_destination_rules(
+    rules: &mut String,
+    table: &str,
+    chain: &str,
+    interface: &str,
+) -> Result<()> {
+    writeln!(
+        rules,
+        "add rule inet {table} {chain} iifname {interface} ip daddr {METADATA_EGRESS_CIDR} counter name {} reject",
+        RejectCounter::Metadata.name()
+    )?;
+    writeln!(
+        rules,
+        "add rule inet {table} {chain} iifname {interface} ip daddr {{ {} }} counter name {} reject",
+        BLOCKED_EGRESS_CIDRS.join(", "),
+        RejectCounter::PrivateRange.name()
+    )?;
+    Ok(())
 }
 
 pub(super) async fn native_egress_transport(
@@ -3692,6 +3761,7 @@ fn proxy_network_firewall_rules(
     let source = network.guest_ip;
     let mut rules = String::new();
     writeln!(rules, "add table inet {table}")?;
+    add_reject_counters(&mut rules, table)?;
     for (chain, kind, priority) in [
         ("prerouting", "nat", "dstnat"),
         ("input", "filter", "filter"),
@@ -3733,7 +3803,8 @@ fn proxy_network_firewall_rules(
         )?;
         writeln!(
             rules,
-            "add rule inet {table} {chain} iifname {interface} ip saddr != {source} counter drop"
+            "add rule inet {table} {chain} iifname {interface} ip saddr != {source} counter name {} drop",
+            RejectCounter::SpoofedSource.name()
         )?;
         for (protocol, destination) in [
             ("tcp", proxy.http),
@@ -3753,11 +3824,13 @@ fn proxy_network_firewall_rules(
             "add rule inet {table} {chain} iifname {interface} ct direction reply ct state established,related counter accept"
         )?;
         if chain == "forward" {
+            // Other VMs are also private addresses; this rule only counts them apart.
             writeln!(
                 rules,
-                "add rule inet {table} {chain} iifname {interface} ip daddr {{ {} }} counter reject",
-                BLOCKED_EGRESS_CIDRS.join(", ")
+                "add rule inet {table} {chain} iifname {interface} ip daddr {EXO_NETWORK_CIDR} counter name {} reject",
+                RejectCounter::OtherVm.name()
             )?;
+            write_blocked_destination_rules(&mut rules, table, chain, interface)?;
             let hosts = if policy.networking == SandboxNetworkPolicy::Unrestricted {
                 ""
             } else {
@@ -3782,9 +3855,15 @@ fn proxy_network_firewall_rules(
                 Some(_) => {}
             }
         }
+        let counter = if chain == "input" {
+            RejectCounter::Host
+        } else {
+            RejectCounter::EgressPolicy
+        };
         writeln!(
             rules,
-            "add rule inet {table} {chain} iifname {interface} counter reject"
+            "add rule inet {table} {chain} iifname {interface} counter name {} reject",
+            counter.name()
         )?;
     }
     writeln!(

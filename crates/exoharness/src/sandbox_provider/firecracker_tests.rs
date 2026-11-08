@@ -110,7 +110,7 @@ fn disabled_sandbox_network_rejects_unconfigured_egress() {
 
     assert!(rules.contains("ip daddr 192.0.2.0/24 counter accept"));
     assert!(rules.contains(&format!(
-        "forward iifname {} counter reject",
+        "forward iifname {} counter name egress_policy reject",
         network.host_veth
     )));
     assert!(!rules.contains(&format!(
@@ -176,11 +176,434 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
         let rules = network_firewall_rules(&config, &network, &policy.into(), Some(proxy)).unwrap();
         assert!(rules.contains("tcp dport 443 counter dnat ip to 192.0.2.10:18443"));
         assert!(rules.contains(&format!(
-            "forward iifname {} counter reject",
+            "forward iifname {} counter name egress_policy reject",
             network.host_veth
         )));
         assert!(!rules.contains("ip daddr 0.0.0.0/0 counter accept"));
     }
+}
+
+fn test_proxy_endpoints() -> crate::SandboxEgressProxy {
+    crate::SandboxEgressProxy {
+        http: "192.0.2.10:18080".parse().unwrap(),
+        https: "192.0.2.10:18443".parse().unwrap(),
+        dns: "192.0.2.10:1053".parse().unwrap(),
+    }
+}
+
+// The rule each named counter must follow, per mode, in rule order.
+fn counted_rules(network: &NetworkConfig, proxy: bool) -> Vec<String> {
+    let interface = &network.host_veth;
+    let source = if proxy {
+        network.guest_ip.to_string()
+    } else {
+        network.guest_cidr.clone()
+    };
+    let mut rules = vec![if proxy {
+        format!("input iifname {interface} ip saddr != {source} counter name spoofed_source drop")
+    } else {
+        format!("input iifname {interface} counter name host drop")
+    }];
+    if proxy {
+        rules.push(format!(
+            "input iifname {interface} counter name host reject"
+        ));
+    }
+    rules.extend([
+        format!(
+            "forward iifname {interface} ip saddr != {source} counter name spoofed_source drop"
+        ),
+        format!(
+            "forward iifname {interface} ip daddr {EXO_NETWORK_CIDR} counter name other_vm reject"
+        ),
+        format!("forward iifname {interface} ip daddr 169.254.0.0/16 counter name metadata reject"),
+        format!(
+            "forward iifname {interface} ip daddr {{ {} }} counter name private_range reject",
+            BLOCKED_EGRESS_CIDRS.join(", ")
+        ),
+        format!("forward iifname {interface} counter name egress_policy reject"),
+    ]);
+    rules
+}
+
+fn rule_position(rules: &str, rule: &str) -> usize {
+    rules
+        .lines()
+        .position(|line| line.ends_with(rule))
+        .unwrap_or_else(|| panic!("missing rule {rule:?} in\n{rules}"))
+}
+
+#[test]
+fn every_guest_reject_rule_updates_a_named_counter() {
+    let config = FirecrackerConfig {
+        allowed_egress_cidrs: vec!["192.0.2.0/24".parse().unwrap()],
+        ..Default::default()
+    };
+    let network = network_config(3);
+    let limited = crate::EgressPolicy::from(SandboxNetworkPolicy::Limited {
+        allowed_hosts: vec!["api.test".into()],
+    });
+    for (rules, proxy) in [
+        (
+            network_firewall_rules(
+                &config,
+                &network,
+                &SandboxNetworkPolicy::Disabled.into(),
+                None,
+            )
+            .unwrap(),
+            false,
+        ),
+        (
+            network_firewall_rules(&config, &network, &limited, Some(test_proxy_endpoints()))
+                .unwrap(),
+            true,
+        ),
+    ] {
+        for counter in RejectCounter::ALL {
+            assert!(
+                rules.contains(&format!(
+                    "add counter inet {} {}\n",
+                    network.nft_table,
+                    counter.name()
+                )),
+                "{} is not declared",
+                counter.name()
+            );
+        }
+        let mut previous = 0;
+        for rule in counted_rules(&network, proxy) {
+            let position = rule_position(&rules, &rule);
+            assert!(position > previous, "{rule:?} is out of order in\n{rules}");
+            previous = position;
+        }
+        for line in rules.lines() {
+            let guest = line.contains(&format!("iifname {} ", network.host_veth));
+            let rejects = line.ends_with(" reject") || line.ends_with(" drop");
+            if guest && rejects && !line.contains("counter name ") {
+                assert!(
+                    line.contains("meta nfproto ipv6 counter drop"),
+                    "{line:?} has no named counter"
+                );
+            }
+        }
+    }
+    let direct = network_firewall_rules(
+        &config,
+        &network,
+        &SandboxNetworkPolicy::Disabled.into(),
+        None,
+    )
+    .unwrap();
+    assert!(
+        rule_position(&direct, "ip daddr 192.0.2.0/24 counter accept")
+            < rule_position(&direct, "counter name metadata reject"),
+        "an admitted CIDR must still precede the blocked ranges"
+    );
+    assert!(
+        rule_position(&direct, "counter name other_vm reject")
+            < rule_position(&direct, "ip daddr 192.0.2.0/24 counter accept"),
+        "an admitted CIDR must not reach other VMs"
+    );
+}
+
+#[test]
+fn reject_counter_names_round_trip_through_nft_json() {
+    for counter in RejectCounter::ALL {
+        assert_eq!(
+            serde_json::from_value::<RejectCounter>(serde_json::json!(counter.name())).unwrap(),
+            counter
+        );
+    }
+}
+
+// Captured from `nft -j list counters table inet ...` (nftables 1.1.6).
+const NFT_COUNTERS: &str = r#"{"nftables": [{"metainfo": {"version": "1.1.6", "release_name": "Commodore Bullmoose #7", "json_schema_version": 1}}, {"counter": {"family": "inet", "name": "metadata", "table": "exo_fc_00000003", "handle": 1, "packets": 2, "bytes": 168}}, {"counter": {"family": "inet", "name": "private_range", "table": "exo_fc_00000003", "handle": 2, "packets": 0, "bytes": 0}}, {"counter": {"family": "inet", "name": "other_vm", "table": "exo_fc_00000003", "handle": 3, "packets": 1, "bytes": 84}}, {"counter": {"family": "inet", "name": "egress_policy", "table": "exo_fc_00000003", "handle": 4, "packets": 7, "bytes": 420}}, {"counter": {"family": "inet", "name": "host", "table": "exo_fc_00000003", "handle": 5, "packets": 0, "bytes": 0}}, {"counter": {"family": "inet", "name": "spoofed_source", "table": "exo_fc_00000003", "handle": 6, "packets": 0, "bytes": 0}}]}"#;
+
+#[test]
+fn reject_counts_report_only_nonzero_changes() {
+    let first = firewall::RejectCounts::parse(NFT_COUNTERS.as_bytes()).unwrap();
+    let changes = |current: &firewall::RejectCounts, previous: &firewall::RejectCounts| {
+        current
+            .since(previous)
+            .map(|(counter, count)| (counter.name(), count.packets, count.bytes))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        changes(&first, &Default::default()),
+        [
+            ("metadata", 2, 168),
+            ("other_vm", 1, 84),
+            ("egress_policy", 7, 420)
+        ]
+    );
+    assert!(changes(&first, &first).is_empty());
+    let later = firewall::RejectCounts::parse(
+        NFT_COUNTERS
+            .replace(
+                r#""packets": 7, "bytes": 420"#,
+                r#""packets": 9, "bytes": 540"#,
+            )
+            .replace(
+                r#""packets": 2, "bytes": 168"#,
+                r#""packets": 1, "bytes": 60"#,
+            )
+            .as_bytes(),
+    )
+    .unwrap();
+    // metadata went down, so its table was recreated and all of it is new.
+    assert_eq!(
+        changes(&later, &first),
+        [("metadata", 1, 60), ("egress_policy", 2, 120)]
+    );
+    let legacy = firewall::RejectCounts::parse(
+        br#"{"nftables": [{"metainfo": {"version": "1.1.6", "json_schema_version": 1}}]}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy, Default::default());
+    assert!(
+        firewall::RejectCounts::parse(&NFT_COUNTERS.replace("other_vm", "unknown").into_bytes())
+            .is_err()
+    );
+}
+
+#[test]
+fn firewall_reject_signals_carry_the_machine_and_rule() {
+    let counts = firewall::RejectCounts::parse(NFT_COUNTERS.as_bytes()).unwrap();
+    let events = crate::sandbox_signal::tests::capture(|| {
+        firewall::emit(
+            "sandbox-fw",
+            "fc-0123456789abcdef-00000003",
+            &counts,
+            &Default::default(),
+        );
+    });
+    let rejects = events
+        .iter()
+        .map(|event| {
+            assert_eq!(event.target, crate::sandbox_signal::TARGET);
+            assert_eq!(event.fields["signal"], "sandbox.firewall_rejects");
+            assert_eq!(event.fields["sandbox_id"], "sandbox-fw");
+            assert_eq!(event.fields["source"], "exo.firecracker.nftables");
+            assert_eq!(event.fields["severity"], "signal");
+            assert_eq!(event.fields["machine_id"], "fc-0123456789abcdef-00000003");
+            (
+                event.fields["rule"].as_str(),
+                event.fields["packets"].as_str(),
+                event.fields["bytes"].as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rejects,
+        [
+            ("metadata", "2", "168"),
+            ("other_vm", "1", "84"),
+            ("egress_policy", "7", "420")
+        ]
+    );
+}
+
+struct GuestNamespace(String);
+
+impl Drop for GuestNamespace {
+    fn drop(&mut self) {
+        run_ignoring_status("ip", &["netns", "del", &self.0]);
+    }
+}
+
+// Loads each generated table into the current network namespace, sends
+// traffic from a peer namespace at every rejected purpose, and checks the
+// signals the counter reader emits. Run it inside a disposable namespace:
+//
+//   cargo test -p exoharness --features firecracker --lib --no-run
+//   sudo ip netns add exo-fw-test
+//   sudo ip netns exec exo-fw-test target/debug/deps/exoharness-<hash> \
+//     --ignored --exact sandbox_provider::firecracker::tests::nftables_counts_each_reject_purpose
+//   sudo ip netns del exo-fw-test
+#[test]
+#[ignore = "needs root inside a disposable network namespace; see the comment above"]
+fn nftables_counts_each_reject_purpose() -> Result<()> {
+    ensure!(rustix::process::geteuid().is_root(), "run as root");
+    ensure!(
+        fs::metadata("/proc/self/ns/net")?.ino() != fs::metadata("/proc/1/ns/net")?.ino(),
+        "refusing to change the host's own nftables ruleset; run inside a disposable namespace"
+    );
+    let network = network_config(3);
+    let guest = GuestNamespace(format!("exo-fw-guest-{}", std::process::id()));
+    let spoofed = ipv4_add(NETWORK_BASE, 99);
+    let guest_exec = |arguments: &[&str]| {
+        let mut command = vec!["netns", "exec", &guest.0];
+        command.extend(arguments);
+        run_checked("ip", &command)
+    };
+    run_checked("ip", &["netns", "add", &guest.0])?;
+    run_checked(
+        "ip",
+        &[
+            "link",
+            "add",
+            &network.host_veth,
+            "type",
+            "veth",
+            "peer",
+            "name",
+            "guest0",
+            "netns",
+            &guest.0,
+        ],
+    )?;
+    run_checked(
+        "ip",
+        &[
+            "addr",
+            "add",
+            &format!("{}/30", network.guest_gateway),
+            "dev",
+            &network.host_veth,
+        ],
+    )?;
+    run_checked("ip", &["link", "set", &network.host_veth, "up"])?;
+    run_checked("ip", &["link", "add", "uplink0", "type", "dummy"])?;
+    run_checked("ip", &["addr", "add", "203.0.113.1/24", "dev", "uplink0"])?;
+    run_checked("ip", &["link", "set", "uplink0", "up"])?;
+    run_checked(
+        "ip",
+        &[
+            "route",
+            "add",
+            "default",
+            "via",
+            "203.0.113.254",
+            "dev",
+            "uplink0",
+        ],
+    )?;
+    for setting in [
+        "net.ipv4.ip_forward=1",
+        "net.ipv4.conf.all.rp_filter=0",
+        &format!("net.ipv4.conf.{}.rp_filter=0", network.host_veth),
+    ] {
+        run_checked("sysctl", &["-q", "-w", setting])?;
+    }
+    guest_exec(&[
+        "ip",
+        "addr",
+        "add",
+        &format!("{}/30", network.guest_ip),
+        "dev",
+        "guest0",
+    ])?;
+    guest_exec(&[
+        "ip",
+        "addr",
+        "add",
+        &format!("{spoofed}/32"),
+        "dev",
+        "guest0",
+    ])?;
+    guest_exec(&["ip", "link", "set", "guest0", "up"])?;
+    guest_exec(&[
+        "ip",
+        "route",
+        "add",
+        "default",
+        "via",
+        &network.guest_gateway.to_string(),
+    ])?;
+
+    let gateway = network.guest_gateway.to_string();
+    let spoofed = spoofed.to_string();
+    let ping = |destination: &str, count: u32, source: Option<&str>| -> Result<()> {
+        let count = count.to_string();
+        let mut arguments = vec![
+            "netns", "exec", &guest.0, "ping", "-n", "-q", "-c", &count, "-i", "0.2", "-W", "1",
+        ];
+        if let Some(source) = source {
+            arguments.extend(["-I", source]);
+        }
+        arguments.push(destination);
+        let status = Command::new(trusted_host_command("ip")?)
+            .args(&arguments)
+            .stdout(Stdio::null())
+            .status()?;
+        ensure!(
+            !status.success(),
+            "{destination} answered through the sandbox firewall"
+        );
+        Ok(())
+    };
+    let traffic = || -> Result<()> {
+        ping("169.254.169.254", 2, None)?;
+        ping("10.240.0.50", 1, None)?;
+        ping("192.168.1.1", 1, None)?;
+        ping("8.8.8.8", 3, None)?;
+        ping(&gateway, 1, None)?;
+        ping("8.8.8.8", 1, Some(&spoofed))
+    };
+    let expected = [
+        ("metadata", "2", "168"),
+        ("private_range", "1", "84"),
+        ("other_vm", "1", "84"),
+        ("egress_policy", "3", "252"),
+        ("host", "1", "84"),
+        ("spoofed_source", "1", "84"),
+    ];
+    let config = FirecrackerConfig::default();
+    let limited = crate::EgressPolicy::from(SandboxNetworkPolicy::Limited {
+        allowed_hosts: vec!["api.test".into()],
+    });
+    let tables = [
+        network_firewall_rules(
+            &config,
+            &network,
+            &SandboxNetworkPolicy::Disabled.into(),
+            None,
+        )?,
+        network_firewall_rules(&config, &network, &limited, Some(test_proxy_endpoints()))?,
+    ];
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    for rules in tables {
+        run_checked_input("nft", &["-f", "-"], rules.as_bytes())?;
+        let counters = firewall::FirewallCounters::default();
+        let mut result = Ok(());
+        let events = crate::sandbox_signal::tests::capture(|| {
+            result = runtime.block_on(async {
+                counters.watch("sandbox-fw", "created", &network.nft_table, true);
+                // Blocking here is fine: nothing else runs until the next read.
+                traffic()?;
+                counters.poll().await;
+                counters.watch("sandbox-fw", "adopted", &network.nft_table, false);
+                counters.poll().await;
+                ping("169.254.169.254", 1, None)?;
+                counters.finish("created").await;
+                counters.poll().await;
+                Ok::<_, anyhow::Error>(())
+            });
+        });
+        result?;
+        let rejects = |machine: &str| {
+            events
+                .iter()
+                .filter(|event| event.fields["machine_id"] == machine)
+                .map(|event| {
+                    (
+                        event.fields["rule"].as_str(),
+                        event.fields["packets"].as_str(),
+                        event.fields["bytes"].as_str(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut created = expected.to_vec();
+        created.push(("metadata", "1", "84"));
+        assert_eq!(rejects("created"), created, "{rules}");
+        assert_eq!(rejects("adopted"), [("metadata", "1", "84")], "{rules}");
+        run_checked("nft", &["delete", "table", "inet", &network.nft_table])?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -938,6 +1361,7 @@ fn test_shared(
         _state_lock: state_lock,
         warm_machines: Mutex::new(warm_machines),
         egress_transports: StdMutex::new(HashMap::new()),
+        firewall_counters: Arc::default(),
         lifecycle_locks: MachineLifecycleLocks::default(),
         capacity_gate: Mutex::new(()),
         starting_machines: Arc::new(StdMutex::new(HashSet::new())),

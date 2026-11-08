@@ -330,9 +330,14 @@ credential values.
   `sandbox.egress_request_dropped` counts the rest. Transparent HTTPS checks the
   TLS SNI before the handshake, so a client that rejects the proxy certificate
   still produces a denial.
+- `sandbox.firewall_rejects`: on Firecracker, the `packets` and `bytes` each
+  named reject counter in a VM's nftables table added since the previous read.
+  The `rule` is `metadata`, `private_range`, `other_vm`, `egress_policy`, `host`
+  (host addresses other than the proxy), or `spoofed_source`. Counters are read
+  every minute and before the table is removed.
 
 Unrestricted networking without credentials or port limits uses neither the
-proxy nor host DNS, so it produces neither signal.
+proxy nor host DNS, so only firewall signals cover it.
 
 ## SmolVM
 
