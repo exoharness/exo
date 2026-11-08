@@ -733,7 +733,32 @@ fn base_command(argv: &[String], cwd: &str, env: &HashMap<String, String>) -> Co
     command
 }
 
+// Root regained through sudo or another setuid program keeps CAP_SYS_ADMIN for
+// Docker, but not raw memory and port I/O, module loading, reboot or kexec, or
+// the narrower CAP_PERFMON and CAP_BPF. The bounding set survives execve and
+// can only shrink, so no workload descendant regains these capabilities.
+// Values are from include/uapi/linux/capability.h.
+// https://man7.org/linux/man-pages/man7/capabilities.7.html
+const CAP_SYS_MODULE: libc::c_ulong = 16;
+const CAP_SYS_RAWIO: libc::c_ulong = 17;
+const CAP_SYS_BOOT: libc::c_ulong = 22;
+const CAP_PERFMON: libc::c_ulong = 38;
+const CAP_BPF: libc::c_ulong = 39;
+const WORKLOAD_BOUNDING_SET_DROPS: [libc::c_ulong; 5] = [
+    CAP_SYS_MODULE,
+    CAP_SYS_RAWIO,
+    CAP_SYS_BOOT,
+    CAP_PERFMON,
+    CAP_BPF,
+];
+
 fn set_command_user() -> std::io::Result<()> {
+    // Dropping needs CAP_SETPCAP, so it must happen before setresuid.
+    for capability in WORKLOAD_BOUNDING_SET_DROPS {
+        if unsafe { libc::prctl(libc::PR_CAPBSET_DROP, capability, 0, 0, 0) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
     if unsafe { libc::setgroups(0, ptr::null()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -1811,5 +1836,115 @@ mod tests {
         let result = unsafe { libc::ioctl(descriptor, libc::TIOCGWINSZ, &mut dimensions) };
         assert_eq!(result, 0);
         (dimensions.ws_row, dimensions.ws_col)
+    }
+
+    #[test]
+    #[ignore = "requires root and passwordless sudo for UID 10001"]
+    fn workload_root_lacks_dropped_capabilities() {
+        assert_eq!(unsafe { libc::geteuid() }, 0, "run this test as root");
+        let dropped = WORKLOAD_BOUNDING_SET_DROPS
+            .iter()
+            .fold(0_u64, |mask, capability| mask | 1 << capability);
+        let cap_sys_admin = 1_u64 << 21;
+        let supervisor = fs::read_to_string("/proc/self/status").unwrap();
+        assert_eq!(capability_set(&supervisor, "CapBnd:") & dropped, dropped);
+        File::open("/dev/mem").unwrap();
+
+        for allow_guest_root in [false, true] {
+            ALLOW_GUEST_ROOT.store(allow_guest_root, Ordering::Relaxed);
+            let user = run(&["/bin/cat", "/proc/self/status"]);
+            assert!(user.ok, "{user:?}");
+            let status = user.stdout.unwrap();
+            assert_eq!(capability_set(&status, "CapBnd:") & dropped, 0, "{status}");
+        }
+        let terminal = ManagedProcess::spawn_terminal(
+            &["/bin/cat".into(), "/proc/self/status".into()],
+            "/",
+            &HashMap::new(),
+            TerminalSize { rows: 24, cols: 80 },
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let (events, exited) = terminal.events.recv(Duration::from_millis(100)).unwrap();
+            for event in events {
+                if let ProcessEvent::Stdout { data } = event {
+                    output.extend(STANDARD.decode(data).unwrap());
+                }
+            }
+            if exited {
+                break;
+            }
+            assert!(Instant::now() < deadline, "terminal did not exit");
+        }
+        let status = String::from_utf8(output).unwrap();
+        assert_eq!(capability_set(&status, "CapBnd:") & dropped, 0, "{status}");
+
+        let root = run(&["sudo", "-n", "/bin/cat", "/proc/self/status"]);
+        assert!(root.ok, "{root:?}");
+        let status = root.stdout.unwrap();
+        println!("{status}");
+        assert!(
+            status
+                .lines()
+                .any(|line| line.split_whitespace().eq(["Uid:", "0", "0", "0", "0"])),
+            "{status}"
+        );
+        assert_eq!(capability_set(&status, "CapBnd:") & dropped, 0);
+        assert_eq!(capability_set(&status, "CapEff:") & dropped, 0);
+        assert_ne!(capability_set(&status, "CapEff:") & cap_sys_admin, 0);
+
+        for device in ["/dev/mem", "/dev/port"] {
+            let open = run(&["sudo", "-n", "/bin/sh", "-c", &format!("exec 3<{device}")]);
+            println!("{device}: {:?}", open.stderr);
+            assert!(!open.ok, "{open:?}");
+            assert!(
+                open.stderr
+                    .as_deref()
+                    .is_some_and(|stderr| stderr.contains("Operation not permitted")),
+                "{open:?}"
+            );
+        }
+
+        let root_only = tempfile::tempdir().unwrap();
+        let path = root_only.path().display();
+        let write = run(&["/bin/sh", "-c", &format!("echo user > {path}/file")]);
+        assert!(!write.ok, "{write:?}");
+        let write = run(&[
+            "sudo",
+            "-n",
+            "/bin/sh",
+            "-c",
+            &format!("echo root > {path}/file"),
+        ]);
+        assert!(write.ok, "{write:?}");
+        assert_eq!(
+            fs::read_to_string(root_only.path().join("file")).unwrap(),
+            "root\n"
+        );
+        let mount = run(&[
+            "sudo",
+            "-n",
+            "unshare",
+            "--mount",
+            "/bin/sh",
+            "-c",
+            &format!("mount -t tmpfs tmpfs {path} && umount {path}"),
+        ]);
+        assert!(mount.ok, "{mount:?}");
+    }
+
+    fn run(argv: &[&str]) -> Response {
+        let argv = argv.iter().map(ToString::to_string).collect::<Vec<_>>();
+        exec(&argv, "/", &HashMap::new(), Some(10_000))
+    }
+
+    fn capability_set(status: &str, field: &str) -> u64 {
+        let value = status
+            .lines()
+            .find_map(|line| line.strip_prefix(field))
+            .unwrap_or_else(|| panic!("missing {field} in {status}"));
+        u64::from_str_radix(value.trim(), 16).unwrap()
     }
 }
