@@ -1074,6 +1074,7 @@ fn signal_ready_to_host() -> Result<(), String> {
 
 fn initialize_guest() -> Result<(), String> {
     mount_pseudo_filesystems()?;
+    disable_kernel_code_loading(Path::new("/proc/sys"))?;
     let command_line = fs::read_to_string("/proc/cmdline").map_err(|error| error.to_string())?;
     let allow_guest_root = guest_root_allowed(&command_line)?;
     ALLOW_GUEST_ROOT.store(allow_guest_root, Ordering::Relaxed);
@@ -1100,6 +1101,23 @@ fn initialize_guest() -> Result<(), String> {
         mount_resources(mounts)?;
     }
     std::env::set_current_dir(&workspace).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+// Guest root could otherwise load kernel code through modules or kexec
+// without exploiting the kernel. Both switches are one-way until reboot, so
+// setting them before any workload starts keeps root from restoring either.
+// https://docs.kernel.org/admin-guide/sysctl/kernel.html#modules-disabled
+// https://docs.kernel.org/admin-guide/sysctl/kernel.html#kexec-load-disabled
+fn disable_kernel_code_loading(proc_sys: &Path) -> Result<(), String> {
+    for name in ["kernel/modules_disabled", "kernel/kexec_load_disabled"] {
+        let path = proc_sys.join(name);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|mut file| file.write_all(b"1"))
+            .map_err(|error| format!("writing {}: {error}", path.display()))?;
+    }
     Ok(())
 }
 
@@ -1776,6 +1794,23 @@ mod tests {
         assert!(guest_root_allowed("exo_allow_guest_root=1").unwrap());
         assert!(!guest_root_allowed("unrelated_exo_allow_guest_root=1").unwrap());
         assert!(guest_root_allowed("exo_allow_guest_root=true").is_err());
+    }
+
+    #[test]
+    fn kernel_code_loading_switches_are_set_and_required() {
+        let proc_sys = tempfile::tempdir().unwrap();
+        let kernel = proc_sys.path().join("kernel");
+        fs::create_dir(&kernel).unwrap();
+        fs::write(kernel.join("modules_disabled"), "0").unwrap();
+        let error = disable_kernel_code_loading(proc_sys.path()).unwrap_err();
+        assert!(error.contains("kexec_load_disabled"), "{error}");
+        assert!(!kernel.join("kexec_load_disabled").exists());
+
+        fs::write(kernel.join("kexec_load_disabled"), "0").unwrap();
+        disable_kernel_code_loading(proc_sys.path()).unwrap();
+        for name in ["modules_disabled", "kexec_load_disabled"] {
+            assert_eq!(fs::read_to_string(kernel.join(name)).unwrap(), "1");
+        }
     }
 
     #[test]

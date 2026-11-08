@@ -119,7 +119,8 @@ sudo support/firecracker/build-initramfs.sh \
 
 The guest runtime is statically linked and runs directly as PID 1 from the
 initramfs. It mounts the immutable base and sparse upper with OverlayFS, mounts
-the pseudo filesystems, configures the guest network, mounts an optional
+the pseudo filesystems, disables kernel module loading and kexec, configures
+the guest network, mounts an optional
 workspace, reaps orphaned descendants like an init should, and serves the
 bounded process protocol only to the host vsock CID. Every workload child
 clears supplementary groups and starts as UID/GID 10001. The root filesystem
@@ -153,7 +154,10 @@ total materialization path. Blob-pull logs also report bytes and cache hit/miss
 counts.
 
 The guest kernel must contain `CONFIG_BLK_DEV_INITRD=y`, `CONFIG_EXT4_FS=y`,
-`CONFIG_OVERLAY_FS=y`, and `CONFIG_VIRTIO_VSOCKETS=y`; the host requires KVM,
+`CONFIG_OVERLAY_FS=y`, and `CONFIG_VIRTIO_VSOCKETS=y`. It must also expose the
+`kernel.modules_disabled` and `kernel.kexec_load_disabled` sysctls
+(`CONFIG_MODULES=y`, `CONFIG_KEXEC_CORE=y`); the guest refuses to boot if it
+cannot set both. The host requires KVM,
 cgroup v2, iproute2, iptables, nftables, e2fsprogs, cpio, static glibc
 development files for the guest-runtime build, and `CONFIG_VHOST_VSOCK`.
 Networking-enabled sandboxes additionally require `net.ipv4.ip_forward=1`,
