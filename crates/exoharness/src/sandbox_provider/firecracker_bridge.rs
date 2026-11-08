@@ -702,6 +702,7 @@ async fn proxy_process(
     writer: &BridgeWriter,
 ) -> Result<()> {
     let SandboxProcessParts {
+        control: _control,
         stdout,
         stderr,
         stdin,

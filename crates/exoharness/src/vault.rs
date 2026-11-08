@@ -10,6 +10,11 @@ mod local;
 pub(crate) use local::BasicVaultStore;
 
 #[cfg(feature = "store")]
+pub use local::oauth::refresh as refresh_oauth;
+#[cfg(feature = "store")]
+pub use oauth2::{HttpRequest as OAuthHttpRequest, HttpResponse as OAuthHttpResponse};
+
+#[cfg(feature = "store")]
 /// HTTP I/O for the shared OAuth refresh implementation. Redirects must be disabled.
 #[async_trait]
 pub trait OAuthHttpClient: Send + Sync {
