@@ -122,9 +122,9 @@ fn kernel_reports_exit_status() -> anyhow::Result<bool> {
 #[ignore = "requires root, KVM, TMPDIR on XFS, and the Firecracker host artifact bundle"]
 async fn firecracker_metrics_reach_the_host_after_boot_and_restore() -> anyhow::Result<()> {
     use exoharness::{
-        FirecrackerConfig, FirecrackerSandboxBackend, ManagedSandboxBackend,
-        SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxRequest, SandboxResourceShape,
-        SandboxSpec, SnapshotKind,
+        FirecrackerConfig, FirecrackerNetworkDevicePolicy, FirecrackerSandboxBackend,
+        ManagedSandboxBackend, SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxRequest,
+        SandboxResourceShape, SandboxSpec, SnapshotKind,
     };
 
     let capture = Capture::default();
@@ -138,6 +138,9 @@ async fn firecracker_metrics_reach_the_host_after_boot_and_restore() -> anyhow::
         jailer_bin: std::env::var("EXO_FIRECRACKER_JAILER")?.into(),
         image_size_gib: 1,
         workspace_size_gib: 1,
+        // Template capture needs a network device so a restore can enable
+        // networking, even for a sandbox whose networking is disabled.
+        network_device_policy: FirecrackerNetworkDevicePolicy::AllSandboxes,
         allow_guest_root: false,
         allowed_registries: vec!["docker.io".into()],
         ..Default::default()
