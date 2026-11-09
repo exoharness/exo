@@ -128,14 +128,8 @@ fn apply_grant(
     resources: SandboxResourceShape,
 ) -> Result<SandboxResourceShape> {
     let memory = resources.memory_mib.get();
-    let directory = jail_dir(config, &record.machine_id);
-    let temporary = directory.join("memory-grant.tmp");
-    let mut file = File::create(&temporary)?;
-    fs::set_permissions(&temporary, Permissions::from_mode(0o600))?;
-    file.write_all(&serde_json::to_vec(&memory)?)?;
-    file.sync_all()?;
-    fs::rename(&temporary, directory.join("memory-grant"))?;
-    File::open(&directory)?.sync_all()?;
+    // Reserve host capacity before publishing the new grant or releasing guest
+    // pages. A failed cgroup write must leave the previous grant retryable.
     fs::write(
         cgroup.join("memory.max"),
         ((u64::from(memory) + 1024) * 1024 * 1024).to_string(),
@@ -144,6 +138,16 @@ fn apply_grant(
         cgroup.join("memory.high"),
         ((u64::from(memory) + 256) * 1024 * 1024).to_string(),
     )?;
+    let directory = jail_dir(config, &record.machine_id);
+    let temporary = directory.join("memory-grant.tmp");
+    let mut file = File::create(&temporary)?;
+    fs::set_permissions(&temporary, Permissions::from_mode(0o600))?;
+    file.write_all(&serde_json::to_vec(&memory)?)?;
+    file.sync_all()?;
+    fs::rename(&temporary, directory.join("memory-grant"))?;
+    File::open(&directory)?.sync_all()?;
+    // Persist intent before deflation: a lost API response can be retried, but
+    // must never let another caller reduce memory the guest may already use.
     initialize(config, record)?;
     Ok(resources)
 }
@@ -152,18 +156,12 @@ fn apply_grant(
 mod tests {
     use super::*;
 
-    #[test]
-    fn host_limit_precedes_deflation_and_completion_waits_for_actual_pages() {
-        let root = tempfile::tempdir_in("/tmp").unwrap();
-        let config = FirecrackerConfig {
-            state_root: root.path().to_owned(),
-            ..Default::default()
-        };
+    fn record() -> MachineRecord {
         let mut runtime = super::super::tests::test_runtime();
         runtime.vcpu_count = 2;
         runtime.memory_mib = 4096;
         runtime.memory_ceiling_mib = Some(16384);
-        let record = MachineRecord {
+        MachineRecord {
             machine_id: "fc-0123456789abcdef-01234567".to_owned(),
             spec_hash: "spec".to_owned(),
             runtime,
@@ -175,7 +173,38 @@ mod tests {
             idle_ttl_seconds: None,
             snapshot_template: None,
             snapshot_network_slot: None,
+        }
+    }
+
+    #[test]
+    fn failed_host_limit_does_not_publish_a_grant() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let config = FirecrackerConfig {
+            state_root: root.path().into(),
+            ..Default::default()
         };
+        let record = record();
+        fs::create_dir_all(jail_dir(&config, &record.machine_id))?;
+        let error = apply_grant(
+            &config,
+            &record,
+            &root.path().join("missing-cgroup"),
+            SandboxResourceShape::new(2, 8192).unwrap(),
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(grant(&config, &record)?, 4096);
+        Ok(())
+    }
+
+    #[test]
+    fn host_limit_precedes_deflation_and_completion_waits_for_actual_pages() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let config = FirecrackerConfig {
+            state_root: root.path().to_owned(),
+            ..Default::default()
+        };
+        let record = record();
         let initial = configuration(&config, &record).unwrap().unwrap();
         assert_eq!(initial.amount_mib, 12288);
         assert!(!initial.deflate_on_oom);
@@ -187,6 +216,7 @@ mod tests {
         let cgroup_for_peer = cgroup.clone();
         let peer = std::thread::spawn(move || {
             for (index, response) in [
+                String::new(),
                 String::new(),
                 serde_json::json!({"target_pages": 8192 * 256, "actual_pages": 12288 * 256})
                     .to_string(),
@@ -205,7 +235,7 @@ mod tests {
                 let mut reader = StdBufReader::new(stream.try_clone().unwrap());
                 let mut request = String::new();
                 reader.read_line(&mut request).unwrap();
-                assert!(request.starts_with(if index == 0 {
+                assert!(request.starts_with(if index < 2 {
                     "PATCH /balloon "
                 } else {
                     "GET /balloon/statistics "
@@ -223,7 +253,7 @@ mod tests {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
-                if index == 0 {
+                if index < 2 {
                     assert_eq!(
                         serde_json::from_slice::<BalloonTarget>(&body)
                             .unwrap()
@@ -241,7 +271,12 @@ mod tests {
                 }
                 write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    if index == 0 {
+                        "500 Internal Server Error"
+                    } else {
+                        "200 OK"
+                    },
                     response.len(),
                     response
                 )
@@ -249,6 +284,8 @@ mod tests {
             }
         });
         let resources = SandboxResourceShape::new(2, 8192).unwrap();
+        assert!(apply_grant(&config, &record, &cgroup, resources).is_err());
+        assert_eq!(grant(&config, &record).unwrap(), 8192);
         assert_eq!(
             apply_grant(&config, &record, &cgroup, resources).unwrap(),
             resources
