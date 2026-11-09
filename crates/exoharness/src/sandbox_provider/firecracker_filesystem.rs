@@ -381,9 +381,9 @@ impl FirecrackerSandboxBackend {
             "external filesystem disk set is incomplete"
         );
         for (disk, size) in disks.iter().zip(&manifest.disk_sizes) {
+            let metadata = fs::metadata(disk.backing_file())?;
             ensure!(
-                fs::metadata(disk.backing_file())?.is_file()
-                    && fs::metadata(disk.backing_file())?.len() == *size,
+                metadata.is_file() && metadata.len() == *size,
                 "external filesystem backing size mismatch"
             );
         }
@@ -574,11 +574,6 @@ impl FirecrackerSandboxBackend {
         );
         let capture = Arc::new(self.filesystem_snapshot_files(payload).await?);
         let mut resolved = prepare_request(request)?;
-        if let Some(memory_mib) = manifest.memory_mib {
-            let mut resources = resolved.spec.resources.unwrap_or_default();
-            resources.memory_mib = resources.memory_mib.max(memory_mib);
-            resolved.sandbox.spec.resources = Some(resources);
-        }
         validate_resource_shape(resolved.spec.resources.unwrap_or_default())?;
         let config = self.shared.config.clone();
         let capture_for_image = Arc::clone(&capture);
@@ -622,7 +617,7 @@ impl FirecrackerSandboxBackend {
         let reservation = self.shared.reserve_machine_capacity(&id).await?;
         let record = self
             .shared
-            .new_machine_record(&resolved, &id, &spec_hash, None)
+            .new_machine_record(&resolved, &id, &spec_hash, None, manifest.memory_mib)
             .await?;
         let config = self.shared.config.clone();
         let request_for_disks = resolved.clone();
@@ -766,10 +761,7 @@ pub(super) async fn snapshot_filesystem(
             let manifest = FilesystemManifest {
                 partial: false,
                 memory_mib: if source_for_capture.runtime.memory_ceiling_mib.is_some() {
-                    std::num::NonZeroU32::new(balloon::grant(
-                        &capture_shared.config,
-                        &source_for_capture,
-                    )?)
+                    std::num::NonZeroU32::new(balloon::grant(&source_for_capture)?)
                 } else {
                     None
                 },

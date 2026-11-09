@@ -55,28 +55,6 @@ fn statistics(config: &FirecrackerConfig, record: &MachineRecord) -> Result<Stat
     .map_err(Into::into)
 }
 
-// Fault in all 6 GiB and verify a nonzero byte in every page of guest RAM.
-// Reading MemTotal alone cannot prove that ballooned pages became usable.
-async fn write_six_gib(handle: &Arc<dyn ManagedSandboxHandle>) -> Result<()> {
-    let mut probe = command(
-        r#"python3 -c '
-import mmap
-n = 6 * 1024**3
-m = mmap.mmap(-1, n)
-m[::4096] = bytes([173]) * (n // 4096)
-assert m[::4096] == bytes([173]) * (n // 4096)
-print("wrote-and-verified-6-GiB")'
-"#,
-    );
-    probe.timeout = Some(Duration::from_secs(3600));
-    let output = handle.exec(&probe).await?;
-    ensure!(
-        output.ok && output.stdout.trim() == "wrote-and-verified-6-GiB",
-        "memory probe: {output:?}"
-    );
-    Ok(())
-}
-
 #[tokio::test]
 #[ignore = "requires root, KVM, ARM64/x86_64 artifacts, Python guest image, and TMPDIR on XFS"]
 async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> {
@@ -100,7 +78,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
         let original_limits = (fs::read(cgroup.join("memory.max"))?, fs::read(cgroup.join("memory.high"))?);
         for shape in [(2, 4096), (1, 2048), (1, 8193)] {
             assert!(handle.expand_resources(SandboxResourceShape::new(shape.0, shape.1).unwrap()).await.is_err());
-            assert_eq!(balloon::grant(&config, &record)?, 4096);
+            assert_eq!(balloon::grant(&allocation(&backend, &request).await?)?, 4096);
             assert_eq!(statistics(&config, &record)?, Statistics { target_pages: 4096 * 256, actual_pages: 4096 * 256 });
             assert_eq!((fs::read(cgroup.join("memory.max"))?, fs::read(cgroup.join("memory.high"))?), original_limits);
         }
@@ -129,7 +107,7 @@ while True:
         let grown = SandboxResourceShape::new(1, 8192).unwrap();
         assert_eq!(handle.expand_resources(grown).await?, grown);
         assert_eq!(handle.expand_resources(grown).await?, grown);
-        assert_eq!(balloon::grant(&config, &record)?, 8192);
+        assert_eq!(balloon::grant(&allocation(&backend, &request).await?)?, 8192);
         assert_eq!(statistics(&config, &record)?, Statistics { target_pages: 0, actual_pages: 0 });
         assert_eq!(fs::read_to_string(cgroup.join("memory.max"))?.trim(), (9216_u64 * 1024 * 1024).to_string());
         let after = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo").await?.trim().parse::<u64>()?;
@@ -159,14 +137,102 @@ while True:
         let restored = backend.acquire_from_snapshot(request.clone(), snapshot.clone()).await?;
         eprintln!("restored filesystem capture");
         let restored_record = allocation(&backend, &request).await?;
-        ensure!(balloon::grant(&config, &restored_record)? == 8192, "filesystem restore lost the expanded memory grant");
+        ensure!(balloon::grant(&restored_record)? == 8192, "filesystem restore lost the expanded memory grant");
         let available = shell(&restored, "awk '/MemAvailable:/ {print $2}' /proc/meminfo").await?.trim().parse::<u64>()?;
         assert!(available > 7 * 1024 * 1024, "restored available memory: {available}");
         assert_eq!(shell(&restored, "cat /tmp/root-state /workspace/state /repo/state").await?, "rootworkspacerepository");
-        restored.stop().await?;
+        request.spec.image = restored.effective_image().context("missing restored image")?;
+        request.provider_state = restored.provider_state();
+        let reattached = backend.acquire(request.clone()).await?;
+        let reattached_record = allocation(&backend, &request).await?;
+        ensure!(reattached_record.machine_id == restored_record.machine_id, "reacquisition replaced the restored VM");
+        ensure!(balloon::grant(&reattached_record)? == 8192, "reacquisition lost the expanded memory grant");
+        assert_eq!(shell(&reattached, "cat /tmp/root-state /workspace/state /repo/state").await?, "rootworkspacerepository");
+        let recaptured = reattached.snapshot(crate::SnapshotKind::Filesystem).await?;
+        backend.delete_snapshot(recaptured).await?;
+        reattached.stop().await?;
         backend.delete_snapshot(snapshot).await?;
         Ok(())
     }.await;
+    backend.terminate_all().await?;
+    result
+}
+
+#[tokio::test]
+#[ignore = "requires root, KVM, Firecracker artifacts, and TMPDIR on XFS"]
+async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<()> {
+    let temp = tempfile::Builder::new().prefix("m").tempdir()?;
+    let image = std::env::var("FIRECRACKER_IMAGE")?;
+    let mut config = config(temp.path(), &image);
+    config.memory_ceiling_mib = std::num::NonZeroU32::new(1024);
+    config.max_machines = NonZeroUsize::new(2);
+    let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
+    let source = SandboxRequest {
+        sandbox_id: "ram-source".into(),
+        scope: crate::ResourceScope::Global,
+        provider_state: None,
+        lifecycle: crate::SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(600)),
+        },
+        spec: SandboxSpec {
+            image,
+            resources: SandboxResourceShape::new(1, 512),
+            default_workdir: "/workspace".into(),
+            policy: SandboxNetworkPolicy::Disabled.into(),
+            tcp_ports: vec![],
+            mounts: vec![],
+            durable_file_systems: vec![],
+        },
+    };
+    let mut target = source.clone();
+    target.sandbox_id = "ram-target".into();
+    let result: Result<()> = async {
+        let handle = backend.acquire(source.clone()).await?;
+        handle
+            .expand_resources(SandboxResourceShape::new(1, 1024).unwrap())
+            .await?;
+        shell(&handle, "printf retained > /tmp/ram-state").await?;
+        let fork = backend.fork_sandbox(source.clone(), target.clone()).await?;
+        let fork_record = allocation(&backend, &target).await?;
+        ensure!(
+            balloon::grant(&fork_record)? == 1024,
+            "fork lost the memory grant"
+        );
+        ensure!(
+            fork_record.runtime.memory_mib == 512,
+            "fork changed the sandbox identity"
+        );
+        assert_eq!(shell(&fork, "cat /tmp/ram-state").await?, "retained");
+        target.provider_state = fork.provider_state();
+        target.spec.image = fork.effective_image().context("missing fork image")?;
+        let attached = backend.acquire(target.clone()).await?;
+        ensure!(
+            allocation(&backend, &target).await?.machine_id == fork_record.machine_id,
+            "reacquisition replaced the fork"
+        );
+        let snapshot = attached.snapshot(crate::SnapshotKind::Full).await?;
+        backend.terminate(target.clone()).await?;
+        let restored = backend
+            .acquire_from_snapshot(target.clone(), snapshot.clone())
+            .await?;
+        let restored_record = allocation(&backend, &target).await?;
+        ensure!(
+            balloon::grant(&restored_record)? == 1024,
+            "RAM restore lost the memory grant"
+        );
+        assert_eq!(
+            statistics(&config, &restored_record)?,
+            Statistics {
+                target_pages: 0,
+                actual_pages: 0
+            }
+        );
+        assert_eq!(shell(&restored, "cat /tmp/ram-state").await?, "retained");
+        restored.stop().await?;
+        backend.delete_snapshot(snapshot).await?;
+        Ok(())
+    }
+    .await;
     backend.terminate_all().await?;
     result
 }
@@ -203,7 +269,7 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
         drop(guard);
         tokio::time::timeout(Duration::from_secs(60), async {
             loop {
-                if balloon::grant(&config, &record)? == 6144
+                if balloon::grant(&allocation(&backend, &request).await?)? == 6144
                     && statistics(&config, &record)?.actual_pages == 2048 * 256
                 {
                     return Ok::<_, anyhow::Error>(());
@@ -219,7 +285,10 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
         );
         growth?;
         let capture = capture?;
-        assert_eq!(balloon::grant(&config, &record)?, 8192);
+        assert_eq!(
+            balloon::grant(&allocation(&backend, &request).await?)?,
+            8192
+        );
         assert_eq!(
             statistics(&config, &record)?,
             Statistics {
@@ -241,10 +310,18 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
             );
         }
         assert_eq!(handle.is_running().await?, Some(false));
+        ensure!(
+            backend
+                .shared
+                .load_machine_record(&record.machine_id)
+                .await?
+                .is_none(),
+            "stop retained the old allocation"
+        );
         request.spec.resources = SandboxResourceShape::new(1, 8192);
         let resumed = backend.acquire(request.clone()).await?;
         let resumed_record = allocation(&backend, &request).await?;
-        assert_eq!(balloon::grant(&config, &resumed_record)?, 8192);
+        assert_eq!(balloon::grant(&resumed_record)?, 8192);
         assert_eq!(shell(&resumed, "printf usable").await?, "usable");
         Ok(())
     }
@@ -268,8 +345,24 @@ async fn live_memory_growth_makes_six_gib_writable() -> Result<()> {
         handle
             .expand_resources(SandboxResourceShape::new(1, 8192).unwrap())
             .await?;
-        write_six_gib(&handle).await?;
-        eprintln!("wrote and verified 6 GiB after growing from 4 to 8 GiB");
+        // Fault in all 6 GiB and verify a nonzero byte in every page of guest RAM.
+        // Reading MemTotal alone cannot prove that ballooned pages became usable.
+        let mut probe = command(
+            r#"python3 -c '
+import mmap
+n = 6 * 1024**3
+m = mmap.mmap(-1, n)
+m[::4096] = bytes([173]) * (n // 4096)
+assert m[::4096] == bytes([173]) * (n // 4096)
+print("wrote-and-verified-6-GiB")'
+"#,
+        );
+        probe.timeout = Some(Duration::from_secs(3600));
+        let output = handle.exec(&probe).await?;
+        ensure!(
+            output.ok && output.stdout.trim() == "wrote-and-verified-6-GiB",
+            "memory probe: {output:?}"
+        );
         Ok(())
     }
     .await;
