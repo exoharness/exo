@@ -278,10 +278,14 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(Some(websocket_over(stream, port, path).await?))
     }
 
+    /// The largest resource shape this running sandbox can reach without restart.
+    /// None means live expansion is unsupported or was not enabled at boot.
     fn live_resource_ceiling(&self) -> Option<crate::SandboxResourceShape> {
         None
     }
 
+    /// Grow within the boot ceiling after the caller has reserved host capacity.
+    /// Retrying the same shape is safe, including after an ambiguous failure.
     async fn expand_resources(
         &self,
         _resources: crate::SandboxResourceShape,

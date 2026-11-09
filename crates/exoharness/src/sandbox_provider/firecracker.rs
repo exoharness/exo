@@ -216,6 +216,8 @@ pub struct FirecrackerConfig {
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L23-L24
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L71-L72
     pub max_machines: Option<NonZeroUsize>,
+    /// Opt in to live memory growth by booting with a balloon at this ceiling.
+    /// OOM deflation is disabled; callers must reserve capacity before growing.
     #[serde(default)]
     pub memory_ceiling_mib: Option<std::num::NonZeroU32>,
 }
@@ -2202,7 +2204,15 @@ impl Shared {
         let ready = async {
             match readiness {
                 GuestReadiness::Signal(listener) => {
-                    wait_for_guest(self, machine_id, listener).await?
+                    // Dirty tracking a larger boot allocation is expensive on
+                    // nested KVM hosts. Keep the ordinary boot deadline when
+                    // live growth is disabled.
+                    let timeout = if machine.record.runtime.memory_ceiling_mib.is_some() {
+                        Duration::from_secs(120)
+                    } else {
+                        GUEST_READY_TIMEOUT
+                    };
+                    wait_for_guest(self, machine_id, listener, timeout).await?
                 }
                 GuestReadiness::Probe => wait_for_restored_guest(self, &machine).await?,
             }
@@ -5879,12 +5889,15 @@ async fn wait_for_guest(
     shared: &Shared,
     machine_id: &str,
     listener: StdUnixListener,
+    timeout: Duration,
 ) -> Result<()> {
     let pid_path = shared.pid_path(machine_id);
     let stderr_path = jail_root(&shared.config, machine_id).join("firecracker.stderr");
-    tokio::task::spawn_blocking(move || wait_for_guest_blocking(&pid_path, &stderr_path, listener))
-        .await
-        .context("joining Firecracker guest-ready wait")?
+    tokio::task::spawn_blocking(move || {
+        wait_for_guest_blocking(&pid_path, &stderr_path, listener, timeout)
+    })
+    .await
+    .context("joining Firecracker guest-ready wait")?
 }
 
 #[tracing::instrument(name = "firecracker.restored_guest_ready", skip_all)]
@@ -5928,6 +5941,7 @@ fn wait_for_guest_blocking(
     pid_path: &Path,
     stderr_path: &Path,
     listener: StdUnixListener,
+    timeout: Duration,
 ) -> Result<()> {
     let started = Instant::now();
     // With --new-pid-ns the jailer clones Firecracker and only then writes the
@@ -5935,7 +5949,7 @@ fn wait_for_guest_blocking(
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md#jailer-usage
     let mut observed_process = false;
     listener.set_nonblocking(true)?;
-    while started.elapsed() < GUEST_READY_TIMEOUT {
+    while started.elapsed() < timeout {
         if process_running(pid_path) {
             observed_process = true;
         } else if observed_process {

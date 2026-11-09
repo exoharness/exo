@@ -1,8 +1,13 @@
 use super::*;
 
+#[cfg(target_os = "linux")]
+#[path = "firecracker_live_memory_tests.rs"]
+mod live_memory;
+
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
         partial: false,
+        memory_mib: None,
         template: false,
         key: "a".repeat(64),
         sandbox_id: "filesystem-test".into(),
@@ -275,6 +280,13 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let mut request = native_request(&config, "retained", &image)?;
     let handle = backend.acquire(request.clone()).await?;
+    assert!(handle.live_resource_ceiling().is_none());
+    assert!(
+        handle
+            .expand_resources(SandboxResourceShape::new(1, 2048).unwrap())
+            .await
+            .is_err()
+    );
     request.provider_state = handle.provider_state();
     shell(&handle, "printf '#!/bin/sh\nprintf root-installed:\ncat /repo/edit /workspace/state\n' > /tmp/retained-tool; chmod +x /tmp/retained-tool; printf captured > /repo/edit; printf workspace > /workspace/state").await?;
     assert!(handle.snapshot(crate::SnapshotKind::Full).await.is_err());
