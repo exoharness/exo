@@ -21,13 +21,10 @@ struct BalloonStatistics {
     actual_pages: u64,
 }
 
-pub(super) fn grant(config: &FirecrackerConfig, record: &MachineRecord) -> Result<u32> {
-    let path = jail_dir(config, &record.machine_id).join("memory-grant");
-    let grant = match fs::read(path) {
-        Ok(bytes) => serde_json::from_slice::<u32>(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => record.runtime.memory_mib,
-        Err(error) => return Err(error.into()),
-    };
+pub(super) fn grant(record: &MachineRecord) -> Result<u32> {
+    let grant = record
+        .memory_grant_mib
+        .map_or(record.runtime.memory_mib, std::num::NonZeroU32::get);
     ensure!(
         grant >= record.runtime.memory_mib
             && grant
@@ -40,16 +37,13 @@ pub(super) fn grant(config: &FirecrackerConfig, record: &MachineRecord) -> Resul
     Ok(grant)
 }
 
-pub(super) fn configuration(
-    config: &FirecrackerConfig,
-    record: &MachineRecord,
-) -> Result<Option<Configuration>> {
+pub(super) fn configuration(record: &MachineRecord) -> Result<Option<Configuration>> {
     record
         .runtime
         .memory_ceiling_mib
         .map(|ceiling| {
             Ok(Configuration {
-                amount_mib: ceiling - grant(config, record)?,
+                amount_mib: ceiling - grant(record)?,
                 deflate_on_oom: false,
                 stats_polling_interval_s: 1,
             })
@@ -85,7 +79,7 @@ pub(super) fn initialize(config: &FirecrackerConfig, record: &MachineRecord) -> 
         .runtime
         .memory_ceiling_mib
         .context("Firecracker has no balloon")?;
-    let target = ceiling - grant(config, record)?;
+    let target = ceiling - grant(record)?;
     let socket = jail_root(config, &record.machine_id).join("run/firecracker.socket");
     firecracker_api_patch(&socket, "/balloon", &BalloonTarget { amount_mib: target })?;
     wait_for_target(&socket, target)
@@ -106,7 +100,7 @@ pub(super) fn expand(
         "Firecracker live expansion cannot change vCPU count"
     );
     ensure!(
-        memory >= grant(config, record)? && memory <= ceiling,
+        memory >= grant(record)? && memory <= ceiling,
         "Firecracker live expansion must grow within the boot memory ceiling"
     );
     ensure!(
@@ -138,17 +132,17 @@ fn apply_grant(
         cgroup.join("memory.high"),
         ((u64::from(memory) + 256) * 1024 * 1024).to_string(),
     )?;
-    let directory = jail_dir(config, &record.machine_id);
-    let temporary = directory.join("memory-grant.tmp");
-    let mut file = File::create(&temporary)?;
-    fs::set_permissions(&temporary, Permissions::from_mode(0o600))?;
-    file.write_all(&serde_json::to_vec(&memory)?)?;
-    file.sync_all()?;
-    fs::rename(&temporary, directory.join("memory-grant"))?;
-    File::open(&directory)?.sync_all()?;
+    let mut record = record.clone();
+    record.memory_grant_mib = Some(resources.memory_mib);
+    let directory = config.state_root.join("manifests");
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+    serde_json::to_writer(&mut temporary, &record)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(manifest_path(&config.state_root, &record.machine_id))?;
+    File::open(directory)?.sync_all()?;
     // Persist intent before deflation: a lost API response can be retried, but
     // must never let another caller reduce memory the guest may already use.
-    initialize(config, record)?;
+    initialize(config, &record)?;
     Ok(resources)
 }
 
@@ -165,6 +159,7 @@ mod tests {
             machine_id: "fc-0123456789abcdef-01234567".to_owned(),
             spec_hash: "spec".to_owned(),
             runtime,
+            memory_grant_mib: None,
             resolved_image: "image".to_owned(),
             slot: 1,
             network_enabled: false,
@@ -193,7 +188,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.downcast_ref::<std::io::Error>().is_some());
-        assert_eq!(grant(&config, &record)?, 4096);
+        assert_eq!(grant(&record)?, 4096);
         Ok(())
     }
 
@@ -205,7 +200,8 @@ mod tests {
             ..Default::default()
         };
         let record = record();
-        let initial = configuration(&config, &record).unwrap().unwrap();
+        fs::create_dir_all(config.state_root.join("manifests")).unwrap();
+        let initial = configuration(&record).unwrap().unwrap();
         assert_eq!(initial.amount_mib, 12288);
         assert!(!initial.deflate_on_oom);
         let socket = jail_root(&config, &record.machine_id).join("run/firecracker.socket");
@@ -285,17 +281,19 @@ mod tests {
         });
         let resources = SandboxResourceShape::new(2, 8192).unwrap();
         assert!(apply_grant(&config, &record, &cgroup, resources).is_err());
-        assert_eq!(grant(&config, &record).unwrap(), 8192);
+        let record: MachineRecord = serde_json::from_slice(
+            &fs::read(manifest_path(&config.state_root, &record.machine_id)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(record.runtime.memory_mib, 4096);
+        assert_eq!(grant(&record).unwrap(), 8192);
         assert_eq!(
             apply_grant(&config, &record, &cgroup, resources).unwrap(),
             resources
         );
         peer.join().unwrap();
-        assert_eq!(grant(&config, &record).unwrap(), 8192);
-        assert_eq!(
-            configuration(&config, &record).unwrap().unwrap().amount_mib,
-            8192
-        );
+        assert_eq!(grant(&record).unwrap(), 8192);
+        assert_eq!(configuration(&record).unwrap().unwrap().amount_mib, 8192);
         assert!(
             expand(
                 &config,
