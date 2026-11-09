@@ -164,6 +164,19 @@ use forks, the guest kernel must additionally be 5.18 or newer with
 `CONFIG_HW_RANDOM_VIRTIO=y` lets the guest draw extra entropy from the
 attached virtio-rng device.
 
+Live memory growth is opt-in through `FirecrackerConfig.memory_ceiling_mib` on
+the native Linux backend. It additionally requires `CONFIG_VIRTIO_BALLOON=y`.
+The VM boots at the ceiling and acquisition waits until the balloon removes
+the difference from the initial grant. OOM deflation is disabled. Reserve host
+capacity before calling `ManagedSandboxHandle::expand_resources`; it raises
+cgroup limits before returning pages to the guest and waits for actual balloon
+convergence. CPU changes, shrinking, and requests above the ceiling are rejected.
+The same request can be retried after a failure or caller disconnect.
+Filesystem captures retain the memory grant so a cold restore cannot silently
+return a grown sandbox to its initial size.
+The macOS Lima bridge does not forward these live-growth methods; invoke the
+native Linux backend inside Lima to use them.
+
 Exo enables dirty-page tracking and captures sparse memory snapshots instead
 of writing the entire configured RAM size. Each capture merges changes into a
 private reflink of the machine's latest captured memory, or its original restore

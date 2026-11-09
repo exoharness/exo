@@ -150,6 +150,8 @@ impl FilesystemLayout {
 struct FilesystemManifest {
     #[serde(default)]
     partial: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_mib: Option<std::num::NonZeroU32>,
     template: bool,
     key: String,
     sandbox_id: SandboxId,
@@ -572,6 +574,11 @@ impl FirecrackerSandboxBackend {
         );
         let capture = Arc::new(self.filesystem_snapshot_files(payload).await?);
         let mut resolved = prepare_request(request)?;
+        if let Some(memory_mib) = manifest.memory_mib {
+            let mut resources = resolved.spec.resources.unwrap_or_default();
+            resources.memory_mib = resources.memory_mib.max(memory_mib);
+            resolved.sandbox.spec.resources = Some(resources);
+        }
         validate_resource_shape(resolved.spec.resources.unwrap_or_default())?;
         let config = self.shared.config.clone();
         let capture_for_image = Arc::clone(&capture);
@@ -758,6 +765,14 @@ pub(super) async fn snapshot_filesystem(
         let payload = tokio::task::spawn_blocking(move || {
             let manifest = FilesystemManifest {
                 partial: false,
+                memory_mib: if source_for_capture.runtime.memory_ceiling_mib.is_some() {
+                    std::num::NonZeroU32::new(balloon::grant(
+                        &capture_shared.config,
+                        &source_for_capture,
+                    )?)
+                } else {
+                    None
+                },
                 template,
                 key: new_capture_key(),
                 sandbox_id: request.sandbox_id,
