@@ -174,6 +174,10 @@ convergence. CPU changes, shrinking, and requests above the ceiling are rejected
 The same request can be retried after a failure or caller disconnect.
 Filesystem captures retain the memory grant so a cold restore cannot silently
 return a grown sandbox to its initial size.
+The original request's resource shape remains the sandbox's identity when
+reattaching; the live grant is separate state. RAM forks and both capture kinds
+retain that grant. Restoring requires the requested memory or configured ceiling
+to accommodate the stored grant.
 The macOS Lima bridge does not forward these live-growth methods; invoke the
 native Linux backend inside Lima to use them.
 

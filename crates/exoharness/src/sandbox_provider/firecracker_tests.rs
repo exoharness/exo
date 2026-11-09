@@ -376,6 +376,7 @@ fn capacity_scan_counts_processes_instead_of_manifests() {
         machine_id: "fc-live".to_string(),
         spec_hash: "live".to_string(),
         runtime: test_runtime(),
+        memory_grant_mib: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -422,6 +423,7 @@ fn manifest_publish_does_not_replace_an_existing_machine() {
         machine_id: "fc-machine".to_string(),
         spec_hash: "first".to_string(),
         runtime: test_runtime(),
+        memory_grant_mib: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -453,6 +455,7 @@ fn persisted_lease_expires_machine_after_idle_ttl() {
         machine_id: "fc-machine".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
+        memory_grant_mib: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -544,6 +547,7 @@ fn snapshot_gc_reaps_only_unreferenced_fork_templates() {
             machine_id: "fc-0123456789abcdef-01234567".to_string(),
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
+            memory_grant_mib: None,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -610,6 +614,7 @@ fn snapshot_gc_does_not_delete_fork_between_capture_and_manifest_publish() {
             machine_id: "fc-0123456789abcdef-01234567".to_string(),
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
+            memory_grant_mib: None,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -657,6 +662,7 @@ fn fork_snapshots_are_unique_per_target() {
         machine_id: "fc-source".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
+        memory_grant_mib: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -688,6 +694,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
         machine_id: "fc-source".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
+        memory_grant_mib: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 7,
         network_enabled: true,
@@ -705,6 +712,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
 
     let manifest = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
+        memory_mib: None,
         template: false,
         template_key: first,
         spec_hash: source.spec_hash,
@@ -716,6 +724,54 @@ fn explicit_snapshots_are_unique_and_reusable() {
     assert_eq!(decoded.format_version, SNAPSHOT_FORMAT_VERSION);
     assert_eq!(decoded.source_network_slot, 7);
     validate_snapshot_key(&decoded.template_key).unwrap();
+}
+
+#[test]
+fn ram_capture_rejects_external_disks_before_touching_the_source() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: root.path().into(),
+        ..Default::default()
+    };
+    let source = MachineRecord {
+        machine_id: "fc-0123456789abcdef-01234567".into(),
+        spec_hash: "spec".into(),
+        runtime: test_runtime(),
+        memory_grant_mib: None,
+        resolved_image: "image".into(),
+        slot: 1,
+        network_enabled: false,
+        workspace_id: None,
+        resource_paths: vec![],
+        idle_ttl_seconds: Some(60),
+        snapshot_template: None,
+        snapshot_network_slot: None,
+    };
+    let jail = jail_root(&config, &source.machine_id);
+    fs::create_dir_all(&jail)?;
+    fs::write(jail.join("overlay.ublk"), b"external disk marker")?;
+    let error = capture_snapshot_template(
+        &config,
+        &source,
+        &"a".repeat(64),
+        SnapshotTemplateLifecycle::Snapshot,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+    );
+    assert_eq!(
+        fs::read(jail.join("overlay.ublk"))?,
+        b"external disk marker"
+    );
+    assert!(
+        !jail_dir(&config, &source.machine_id)
+            .join("snapshot-pending")
+            .exists()
+    );
+    assert!(!config.state_root.join("snapshots").exists());
+    Ok(())
 }
 
 #[tokio::test]
@@ -1043,6 +1099,75 @@ pub(super) fn test_shared(
 }
 
 #[tokio::test]
+async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    for name in ["manifests", "slots"] {
+        fs::create_dir(directory.path().join(name))?;
+    }
+    let mut shared = test_shared(
+        FirecrackerConfig {
+            state_root: directory.path().into(),
+            ..Default::default()
+        },
+        HashMap::new(),
+    )?;
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .host_fingerprint
+        .memory_ceiling_mib = std::num::NonZeroU32::new(8192);
+    let request = FirecrackerRequest::from(SandboxRequest {
+        sandbox_id: "grant".into(),
+        scope: crate::ResourceScope::Global,
+        provider_state: None,
+        lifecycle: Default::default(),
+        spec: SandboxSpec {
+            image: "/unused.ext4".into(),
+            resources: SandboxResourceShape::new(1, 4096),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            tcp_ports: vec![],
+            default_workdir: "/".into(),
+            policy: SandboxNetworkPolicy::Disabled.into(),
+        },
+    });
+    assert!(
+        shared
+            .new_machine_record(
+                &request,
+                "fc-grant",
+                "spec",
+                None,
+                std::num::NonZeroU32::new(8193)
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_dir(directory.path().join("manifests"))?.count(), 0);
+    assert_eq!(fs::read_dir(directory.path().join("slots"))?.count(), 0);
+    let record = shared
+        .new_machine_record(
+            &request,
+            "fc-grant",
+            "spec",
+            None,
+            std::num::NonZeroU32::new(8192),
+        )
+        .await?;
+    let persisted = shared
+        .load_machine_record(&record.machine_id)
+        .await?
+        .unwrap();
+    assert_eq!(persisted.runtime.memory_mib, 4096);
+    assert_eq!(persisted.spec_hash, "spec");
+    assert_eq!(balloon::grant(&persisted)?, 8192);
+    assert_eq!(
+        fs::metadata(manifest_path(directory.path(), &record.machine_id))?.mode() & 0o777,
+        0o600
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn guest_clock_sync_uses_host_time_and_propagates_errors() -> Result<()> {
     for succeeds in [true, false] {
         let directory = tempfile::tempdir()?;
@@ -1154,6 +1279,7 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
     };
     let payload = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
+        memory_mib: None,
         template: true,
         template_key: "a".repeat(64),
         spec_hash: template_spec_hash(&request.spec),
@@ -1187,6 +1313,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
         machine_id: "fc-egress-reaped".into(),
         spec_hash: "test".into(),
         runtime: test_runtime(),
+        memory_grant_mib: None,
         resolved_image: "/images/test.ext4".into(),
         slot: 1,
         network_enabled: false,
@@ -1276,6 +1403,7 @@ impl DurableStopFixture {
             machine_id: machine_id(&request.sandbox_id, &sandbox_spec_hash(&request.spec)),
             spec_hash: sandbox_spec_hash(&request.spec),
             runtime: test_runtime(),
+            memory_grant_mib: None,
             resolved_image: request.spec.image.clone(),
             slot: 1,
             network_enabled: false,
@@ -1593,6 +1721,7 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
         machine_id: "fc-resources".into(),
         spec_hash: "resources".into(),
         runtime: test_runtime(),
+        memory_grant_mib: None,
         resolved_image: "/base.ext4".into(),
         slot: 1,
         network_enabled: false,
@@ -1883,5 +2012,84 @@ fn resource_backing_disks_are_private_to_the_thread() -> Result<()> {
     fs::remove_file(&disk)?;
     std::os::unix::fs::symlink(temp.path().join("outside"), &disk)?;
     assert!(resource_disk(&config, scope, &directory).is_err());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn guest_ready_wait_blocks_between_liveness_checks() -> Result<()> {
+    fn voluntary_switches() -> libc::c_long {
+        let mut usage = std::mem::MaybeUninit::uninit();
+        assert_eq!(
+            unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) },
+            0
+        );
+        unsafe { usage.assume_init() }.ru_nvcsw
+    }
+    let root = tempfile::tempdir_in("/tmp")?;
+    let socket = root.path().join("ready");
+    let listener = StdUnixListener::bind(&socket)?;
+    let pid = root.path().join("pid");
+    fs::write(&pid, std::process::id().to_string())?;
+    let peer = std::thread::spawn(move || -> Result<()> {
+        std::thread::sleep(Duration::from_millis(200));
+        StdUnixStream::connect(socket)?.write_all(&[1])?;
+        Ok(())
+    });
+    let before = voluntary_switches();
+    wait_for_guest_blocking(
+        &pid,
+        &root.path().join("stderr"),
+        listener,
+        Duration::from_secs(2),
+    )?;
+    let switches = voluntary_switches() - before;
+    peer.join().unwrap()?;
+    ensure!(
+        switches < 20,
+        "readiness wait woke {switches} times while no readiness event was available"
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn guest_ready_wait_keeps_its_deadline_and_detects_an_exited_source() -> Result<()> {
+    let root = tempfile::tempdir_in("/tmp")?;
+    for exited in [false, true] {
+        let socket = root.path().join(if exited { "exit" } else { "deadline" });
+        let listener = StdUnixListener::bind(socket)?;
+        let pid = root.path().join("pid");
+        fs::write(&pid, std::process::id().to_string())?;
+        let peer = if exited {
+            let pid = pid.clone();
+            Some(std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                fs::write(pid, u32::MAX.to_string())
+            }))
+        } else {
+            None
+        };
+        let started = Instant::now();
+        let timeout = if exited {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_millis(40)
+        };
+        let error = wait_for_guest_blocking(&pid, &root.path().join("stderr"), listener, timeout)
+            .unwrap_err();
+        if let Some(peer) = peer {
+            peer.join().unwrap()?;
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(
+            error.to_string().contains(if exited {
+                "process exited"
+            } else {
+                "guest agent did not become ready"
+            }),
+            "{error:#}"
+        );
+    }
     Ok(())
 }

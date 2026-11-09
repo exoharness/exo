@@ -29,7 +29,6 @@ use exo_firecracker_protocol::{
     Message, PROTOCOL_VERSION, TerminalSize as GuestTerminalSize, decode_frame_length,
 };
 use ipnet::Ipv4Net;
-#[cfg(target_os = "linux")]
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{FlockOperation, flock};
 #[cfg(target_os = "linux")]
@@ -345,6 +344,8 @@ impl FirecrackerHostFingerprint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FirecrackerSnapshotManifest {
     format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_mib: Option<std::num::NonZeroU32>,
     #[serde(default)]
     template: bool,
     template_key: String,
@@ -386,6 +387,17 @@ impl FirecrackerSnapshotManifest {
             );
         }
         validate_snapshot_key(&self.template_key)?;
+        if let Some(memory) = self.memory_mib {
+            ensure!(
+                memory.get() >= self.runtime.memory_mib
+                    && memory.get()
+                        <= self
+                            .runtime
+                            .memory_ceiling_mib
+                            .unwrap_or(self.runtime.memory_mib),
+                "invalid Firecracker snapshot memory grant"
+            );
+        }
         if self.source_network_slot >= MAX_RESOURCE_SLOTS {
             bail!(
                 "invalid Firecracker snapshot source network slot: {}",
@@ -433,13 +445,15 @@ struct MachineRecord {
     machine_id: String,
     spec_hash: String,
     runtime: FirecrackerRuntimeFingerprint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_grant_mib: Option<std::num::NonZeroU32>,
     resolved_image: String,
     slot: u32,
     network_enabled: bool,
     workspace_id: Option<String>,
     #[serde(default)]
     resource_paths: Vec<String>,
-    // The lease mtime is refreshed on use; keeping the TTL in the immutable
+    // The lease mtime is refreshed on use; keeping the TTL in the
     // manifest lets a later CLI process reap a VM without process-local state.
     idle_ttl_seconds: Option<u64>,
     snapshot_template: Option<SnapshotTemplateReference>,
@@ -1113,6 +1127,14 @@ impl FirecrackerSandboxBackend {
         template_key: String,
         lifecycle: SnapshotTemplateLifecycle,
     ) -> Result<CapturedSnapshot> {
+        ensure!(
+            !shared
+                .filesystem_disks
+                .lock()
+                .expect("filesystem disks poisoned")
+                .contains_key(&request.sandbox_id),
+            "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+        );
         if request.egress_proxy.is_some() {
             bail!(PROXIED_SNAPSHOT_UNSUPPORTED);
         }
@@ -1166,24 +1188,20 @@ impl FirecrackerSandboxBackend {
         let lease = captured?;
         clock?;
 
-        let granted_memory = balloon::grant(&shared.config, &source)?;
-        let mut captured_spec = request.spec.clone();
-        if granted_memory != source.runtime.memory_mib {
-            captured_spec.resources = Some(
-                SandboxResourceShape::new(source.runtime.vcpu_count, granted_memory)
-                    .context("invalid Firecracker memory grant")?,
-            );
-        }
-        let mut captured_runtime = source.runtime.clone();
-        captured_runtime.memory_mib = granted_memory;
+        let memory_mib = if source.runtime.memory_ceiling_mib.is_some() {
+            std::num::NonZeroU32::new(balloon::grant(&source)?)
+        } else {
+            None
+        };
         Ok(CapturedSnapshot {
             manifest: FirecrackerSnapshotManifest {
                 format_version: SNAPSHOT_FORMAT_VERSION,
+                memory_mib,
                 template: false,
                 template_key,
-                spec_hash: sandbox_spec_hash(&captured_spec),
+                spec_hash: source.spec_hash,
                 source_network_slot: source.slot,
-                runtime: captured_runtime,
+                runtime: source.runtime,
             },
             lease,
         })
@@ -1295,6 +1313,12 @@ impl FirecrackerSandboxBackend {
                     .context("joining Firecracker snapshot lease acquisition")??
                 }
             };
+            if manifest.memory_mib.is_some() {
+                ensure!(
+                    !process_running(&self.shared.pid_path(&machine_id)),
+                    "Firecracker snapshot restore target is already running"
+                );
+            }
             self.shared
                 .new_machine_record(
                     &request,
@@ -1307,10 +1331,10 @@ impl FirecrackerSandboxBackend {
                         },
                         source_network_slot: manifest.source_network_slot,
                     }),
+                    manifest.memory_mib,
                 )
                 .await?;
             drop(snapshot_lease);
-
             match self
                 .acquire_resolved_locked(
                     request,
@@ -1870,7 +1894,6 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         Ok(Some(Box::pin(TcpStream::connect(address).await?)))
     }
 
-    #[tracing::instrument(name = "firecracker.live_resource_ceiling", skip_all)]
     fn live_resource_ceiling(&self) -> Option<SandboxResourceShape> {
         self.machine
             .record
@@ -1900,6 +1923,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         .await?
     }
 
+    #[tracing::instrument(name = "firecracker.stop", skip_all)]
     async fn stop(&self) -> Result<()> {
         let _lifecycle_guard = self
             .shared
@@ -1982,19 +2006,7 @@ impl FirecrackerSandboxHandle {
         .await?;
         if template {
             captured.manifest.template = true;
-            let mut spec = self.request.spec.clone();
-            if captured.manifest.runtime.memory_mib
-                != spec.resources.unwrap_or_default().memory_mib.get()
-            {
-                spec.resources = Some(
-                    SandboxResourceShape::new(
-                        captured.manifest.runtime.vcpu_count,
-                        captured.manifest.runtime.memory_mib,
-                    )
-                    .context("invalid Firecracker snapshot resources")?,
-                );
-            }
-            captured.manifest.spec_hash = template_spec_hash(&spec);
+            captured.manifest.spec_hash = template_spec_hash(&self.request.spec);
         }
         drop(captured.lease);
 
@@ -2204,7 +2216,7 @@ impl Shared {
         let record = match existing {
             Some(record) if record.spec_hash == spec_hash && record.runtime == runtime => record,
             _ => {
-                self.new_machine_record(request, machine_id, spec_hash, None)
+                self.new_machine_record(request, machine_id, spec_hash, None, None)
                     .await?
             }
         };
@@ -2224,31 +2236,22 @@ impl Shared {
         let ready = async {
             match readiness {
                 GuestReadiness::Signal(listener) => {
-                    // Dirty tracking a larger boot allocation is expensive on
-                    // nested KVM hosts. Keep the ordinary boot deadline when
-                    // live growth is disabled.
-                    let timeout = if machine.record.runtime.memory_ceiling_mib.is_some() {
-                        Duration::from_secs(120)
-                    } else {
-                        GUEST_READY_TIMEOUT
-                    };
-                    wait_for_guest(self, machine_id, listener, timeout).await?
+                    wait_for_guest(self, machine_id, listener, GUEST_READY_TIMEOUT).await?
                 }
                 GuestReadiness::Probe => wait_for_restored_guest(self, &machine).await?,
             }
             GuestClient::new(Arc::clone(self), machine.vsock_path.clone())
                 .sync_clock()
-                .await
-        }
-        .await;
-        let ready = match ready {
-            Ok(()) if machine.record.runtime.memory_ceiling_mib.is_some() => {
+                .await?;
+            if machine.record.runtime.memory_ceiling_mib.is_some() {
                 let config = self.config.clone();
                 let record = machine.record.clone();
-                tokio::task::spawn_blocking(move || balloon::initialize(&config, &record)).await?
+                tokio::task::spawn_blocking(move || balloon::initialize(&config, &record))
+                    .await??;
             }
-            other => other,
-        };
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
         if let Err(error) = ready {
             if let Err(cleanup_error) = self
                 .cleanup_machine(machine_id, !reusing_existing_machine)
@@ -2340,6 +2343,7 @@ impl Shared {
         machine_id: &str,
         spec_hash: &str,
         snapshot: Option<SnapshotMachineRecord>,
+        memory_grant_mib: Option<std::num::NonZeroU32>,
     ) -> Result<MachineRecord> {
         let state_root = self.config.state_root.clone();
         let machine_id = machine_id.to_string();
@@ -2368,9 +2372,15 @@ impl Shared {
             .map(|m| m.guest_path.clone())
             .collect();
         let idle_ttl_seconds = request.lifecycle.idle_ttl.map(|ttl| ttl.as_secs());
-        let runtime = self
-            .host_fingerprint
-            .for_resources(request.spec.resources.unwrap_or_default());
+        let resources = request.spec.resources.unwrap_or_default();
+        let runtime = self.host_fingerprint.for_resources(resources);
+        let memory_grant_mib = memory_grant_mib.map(|grant| grant.max(resources.memory_mib));
+        if let Some(grant) = memory_grant_mib {
+            ensure!(
+                grant.get() <= runtime.memory_ceiling_mib.unwrap_or(runtime.memory_mib),
+                "snapshot memory grant exceeds the configured boot ceiling; request at least {grant} MiB"
+            );
+        }
         tokio::task::spawn_blocking(move || {
             let (slot, snapshot_template, snapshot_network_slot) = match snapshot {
                 Some(snapshot) => {
@@ -2391,6 +2401,7 @@ impl Shared {
                 machine_id,
                 spec_hash,
                 runtime,
+                memory_grant_mib,
                 resolved_image,
                 slot,
                 network_enabled,
@@ -4275,8 +4286,9 @@ fn spawn_jailed_firecracker(
     firecracker_arguments: &[&str],
 ) -> Result<()> {
     let host_uid = jailer_uid(config, record)?;
+    let memory_mib = balloon::grant(record)?;
     let memory_max = u64::from(
-        balloon::grant(config, record)?
+        memory_mib
             .checked_add(1024)
             .context("Firecracker cgroup memory limit overflow")?,
     ) * 1024
@@ -4284,7 +4296,7 @@ fn spawn_jailed_firecracker(
     // Guest RAM is anonymous memory in the VMM. Block-device page cache and
     // kernel allocations also count against this cgroup. Start reclaim before
     // the hard limit, with room for disk writeback to complete at full guest RAM.
-    let memory_high = (u64::from(balloon::grant(config, record)?) + 256) * 1024 * 1024;
+    let memory_high = (u64::from(memory_mib) + 256) * 1024 * 1024;
     let cpu_max = format!("{} 100000", u32::from(record.runtime.vcpu_count) * 100_000);
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
@@ -4484,7 +4496,7 @@ fn firecracker_vm_configuration(
         Vec::new()
     };
     Ok(FirecrackerVmConfiguration {
-        balloon: balloon::configuration(config, record)?,
+        balloon: balloon::configuration(record)?,
         boot_source: FirecrackerBootSource {
             kernel_image_path: "/vmlinux",
             initrd_path: "/initramfs.cpio",
@@ -5030,6 +5042,12 @@ fn capture_snapshot_template(
     template_key: &str,
     lifecycle: SnapshotTemplateLifecycle,
 ) -> Result<File> {
+    ensure!(
+        !jail_root(config, &source.machine_id)
+            .join("overlay.ublk")
+            .try_exists()?,
+        "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+    );
     let capture_pending = jail_dir(config, &source.machine_id).join("snapshot-pending");
     let memory_base = jail_dir(config, &source.machine_id).join("snapshot-memory");
     if capture_pending.try_exists()? {
@@ -5054,17 +5072,16 @@ fn capture_snapshot_template(
     reap_orphaned_fork_snapshot_templates_blocking(config)?;
     let root = jail_root(config, &source.machine_id);
     let disk_bytes = fs::metadata(root.join("overlay.ext4"))?.len();
-    let capture_bytes = u64::from(
-        source
-            .runtime
-            .memory_ceiling_mib
-            .unwrap_or(source.runtime.memory_mib),
-    )
-    .checked_mul(1024 * 1024)
-    .and_then(|bytes| bytes.checked_add(SNAPSHOT_STATE_RESERVE_BYTES))
-    .and_then(|bytes| bytes.checked_mul(2))
-    .and_then(|bytes| bytes.checked_add(disk_bytes))
-    .context("computing Firecracker snapshot capture size")?;
+    let memory_mib = source
+        .runtime
+        .memory_ceiling_mib
+        .unwrap_or(source.runtime.memory_mib);
+    let capture_bytes = u64::from(memory_mib)
+        .checked_mul(1024 * 1024)
+        .and_then(|bytes| bytes.checked_add(SNAPSHOT_STATE_RESERVE_BYTES))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .and_then(|bytes| bytes.checked_add(disk_bytes))
+        .context("computing Firecracker snapshot capture size")?;
     {
         let _budget = snapshot_budget_lock(config)?;
         enforce_snapshot_budget(config)?;
@@ -5217,14 +5234,7 @@ fn capture_snapshot_template(
         }
         return Err(error);
     }
-    validate_snapshot_template(
-        config,
-        &destination,
-        source
-            .runtime
-            .memory_ceiling_mib
-            .unwrap_or(source.runtime.memory_mib),
-    )?;
+    validate_snapshot_template(config, &destination, memory_mib)?;
     replace_hard_link(&destination.join("memory"), &memory_base)?;
     fs::remove_file(&capture_pending)?;
     open_snapshot_template_lease(config, template_key)
@@ -5973,6 +5983,7 @@ fn wait_for_guest_blocking(
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md#jailer-usage
     let mut observed_process = false;
     listener.set_nonblocking(true)?;
+    let mut ready = [PollFd::new(&listener, PollFlags::IN)];
     while started.elapsed() < timeout {
         if process_running(pid_path) {
             observed_process = true;
@@ -5997,7 +6008,14 @@ fn wait_for_guest_blocking(
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error).context("accepting Firecracker guest-ready signal"),
         }
-        std::thread::sleep(Duration::from_millis(1));
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let interval = Timespec::try_from(remaining.min(Duration::from_millis(100)))?;
+        // Wake immediately for readiness, without continually preempting a
+        // guest that is still booting. Periodic wakes only check VMM liveness.
+        match poll(&mut ready, Some(&interval)) {
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error).context("waiting for Firecracker guest readiness"),
+        }
     }
     bail!(
         "Firecracker guest agent did not become ready; {}",

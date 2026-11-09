@@ -389,6 +389,8 @@ Native integrations can register externally served block disks with
 and a capture callback invoked while the VM is paused. The registration guard
 must outlive the VM. Exo attaches the device inside the jail and keeps captures
 on the existing filesystem snapshot path.
+RAM capture and RAM forks reject externally served disks before pausing the VM;
+use filesystem captures so the external disks' capture hooks run.
 
 Partial local captures use `firecracker-lazy-filesystem-ref-v1` and require
 matching registered disks to boot. `FirecrackerFilesystemCapture::complete`
