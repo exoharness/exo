@@ -172,6 +172,13 @@ capacity before calling `ManagedSandboxHandle::expand_resources`; it raises
 cgroup limits before returning pages to the guest and waits for actual balloon
 convergence. CPU changes, shrinking, and requests above the ceiling are rejected.
 The same request can be retried after a failure or caller disconnect.
+Live growth requires matching Firecracker/jailer 1.17 or newer and uses transparent
+huge-page backing for even-MiB boot ceilings, avoiding excessive translation costs
+when the larger allocation is first touched. Odd-MiB ceilings use ordinary pages.
+The ordinary 30-second guest startup deadline applies to both paths.
+The [1.17.0 release](https://github.com/firecracker-microvm/firecracker/releases/tag/v1.17.0)
+archives have SHA-256 `06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558`
+(x86_64) and `e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256` (aarch64).
 Filesystem captures retain the memory grant so a cold restore cannot silently
 return a grown sandbox to its initial size.
 The original request's resource shape remains the sandbox's identity when
