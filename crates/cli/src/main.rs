@@ -307,6 +307,7 @@ impl FirecrackerArgs {
             network_bytes_per_second: self.network_bytes_per_second,
             max_machines: self.max_machines,
             memory_overhead_percent: self.memory_overhead_percent,
+            memory_ceiling_mib: None,
         };
         #[cfg(target_os = "macos")]
         let lima = FirecrackerLimaConfig {

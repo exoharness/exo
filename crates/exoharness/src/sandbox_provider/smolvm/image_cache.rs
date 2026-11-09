@@ -102,8 +102,10 @@ pub(super) fn resolve_image(
     }
     let configuration: ImageConfiguration =
         serde_json::from_reader(File::open(prepared.join("config.json"))?.take(65_536))?;
+    let rootfs = prepared.join("0000_rootfs");
+    ensure!(rootfs.is_dir(), "prepared SmolVM image rootfs is missing");
     Ok(crate::ResolvedSandboxImage {
-        image: prepared.to_string_lossy().into_owned(),
+        image: rootfs.to_string_lossy().into_owned(),
         configuration: configuration.config,
     })
 }
@@ -435,6 +437,29 @@ mod tests {
             original,
             archive_key(first.to_str().unwrap(), dir.path()).unwrap()
         );
+    }
+
+    #[test]
+    fn resolved_image_points_to_the_flattened_rootfs() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let rootfs = temp.path().join("0000_rootfs");
+        fs::create_dir(&rootfs)?;
+        fs::write(
+            temp.path().join("config.json"),
+            r#"{"config":{"Env":["TEST_IMAGE=1"]}}"#,
+        )?;
+        let resolved = resolve_image(
+            Path::new("smolvm"),
+            None,
+            &temp.path().join("cache"),
+            temp.path().to_str().unwrap(),
+        )?;
+        assert_eq!(resolved.image, rootfs.to_string_lossy());
+        assert_eq!(
+            resolved.configuration.env,
+            Some(vec!["TEST_IMAGE=1".into()])
+        );
+        Ok(())
     }
 
     #[test]
