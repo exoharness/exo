@@ -2,6 +2,7 @@ use super::*;
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
+        partial: false,
         template: false,
         key: "a".repeat(64),
         sandbox_id: "filesystem-test".into(),
@@ -129,7 +130,7 @@ fn imported_base_cache_hit_does_not_read_the_supplied_image() -> Result<()> {
     let cached = cache_base_image(&config, &source, &digest)?;
     fs::remove_file(&source)?;
     let imported = root.path().join("imported.ext4");
-    prepare_imported_base(&config, &source, &digest, &imported)?;
+    prepare_imported_base(&config, &source, &digest, &imported, true)?;
     assert_eq!(fs::metadata(&cached)?.ino(), fs::metadata(&imported)?.ino());
     Ok(())
 }
@@ -339,8 +340,14 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     let worker_b = FirecrackerSandboxBackend::new(config_b.clone()).await?;
     let mismatched = config_b.state_root.join("mismatched-base.ext4");
     let wrong_digest = "0".repeat(64);
-    let error = prepare_imported_base(&config_b, &files.base_image, &wrong_digest, &mismatched)
-        .unwrap_err();
+    let error = prepare_imported_base(
+        &config_b,
+        &files.base_image,
+        &wrong_digest,
+        &mismatched,
+        true,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("base image does not match"));
     assert!(!base_image_cache_path(&config_b, &wrong_digest).exists());
     fs::remove_file(mismatched)?;
@@ -524,5 +531,36 @@ fn filesystem_and_memory_captures_share_a_budget_without_charging_external_base_
     );
     fs::remove_file(cache)?;
     assert_eq!(retained_snapshot_bytes(&config)?, pool_bytes + memory_bytes);
+    Ok(())
+}
+
+#[test]
+fn partial_captures_require_matching_external_disks() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: root.path().into(),
+        ..Default::default()
+    };
+    let payload = fixture(&config)?;
+    let mut manifest = FilesystemManifest::from_payload(&payload)?;
+    assert!(open_capture(&config, payload)?.complete);
+    validate_attached_disks(&manifest, None)?;
+    manifest.partial = true;
+    fs::write(
+        manifest.directory(&config).join("manifest.json"),
+        serde_json::to_vec(&manifest)?,
+    )?;
+    let partial = manifest.payload()?;
+    assert_eq!(partial.format, SnapshotFormat::FirecrackerLazyFilesystemRef);
+    assert_ne!(partial.format, SnapshotFormat::FirecrackerFilesystemRef);
+    assert!(!open_capture(&config, partial)?.complete);
+    assert!(validate_attached_disks(&manifest, None).is_err());
+    let mut attached = AttachedDisks {
+        key: manifest.key.clone(),
+        disks: Vec::new(),
+    };
+    validate_attached_disks(&manifest, Some(&attached))?;
+    attached.key = "c".repeat(64);
+    assert!(validate_attached_disks(&manifest, Some(&attached)).is_err());
     Ok(())
 }
