@@ -579,7 +579,7 @@ async fn forward_stdin(
     client: Arc<dyn Client>,
     mut stdin_reader: tokio::io::DuplexStream,
 ) -> Result<()> {
-    let mut buffer = vec![0; 16 * 1024];
+    let mut buffer = vec![0; PROCESS_PIPE_BUFFER_SIZE];
     loop {
         let bytes_read = stdin_reader
             .read(&mut buffer)
@@ -614,6 +614,7 @@ mod tests {
 
     struct FakeClient {
         responses: Mutex<VecDeque<Response>>,
+        requests: Mutex<Vec<Request>>,
     }
 
     struct BlockingClient {
@@ -624,7 +625,9 @@ mod tests {
     #[async_trait]
     impl Client for FakeClient {
         async fn request(&self, request: Request) -> Result<Response> {
-            if request.kind != "recv" {
+            let kind = request.kind;
+            self.requests.lock().await.push(request);
+            if kind != "recv" {
                 return Ok(Response {
                     ok: true,
                     timeout: false,
@@ -722,6 +725,7 @@ mod tests {
     #[tokio::test]
     async fn process_parts_writes_batched_stdout_and_exit() {
         let client = FakeClient {
+            requests: Mutex::new(Vec::new()),
             responses: Mutex::new(VecDeque::from([Response {
                 ok: true,
                 timeout: false,
@@ -748,6 +752,29 @@ mod tests {
 
         assert_eq!(exit_code, 0);
         assert_eq!(output, "hello world");
+    }
+
+    #[tokio::test]
+    async fn forwards_large_stdin_in_one_request() {
+        let client = Arc::new(FakeClient {
+            responses: Mutex::new(VecDeque::new()),
+            requests: Mutex::new(Vec::new()),
+        });
+        let input: Vec<u8> = (0..=255).cycle().take(64 * 1024).collect();
+        let (mut stdin_writer, stdin_reader) = tokio::io::duplex(input.len());
+        stdin_writer.write_all(&input).await.unwrap();
+        drop(stdin_writer);
+
+        forward_stdin(client.clone(), stdin_reader).await.unwrap();
+
+        let requests = client.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].kind, "write");
+        assert_eq!(
+            STANDARD.decode(requests[0].data.as_ref().unwrap()).unwrap(),
+            input,
+        );
+        assert_eq!(requests[1].kind, "close_stdin");
     }
 
     #[tokio::test]
