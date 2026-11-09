@@ -1659,7 +1659,7 @@ async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()
         spec: SandboxSpec {
             tcp_ports: vec![],
             image: image.clone(),
-            resources: None,
+            resources: SandboxResourceShape::new(2, 1024),
             mounts: mounts
                 .into_iter()
                 .map(|mount| crate::SandboxMount {
