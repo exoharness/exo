@@ -25,7 +25,7 @@ bundle known to work:
 
 | Asset                                                  | Version or build                         | x86_64 SHA-256                                                     | aarch64 SHA-256                                                    |
 | ------------------------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| Firecracker release archive (includes matching jailer) | 1.17.0                                   | `06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558` | `e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256` |
+| Firecracker release archive (includes matching jailer) | 1.18.0                                   | `1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd` | `2a6130ff0338901ff9d7fbd73ce046c6b1c6123889dc84a34d678aa53bd0c0c2` |
 | Firecracker CI kernel                                  | 6.18.56, build `20261105-6ea6634994fa-0` | `af348226aa2a25b846156150d5cdb5dae3bf2a022f1db176e3a2b9a3249817bf` | `5e1990cd2f6e1c70196955b9405e32a5059f9f0a2c839478bc4f064a08f3a2ff` |
 | Exo guest initramfs                                    | same Exo revision as the host            | record after building                                              | record after building                                              |
 

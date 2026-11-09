@@ -30,18 +30,18 @@ case "$sandbox_backend" in
     sudo sysctl -w net.ipv4.ip_forward=1
     archive="$artifact_dir/firecracker.tgz"
     curl --fail --location --retry 3 --max-time 120 \
-      https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz \
+      https://github.com/firecracker-microvm/firecracker/releases/download/v1.18.0/firecracker-v1.18.0-x86_64.tgz \
       --output "$archive"
-    printf '06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558  %s\n' "$archive" | sha256sum --check --strict
+    printf '1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd  %s\n' "$archive" | sha256sum --check --strict
     tar -xzf "$archive" -C "$artifact_dir"
     # Hosted runners allow user writes under /usr/local/bin. Firecracker's
     # trusted artifacts require root ownership all the way to the filesystem root.
     runtime_dir=/var/lib/exo/firecracker/bin
     sudo install -d -o root -g root -m 0755 "$runtime_dir"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.17.0-x86_64/firecracker-v1.17.0-x86_64" "$runtime_dir/firecracker"
+      "$artifact_dir/release-v1.18.0-x86_64/firecracker-v1.18.0-x86_64" "$runtime_dir/firecracker"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.17.0-x86_64/jailer-v1.17.0-x86_64" "$runtime_dir/jailer"
+      "$artifact_dir/release-v1.18.0-x86_64/jailer-v1.18.0-x86_64" "$runtime_dir/jailer"
     kernel="$artifact_dir/vmlinux"
     curl --fail --location --retry 3 --max-time 120 \
       https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261105-6ea6634994fa-0/x86_64/vmlinux-6.18.56 \
