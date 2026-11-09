@@ -25,7 +25,7 @@ bundle known to work:
 
 | Asset                                                  | Version or build                         | x86_64 SHA-256                                                     | aarch64 SHA-256                                                    |
 | ------------------------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| Firecracker release archive (includes matching jailer) | 1.16.2                                   | `32e3cdcd4081f91fe2b024a266f57dcb3b4e5fec5033e0cb22467ad7f7820bda` | `751365040ca3dde7616c5a1d97cc1304674fae469ce02993104eab22f5961950` |
+| Firecracker release archive (includes matching jailer) | [1.18.0](https://github.com/firecracker-microvm/firecracker/releases/tag/v1.18.0) | `1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd` | `2a6130ff0338901ff9d7fbd73ce046c6b1c6123889dc84a34d678aa53bd0c0c2` |
 | Firecracker CI kernel                                  | 6.18.39, build `20260812-48f1b9fb52e9-0` | `3fde810177aaf9d9a465d00e915924a7a6e2bdd34869d7fcd33c6af73b45e12d` | `92b6c36b3ea25328f32f7b09509989a0f653aa692afa745fde5274c349b6405e` |
 | Exo guest initramfs                                    | same Exo revision as the host            | record after building                                              | record after building                                              |
 
