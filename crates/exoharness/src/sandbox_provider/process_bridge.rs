@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -371,9 +372,20 @@ pub fn client_argv(request_json: String) -> Vec<String> {
 }
 
 pub fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
+    process_parts_with_stdin_chunk_size(
+        client,
+        NonZeroUsize::new(PROCESS_PIPE_BUFFER_SIZE).unwrap(),
+    )
+}
+
+pub fn process_parts_with_stdin_chunk_size(
+    client: Arc<dyn Client>,
+    stdin_chunk_size: NonZeroUsize,
+) -> crate::SandboxProcessParts {
+    let stdin_chunk_size = stdin_chunk_size.get();
     let (stdout_reader, stdout_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
     let (stderr_reader, stderr_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
-    let (stdin_reader, stdin_writer) = tokio::io::duplex(PROCESS_PIPE_BUFFER_SIZE);
+    let (stdin_reader, stdin_writer) = tokio::io::duplex(stdin_chunk_size);
     let (wait_tx, wait_rx) = oneshot::channel();
     let (error_tx, mut error_rx) = mpsc::unbounded_channel();
 
@@ -386,7 +398,12 @@ pub fn process_parts(client: Arc<dyn Client>) -> crate::SandboxProcessParts {
         error_tx.clone(),
         Arc::clone(&exited),
     );
-    let stdin_forwarder = spawn_stdin_forwarder(Arc::clone(&client), stdin_reader, error_tx);
+    let stdin_forwarder = spawn_stdin_forwarder(
+        Arc::clone(&client),
+        stdin_reader,
+        stdin_chunk_size,
+        error_tx,
+    );
     let tasks = [output_poller, stdin_forwarder].map(AbortOnDropHandle::new);
 
     let wait: BoxFuture<'static, crate::Result<i32>> = Box::pin(async move {
@@ -508,10 +525,11 @@ fn spawn_output_poller(
 fn spawn_stdin_forwarder(
     client: Arc<dyn Client>,
     stdin_reader: tokio::io::DuplexStream,
+    stdin_chunk_size: usize,
     error_tx: mpsc::UnboundedSender<anyhow::Error>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = forward_stdin(client, stdin_reader).await
+        if let Err(error) = forward_stdin(client, stdin_reader, stdin_chunk_size).await
             && error_tx.send(error).is_err()
         {
             tracing::debug!("process bridge waiter stopped before stdin error could be reported");
@@ -578,8 +596,9 @@ async fn write_bridge_output(
 async fn forward_stdin(
     client: Arc<dyn Client>,
     mut stdin_reader: tokio::io::DuplexStream,
+    stdin_chunk_size: usize,
 ) -> Result<()> {
-    let mut buffer = vec![0; PROCESS_PIPE_BUFFER_SIZE];
+    let mut buffer = vec![0; stdin_chunk_size];
     loop {
         let bytes_read = stdin_reader
             .read(&mut buffer)
@@ -615,6 +634,7 @@ mod tests {
     struct FakeClient {
         responses: Mutex<VecDeque<Response>>,
         requests: Mutex<Vec<Request>>,
+        stdin_closed: tokio::sync::Notify,
     }
 
     struct BlockingClient {
@@ -628,6 +648,9 @@ mod tests {
             let kind = request.kind;
             self.requests.lock().await.push(request);
             if kind != "recv" {
+                if kind == "close_stdin" {
+                    self.stdin_closed.notify_one();
+                }
                 return Ok(Response {
                     ok: true,
                     timeout: false,
@@ -635,13 +658,16 @@ mod tests {
                     error: None,
                 });
             }
-            let mut responses = self.responses.lock().await;
-            Ok(responses.pop_front().unwrap_or(Response {
+            if let Some(response) = self.responses.lock().await.pop_front() {
+                return Ok(response);
+            }
+            self.stdin_closed.notified().await;
+            Ok(Response {
                 ok: true,
-                timeout: true,
-                events: Vec::new(),
+                timeout: false,
+                events: vec![Event::Exit { exit_code: 0 }],
                 error: None,
-            }))
+            })
         }
     }
 
@@ -725,6 +751,7 @@ mod tests {
     #[tokio::test]
     async fn process_parts_writes_batched_stdout_and_exit() {
         let client = FakeClient {
+            stdin_closed: tokio::sync::Notify::new(),
             requests: Mutex::new(Vec::new()),
             responses: Mutex::new(VecDeque::from([Response {
                 ok: true,
@@ -755,26 +782,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forwards_large_stdin_in_one_request() {
-        let client = Arc::new(FakeClient {
-            responses: Mutex::new(VecDeque::new()),
-            requests: Mutex::new(Vec::new()),
-        });
-        let input: Vec<u8> = (0..=255).cycle().take(64 * 1024).collect();
-        let (mut stdin_writer, stdin_reader) = tokio::io::duplex(input.len());
-        stdin_writer.write_all(&input).await.unwrap();
-        drop(stdin_writer);
+    async fn stdin_chunk_size_controls_pipe_and_write_requests() {
+        for (chunk_size, custom_size) in [
+            (64 * 1024, None),
+            (1024 * 1024, NonZeroUsize::new(1024 * 1024)),
+            (32 * 1024, NonZeroUsize::new(32 * 1024)),
+        ] {
+            let client = Arc::new(FakeClient {
+                responses: Mutex::new(VecDeque::new()),
+                requests: Mutex::new(Vec::new()),
+                stdin_closed: tokio::sync::Notify::new(),
+            });
+            let mut parts = match custom_size {
+                Some(size) => process_parts_with_stdin_chunk_size(client.clone(), size),
+                None => process_parts(client.clone()),
+            };
+            let input: Vec<u8> = (0..=255).cycle().take(chunk_size + 17).collect();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                futures::AsyncWriteExt::write_all(&mut parts.stdin, &input)
+                    .await
+                    .unwrap();
+                futures::AsyncWriteExt::close(&mut parts.stdin)
+                    .await
+                    .unwrap();
+                assert_eq!(parts.wait.await.unwrap(), 0);
+            })
+            .await
+            .expect("stdin forwarding timed out");
 
-        forward_stdin(client.clone(), stdin_reader).await.unwrap();
-
-        let requests = client.requests.lock().await;
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].kind, "write");
-        assert_eq!(
-            STANDARD.decode(requests[0].data.as_ref().unwrap()).unwrap(),
-            input,
-        );
-        assert_eq!(requests[1].kind, "close_stdin");
+            let requests = client.requests.lock().await;
+            let writes: Vec<Vec<u8>> = requests
+                .iter()
+                .filter(|request| request.kind == "write")
+                .map(|request| STANDARD.decode(request.data.as_ref().unwrap()).unwrap())
+                .collect();
+            assert_eq!(writes.len(), 2);
+            assert_eq!(writes[0].len(), chunk_size);
+            assert_eq!(writes[1].len(), 17);
+            assert_eq!(writes.concat(), input);
+            assert_eq!(requests.last().unwrap().kind, "close_stdin");
+        }
     }
 
     #[tokio::test]
