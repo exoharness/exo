@@ -552,6 +552,8 @@ struct FirecrackerMachineConfiguration {
     mem_size_mib: u32,
     smt: bool,
     track_dirty_pages: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    huge_pages: Option<&'static str>,
 }
 
 #[derive(Clone, Serialize)]
@@ -2787,6 +2789,13 @@ fn validate_host_blocking(config: &FirecrackerConfig) -> Result<String> {
             "Firecracker and jailer versions must match: {firecracker_version} != {jailer_version}"
         );
     }
+    if config.memory_ceiling_mib.is_some() {
+        ensure!(
+            semver::Version::parse(firecracker_version.trim_start_matches('v'))?
+                >= semver::Version::new(1, 17, 0),
+            "live memory growth requires Firecracker and jailer 1.17 or newer for transparent huge-page backing"
+        );
+    }
     Ok(firecracker_version)
 }
 
@@ -4511,6 +4520,13 @@ fn firecracker_vm_configuration(
                 .unwrap_or(record.runtime.memory_mib),
             smt: false,
             track_dirty_pages: true,
+            // The ceiling is mapped at boot. Larger host pages avoid the
+            // translation overhead of faulting that mapping in one page at a time.
+            huge_pages: record
+                .runtime
+                .memory_ceiling_mib
+                .filter(|ceiling| ceiling.is_multiple_of(2))
+                .map(|_| "Transparent"),
         },
         network_interfaces,
         vsock: FirecrackerVsock {
