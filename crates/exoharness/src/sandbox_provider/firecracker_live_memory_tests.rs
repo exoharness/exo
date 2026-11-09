@@ -55,15 +55,15 @@ fn statistics(config: &FirecrackerConfig, record: &MachineRecord) -> Result<Stat
     .map_err(Into::into)
 }
 
-// Write all 6 GiB and verify one byte in every page of anonymous guest RAM.
+// Fault in all 6 GiB and verify a nonzero byte in every page of guest RAM.
 // Reading MemTotal alone cannot prove that ballooned pages became usable.
 async fn write_six_gib(handle: &Arc<dyn ManagedSandboxHandle>) -> Result<()> {
     let mut probe = command(
         r#"python3 -c '
-import ctypes, mmap
+import mmap
 n = 6 * 1024**3
-m = mmap.mmap(-1, n, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
-ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(m)), 173, n)
+m = mmap.mmap(-1, n)
+m[::4096] = bytes([173]) * (n // 4096)
 assert m[::4096] == bytes([173]) * (n // 4096)
 print("wrote-and-verified-6-GiB")'
 "#,
