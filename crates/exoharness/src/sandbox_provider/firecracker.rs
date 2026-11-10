@@ -72,7 +72,9 @@ pub(super) mod lima_storage;
 mod balloon;
 #[path = "firecracker_filesystem.rs"]
 mod filesystem;
-pub use filesystem::FirecrackerFilesystemCapture;
+pub use filesystem::{
+    FirecrackerFilesystemCapture, FirecrackerFilesystemDisk, FirecrackerFilesystemDisks,
+};
 
 const GUEST_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const PID_FILE_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -113,9 +115,10 @@ pub const DEFAULT_JAILER_UID_BASE: u32 = 100_000;
 pub const DEFAULT_VCPU_COUNT: u8 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
 pub const DEFAULT_MEMORY_MIB: u32 = crate::DEFAULT_SANDBOX_MEMORY_MIB;
 const SNAPSHOT_FORMAT_VERSION: u32 = 2;
-static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 2] = [
+static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 3] = [
     SnapshotFormat::FirecrackerHostRef,
     SnapshotFormat::FirecrackerFilesystemRef,
+    SnapshotFormat::FirecrackerLazyFilesystemRef,
 ];
 // Upstream warns that a compromised guest kernel can reactivate the serial
 // device even with 8250.nr_uarts=0, and unbounded console output written to a
@@ -846,6 +849,7 @@ struct Shared {
     capacity_gate: Mutex<()>,
     starting_machines: Arc<StdMutex<HashSet<String>>>,
     base_image_digests: StdMutex<HashMap<ImageIdentity, String>>,
+    filesystem_disks: StdMutex<HashMap<SandboxId, filesystem::AttachedDisks>>,
 }
 
 impl Drop for Shared {
@@ -1149,6 +1153,7 @@ impl FirecrackerSandboxBackend {
                 capacity_gate: Mutex::new(()),
                 starting_machines: Arc::new(StdMutex::new(HashSet::new())),
                 base_image_digests: StdMutex::new(HashMap::new()),
+                filesystem_disks: StdMutex::new(HashMap::new()),
             }),
         })
     }
@@ -1261,6 +1266,14 @@ impl FirecrackerSandboxBackend {
         template_key: String,
         lifecycle: SnapshotTemplateLifecycle,
     ) -> crate::SandboxResult<CapturedSnapshot> {
+        ensure!(
+            !shared
+                .filesystem_disks
+                .lock()
+                .expect("filesystem disks poisoned")
+                .contains_key(&request.sandbox_id),
+            "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+        );
         if request.egress_proxy.is_some() {
             return Err(anyhow::anyhow!(PROXIED_SNAPSHOT_UNSUPPORTED).into());
         }
@@ -1952,7 +1965,9 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
+        if payload.format == SnapshotFormat::FirecrackerFilesystemRef
+            || payload.format == SnapshotFormat::FirecrackerLazyFilesystemRef
+        {
             return self.acquire_filesystem_snapshot(request, payload).await;
         }
         self.acquire_managed(
@@ -2313,7 +2328,9 @@ impl Shared {
     }
 
     async fn delete_snapshot(&self, payload: SnapshotPayload) -> Result<()> {
-        if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
+        if payload.format == SnapshotFormat::FirecrackerFilesystemRef
+            || payload.format == SnapshotFormat::FirecrackerLazyFilesystemRef
+        {
             let config = self.config.clone();
             return tokio::task::spawn_blocking(move || {
                 filesystem::delete_capture(&config, payload)
@@ -4935,6 +4952,15 @@ fn firecracker_vm_configuration(
             io_engine: "Sync",
         });
     }
+    for drive in drives.iter_mut().skip(1) {
+        let path = Path::new(drive.path_on_host.trim_start_matches('/')).with_extension("ublk");
+        if jail_root(config, &record.machine_id)
+            .join(&path)
+            .try_exists()?
+        {
+            drive.path_on_host = format!("/{}", path.display());
+        }
+    }
     if !resource_mounts.is_empty() {
         boot_args.push_str(" exo_resource_mounts=");
         boot_args.push_str(
@@ -5623,6 +5649,12 @@ fn capture_snapshot_template(
     template_key: &str,
     lifecycle: SnapshotTemplateLifecycle,
 ) -> crate::SandboxResult<File> {
+    ensure!(
+        !jail_root(config, &source.machine_id)
+            .join("overlay.ublk")
+            .try_exists()?,
+        "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+    );
     let capture_pending = jail_dir(config, &source.machine_id).join("snapshot-pending");
     let memory_base = jail_dir(config, &source.machine_id).join("snapshot-memory");
     if capture_pending.try_exists()? {
