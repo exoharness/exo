@@ -2035,10 +2035,7 @@ async fn compatible_default_engine(binary: &Path) -> bool {
         let wanted =
             Version::parse(smolmachines::VERSION).expect("smolmachines reports a semver version");
         parse_version(&String::from_utf8_lossy(&output.stdout)).is_some_and(|version| {
-            version.major == wanted.major
-                && version.minor == wanted.minor
-                && version.patch >= wanted.patch
-                && version.pre.is_empty()
+            version.major == wanted.major && version >= wanted && version.pre.is_empty()
         })
     }
     #[cfg(not(feature = "smolvm"))]
@@ -2903,14 +2900,20 @@ esac"#,
         #[cfg(not(feature = "smolvm"))]
         assert_eq!(backend.binary().await.unwrap(), &installed);
         #[cfg(feature = "smolvm")]
-        {
+        let sdk = Version::parse(smolmachines::VERSION).unwrap();
+        // An installed engine at or above the SDK's release is used, not replaced by an older download.
+        #[cfg(feature = "smolvm")]
+        for version in [sdk.clone(), Version::new(sdk.major, sdk.minor + 1, 0)] {
             write_test_binary(
                 &installed,
-                "case \"$*\" in --version) echo 'smolvm 1.26.1';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac",
+                &format!(
+                    "case \"$*\" in --version) echo 'smolvm {version}';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac"
+                ),
             );
             assert_eq!(
                 SmolvmSandboxBackend::new().binary().await.unwrap(),
-                &installed
+                &installed,
+                "{version}"
             );
         }
     }
