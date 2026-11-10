@@ -2612,10 +2612,12 @@ impl Shared {
         let record = self.load_machine_record(machine_id).await?;
         self.stop_machine_process(machine_id).await?;
         if delete_rootfs {
-            self.active_filesystem_disks
+            let detached = self
+                .active_filesystem_disks
                 .lock()
                 .expect("filesystem disks poisoned")
                 .remove(machine_id);
+            drop(detached);
         }
         if delete_rootfs && let Some(record) = record.as_ref() {
             let cow = snapshot_cow_path(&self.config, &record.machine_id);
