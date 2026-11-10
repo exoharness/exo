@@ -134,12 +134,7 @@ fn apply_grant(
     )?;
     let mut record = record.clone();
     record.memory_grant_mib = Some(resources.memory_mib);
-    let directory = config.state_root.join("manifests");
-    let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
-    serde_json::to_writer(&mut temporary, &record)?;
-    temporary.as_file().sync_all()?;
-    temporary.persist(manifest_path(&config.state_root, &record.machine_id))?;
-    File::open(directory)?.sync_all()?;
+    replace_manifest(&config.state_root, &record)?;
     // Persist intent before deflation: a lost API response can be retried, but
     // must never let another caller reduce memory the guest may already use.
     initialize(config, &record)?;
@@ -201,6 +196,7 @@ mod tests {
         };
         let record = record();
         fs::create_dir_all(config.state_root.join("manifests")).unwrap();
+        write_manifest(&config.state_root, &record).unwrap();
         let initial = configuration(&record).unwrap().unwrap();
         assert_eq!(initial.amount_mib, 12288);
         assert!(!initial.deflate_on_oom);

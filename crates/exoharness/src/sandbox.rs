@@ -284,8 +284,17 @@ pub trait ManagedSandboxHandle: Send + Sync {
         None
     }
 
+    /// The committed resource grant, if the backend supports querying it.
+    /// This waits for pending growth and includes grants retained after a failed
+    /// expansion; it does not report the ceiling or actual resident memory.
+    async fn live_resource_grant(&self) -> Result<Option<crate::SandboxResourceShape>> {
+        Ok(None)
+    }
+
     /// Grow within the boot ceiling after the caller has reserved host capacity.
-    /// Retrying the same shape is safe, including after an ambiguous failure.
+    /// Growth may continue after caller cancellation and retain a larger grant
+    /// after an error. Keep the reservation until live_resource_grant reconciles
+    /// it, or the sandbox is terminated. Retrying the same shape is safe.
     async fn expand_resources(
         &self,
         _resources: crate::SandboxResourceShape,

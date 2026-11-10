@@ -1,3 +1,4 @@
+use super::tests::{native_request, shell};
 use super::*;
 use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -105,6 +106,16 @@ while True:
         tokio::io::AsyncReadExt::read_exact(&mut connection, &mut echo).await?;
         assert_eq!(&echo, b"before");
         let grown = SandboxResourceShape::new(1, 8192).unwrap();
+        let api = jail_root(&config, &record.machine_id).join("run/firecracker.socket");
+        let parked = api.with_extension("parked");
+        fs::rename(&api, &parked)?;
+        let failure = handle.expand_resources(grown).await;
+        fs::rename(&parked, &api)?;
+        assert!(failure.is_err());
+        assert_eq!(handle.live_resource_grant().await?, Some(grown));
+        assert_eq!(statistics(&config, &record)?, Statistics { target_pages: 4096 * 256, actual_pages: 4096 * 256 });
+        assert!(handle.expand_resources(SandboxResourceShape::new(1, 4096).unwrap()).await.is_err());
+        assert_eq!(shell(&handle, "printf usable-after-failure").await?, "usable-after-failure");
         assert_eq!(handle.expand_resources(grown).await?, grown);
         assert_eq!(handle.expand_resources(grown).await?, grown);
         assert_eq!(balloon::grant(&allocation(&backend, &request).await?)?, 8192);
@@ -368,4 +379,103 @@ print("wrote-and-verified-6-GiB")'
     .await;
     backend.terminate_all().await?;
     result
+}
+
+#[tokio::test]
+#[ignore = "requires root, KVM, Python guest image, XFS TMPDIR; samples THP accounting for 60 seconds"]
+async fn live_memory_small_grant_host_accounting() -> Result<()> {
+    let temp = tempfile::Builder::new().prefix("acct-").tempdir()?;
+    let image = std::env::var("FIRECRACKER_IMAGE")?;
+    let mut config = config(temp.path(), &image);
+    config.memory_ceiling_mib = std::num::NonZeroU32::new(2048);
+    config.network_device_policy = FirecrackerNetworkDevicePolicy::EnabledSandboxes;
+    let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
+    let mut request = native_request(&config, "accounting", &image)?;
+    request.spec.resources = SandboxResourceShape::new(1, 512);
+    let result: Result<()> = async {
+        let started = Instant::now();
+        let handle = backend.acquire(request.clone()).await?;
+        let record = allocation(&backend, &request).await?;
+        let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
+            .await?
+            .trim()
+            .parse::<u64>()?;
+        eprintln!(
+            "512 MiB grant / 2 GiB ceiling: acquire_ms={} available_kib={available}",
+            started.elapsed().as_millis()
+        );
+        assert!(
+            available >= 256 * 1024,
+            "insufficient usable memory: {available} KiB"
+        );
+
+        // Admission must reject an unusable shape without replacing the live VM.
+        let mut invalid = request.clone();
+        invalid.provider_state = handle.provider_state();
+        invalid.spec.resources = SandboxResourceShape::new(1, 128);
+        assert!(
+            backend
+                .acquire(invalid)
+                .await
+                .err()
+                .context("invalid ceiling accepted")?
+                .to_string()
+                .contains("four times")
+        );
+        assert_eq!(
+            allocation(&backend, &request).await?.machine_id,
+            record.machine_id
+        );
+        let mut workload = handle
+            .start_process(&command(
+                r#"python3 -u -c '
+import mmap,sys
+m=mmap.mmap(-1,192*1024**2)
+m[::4096]=bytes([173])*(len(m)//4096)
+print("ready",flush=True)
+sys.stdin.readline()
+assert m[::4096]==bytes([173])*(len(m)//4096)
+print("verified")'
+"#,
+            ))
+            .await?;
+        let mut ready = [0; 6];
+        workload.stdout.read_exact(&mut ready).await?;
+        assert_eq!(&ready, b"ready\n");
+        let cgroup = firecracker_cgroup_dir(&config, &record.machine_id);
+        let high = fs::read_to_string(cgroup.join("memory.high"))?
+            .trim()
+            .parse::<u64>()?;
+        for sample in 0..=6 {
+            if sample > 0 {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            let current = fs::read_to_string(cgroup.join("memory.current"))?
+                .trim()
+                .parse::<u64>()?;
+            let events = fs::read_to_string(cgroup.join("memory.events"))?;
+            eprintln!(
+                "accounting sample={sample} memory.current={current} memory.high={high} {}",
+                events.replace('\n', "; ")
+            );
+            assert!(current < high, "balloon/THP memory exceeds grant headroom");
+            for key in ["high", "max", "oom", "oom_kill"] {
+                assert!(
+                    events.lines().any(|line| line == format!("{key} 0")),
+                    "{events}"
+                );
+            }
+        }
+        workload.stdin.write_all(b"verify\n").await?;
+        workload.stdin.close().await?;
+        let mut output = String::new();
+        workload.stdout.read_to_string(&mut output).await?;
+        assert_eq!(output, "verified\n");
+        assert!(workload.completion.await?.ok);
+        Ok(())
+    }
+    .await;
+    let cleanup = backend.terminate_all().await;
+    result?;
+    cleanup
 }
