@@ -153,17 +153,23 @@ pub struct FirecrackerFilesystemDisks {
 
 impl Drop for FirecrackerFilesystemDisks {
     fn drop(&mut self) {
-        let mut disks = self
-            .shared
-            .filesystem_disks
-            .lock()
-            .expect("filesystem disks poisoned");
-        if disks
-            .get(&self.sandbox_id)
-            .is_some_and(|entry| entry.key == self.key)
-        {
-            disks.remove(&self.sandbox_id);
-        }
+        let detached = {
+            let mut disks = self
+                .shared
+                .filesystem_disks
+                .lock()
+                .expect("filesystem disks poisoned");
+            if disks
+                .get(&self.sandbox_id)
+                .is_some_and(|entry| entry.key == self.key)
+            {
+                disks.remove(&self.sandbox_id)
+            } else {
+                None
+            }
+        };
+        // Device owners may stop servers when dropped; never do that under the map lock.
+        drop(detached);
     }
 }
 
