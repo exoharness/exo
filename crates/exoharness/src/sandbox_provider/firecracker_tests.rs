@@ -879,6 +879,99 @@ fn persistent_snapshot_expiry_reclaims_files() {
 }
 
 #[test]
+fn snapshot_budget_config_preserves_default_and_serializes_overrides() {
+    let json = r#"{
+        "firecracker_bin": "/usr/local/bin/firecracker",
+        "jailer_bin": "/usr/local/bin/jailer",
+        "kernel": "/kernel",
+        "initramfs": "/initramfs",
+        "state_root": "/state",
+        "image_size_gib": 8,
+        "workspace_size_gib": 20,
+        "jailer_uid_base": 100000,
+        "dns_server": "1.1.1.1",
+        "allowed_egress_cidrs": [],
+        "allowed_local_images": [],
+        "allowed_registries": [],
+        "network_bytes_per_second": 104857600
+    }"#;
+    let mut config: FirecrackerConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(config.snapshot_budget_bytes, 64 * 1024 * 1024 * 1024);
+    assert_eq!(
+        config.snapshot_budget_bytes,
+        FirecrackerConfig::default().snapshot_budget_bytes
+    );
+    config.snapshot_budget_bytes = 128 * 1024 * 1024 * 1024;
+    let round_trip: FirecrackerConfig =
+        serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert_eq!(round_trip, config);
+}
+
+#[test]
+fn snapshot_budget_is_shared_and_uses_the_configured_limit() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut config = FirecrackerConfig {
+        state_root: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    let mut allocated = 0;
+    for path in [
+        config.state_root.join("snapshots/template/memory"),
+        config
+            .state_root
+            .join("filesystem-snapshots/sandbox/capture/overlay.ext4"),
+        jail_dir(&config, "fc-0000000000000000-00000000").join("snapshot-memory"),
+    ] {
+        fs::create_dir_all(path.parent().unwrap())?;
+        let mut file = File::create(path)?;
+        file.write_all(&[1; 4096])?;
+        file.sync_all()?;
+        allocated += file.metadata()?.blocks() * 512;
+    }
+    assert!(allocated > 0);
+    assert_eq!(retained_snapshot_bytes(&config)?, allocated);
+    config.snapshot_budget_bytes = allocated - 1;
+    let error = enforce_snapshot_budget(&config).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Firecracker snapshot storage budget exhausted; delete unused snapshots"
+    );
+    let error = error
+        .context("capturing a snapshot")
+        .context("outer operation");
+    let exhausted = error
+        .downcast_ref::<crate::SnapshotBudgetExhausted>()
+        .context("expected typed snapshot budget error through context")?;
+    assert_eq!(exhausted.limit_bytes, allocated - 1);
+    assert_eq!(exhausted.accounted_bytes, allocated);
+    config.snapshot_budget_bytes = allocated;
+    enforce_snapshot_budget(&config)?;
+    Ok(())
+}
+
+#[test]
+fn snapshot_budget_preserves_accounting_io_errors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: directory.path().into(),
+        snapshot_budget_bytes: 0,
+        ..Default::default()
+    };
+    fs::write(
+        config.state_root.join("filesystem-snapshots"),
+        b"not a directory",
+    )?;
+    let error = enforce_snapshot_budget(&config).unwrap_err();
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    assert!(
+        error
+            .downcast_ref::<crate::SnapshotBudgetExhausted>()
+            .is_none()
+    );
+    Ok(())
+}
+
+#[test]
 fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("snapshots")).unwrap();
@@ -905,7 +998,9 @@ fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     let second = config.state_root.join("snapshots").join("second");
     fs::create_dir(&second).unwrap();
     let mut second_memory = File::create(second.join("memory")).unwrap();
-    second_memory.set_len(MAX_SNAPSHOT_BYTES).unwrap();
+    second_memory
+        .set_len(DEFAULT_SNAPSHOT_BUDGET_BYTES)
+        .unwrap();
     second_memory.write_all(&[2; 4096]).unwrap();
     second_memory.sync_all().unwrap();
     assert!(enforce_snapshot_budget(&config).is_ok());
@@ -927,7 +1022,7 @@ fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     assert!(enforce_snapshot_budget(&config).is_ok());
 }
 
-fn test_shared(
+pub(super) fn test_shared(
     config: FirecrackerConfig,
     warm_machines: HashMap<SandboxId, WarmMachineEntry>,
 ) -> Result<Arc<Shared>> {

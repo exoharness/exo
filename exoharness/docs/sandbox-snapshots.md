@@ -383,10 +383,27 @@ The imported base is pinned in the destination image cache. Restored sandboxes
 keep using this cache path after the capture is deleted.
 Exo does not upload to S3 or publish/fence the service's durable checkpoint.
 
-Filesystem and full captures share a 64 GiB budget based on allocated
-blocks. Shared extents are conservatively counted for each disk file; immutable
-bases already pinned in the image cache are excluded. They are
-retained until explicitly deleted; this budget does not evict checkpoints.
+RAM templates, filesystem captures, and retained snapshot memory share a budget
+under each `state_root`, configured with `FirecrackerConfig::snapshot_budget_bytes`
+(default: 64 GiB). The CLI accepts `--firecracker-snapshot-budget-bytes` or
+`EXO_FIRECRACKER_SNAPSHOT_BUDGET_BYTES`, both in bytes. Accounting uses allocated
+blocks rather than physical disk utilization. Shared extents are conservatively
+counted for each disk file; immutable bases already pinned in the image cache
+are excluded. Captures are retained until explicitly deleted; this budget does
+not evict checkpoints.
+
+When this guard rejects a RAM capture, filesystem capture, or filesystem import,
+the error downcasts to `exoharness::SnapshotBudgetExhausted` through `anyhow`
+context. Its `limit_bytes` is the configured budget, and `accounted_bytes` is the
+allocated storage total at rejection, including staged captures. Unrelated I/O,
+corruption, and snapshot failures do not carry this type. A rejected filesystem
+import publishes no capture and removes its staging files; the imported base may
+remain pinned in the image cache.
+
+This error identifies a snapshot-budget rejection. It does not guarantee that
+the source sandbox was terminated or an enclosing acquisition was rolled back.
+Callers must establish those lifecycle outcomes separately before treating the
+operation as having no remaining allocation.
 
 The native round-trip test requires root, KVM, an immutable local image,
 and an XFS temporary directory:
