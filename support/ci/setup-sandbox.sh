@@ -11,11 +11,11 @@ case "$sandbox_backend" in
     # Match the engine version used by the smolmachines dependency.
     archive="$artifact_dir/smolvm.tar.gz"
     curl --fail --location --retry 3 --max-time 120 \
-      https://github.com/smol-machines/smolvm/releases/download/v1.19.0/smolvm-1.19.0-linux-x86_64.tar.gz \
+      https://github.com/smol-machines/smolvm/releases/download/v1.32.4/smolvm-1.32.4-linux-x86_64.tar.gz \
       --output "$archive"
-    printf '4feb274fd24d4722d718b9c85881fb9bba3c0c9f8123f67584436065bf583311  %s\n' "$archive" | sha256sum --check --strict
+    printf '7b0580c2ef98e183ac5c3a1567eca3a336d58aa0e2ca5904350f7d3a851205e8  %s\n' "$archive" | sha256sum --check --strict
     tar -xzf "$archive" -C "$artifact_dir"
-    runtime_dir="$artifact_dir/smolvm-1.19.0-linux-x86_64"
+    runtime_dir="$artifact_dir/smolvm-1.32.4-linux-x86_64"
     "$runtime_dir/smolvm" --version
     printf '%s\n' "$runtime_dir" >> "$GITHUB_PATH"
     printf 'SMOLVM_BIN=%s/smolvm\n' "$runtime_dir" >> "$GITHUB_ENV"

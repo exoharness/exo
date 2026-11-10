@@ -2053,10 +2053,7 @@ async fn compatible_default_engine(binary: &Path) -> bool {
         let wanted =
             Version::parse(smolmachines::VERSION).expect("smolmachines reports a semver version");
         parse_version(&String::from_utf8_lossy(&output.stdout)).is_some_and(|version| {
-            version.major == wanted.major
-                && version.minor == wanted.minor
-                && version.patch >= wanted.patch
-                && version.pre.is_empty()
+            version.major == wanted.major && version >= wanted && version.pre.is_empty()
         })
     }
     #[cfg(not(feature = "smolvm"))]
@@ -2919,7 +2916,7 @@ esac"#,
                 .env_remove(SMOLVM_BIN_ENV)
                 .env_remove(SMOLVM_BOOT_BIN_ENV)
                 .env("SMOLMACHINES_CACHE_DIR", dir.path().join("cache"))
-                .env("SMOLMACHINES_ENGINE_VERSION", "1.26.1")
+                .env("SMOLMACHINES_ENGINE_VERSION", "1.32.4")
                 .env("SMOLMACHINES_NO_DOWNLOAD", "1")
                 .output()
                 .await
@@ -2946,9 +2943,9 @@ esac"#,
                 ("linux", "x86_64") => "linux-x86_64",
                 _ => unreachable!(),
             };
-            let cached = root.join("cache").join(format!("smolvm-1.26.1-{platform}"));
+            let cached = root.join("cache").join(format!("smolvm-1.32.4-{platform}"));
             let binary = cached.join("smolvm");
-            write_test_binary(&binary, "printf 'smolvm 1.26.1\\n'");
+            write_test_binary(&binary, "printf 'smolvm 1.32.4\\n'");
             assert_eq!(backend.binary().await.unwrap(), &binary);
             let mut request = test_request(Some(Duration::from_secs(60)));
             request.spec.policy.networking = SandboxNetworkPolicy::Limited {
@@ -2965,7 +2962,7 @@ esac"#,
             write_test_binary(&root.join("bin/smolvm"), "printf 'smolvm 1.16.2\\n'");
             write_test_binary(
                 &binary,
-                "case \"$*\" in --version) echo 'smolvm 1.26.1';; 'machine start --help') echo '--egress-interceptor <ADDR>';; 'machine create --help') echo '--allow-host-pattern <PATTERN>';; esac",
+                "case \"$*\" in --version) echo 'smolvm 1.32.4';; 'machine start --help') echo '--egress-interceptor <ADDR>';; 'machine create --help') echo '--allow-host-pattern <PATTERN>';; esac",
             );
             write_test_binary(&cached.join("smolvm-bin"), "exit 0");
             let backend = SmolvmSandboxBackend::new();
@@ -3001,15 +2998,19 @@ esac"#,
         );
         #[cfg(not(feature = "smolvm"))]
         assert_eq!(backend.binary().await.unwrap(), &installed);
+        // An installed engine at or above the SDK's release is used, not replaced by an older download.
         #[cfg(feature = "smolvm")]
-        {
+        for version in ["1.32.4", "1.34.1"] {
             write_test_binary(
                 &installed,
-                "case \"$*\" in --version) echo 'smolvm 1.26.1';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac",
+                &format!(
+                    "case \"$*\" in --version) echo 'smolvm {version}';; 'machine start --help') echo '--egress-interceptor <ADDR>';; esac"
+                ),
             );
             assert_eq!(
                 SmolvmSandboxBackend::new().binary().await.unwrap(),
-                &installed
+                &installed,
+                "{version}"
             );
         }
     }
