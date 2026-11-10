@@ -726,6 +726,54 @@ fn explicit_snapshots_are_unique_and_reusable() {
     validate_snapshot_key(&decoded.template_key).unwrap();
 }
 
+#[test]
+fn ram_capture_rejects_external_disks_before_touching_the_source() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: root.path().into(),
+        ..Default::default()
+    };
+    let source = MachineRecord {
+        machine_id: "fc-0123456789abcdef-01234567".into(),
+        spec_hash: "spec".into(),
+        runtime: test_runtime(),
+        memory_grant_mib: None,
+        resolved_image: "image".into(),
+        slot: 1,
+        network_enabled: false,
+        workspace_id: None,
+        resource_paths: vec![],
+        idle_ttl_seconds: Some(60),
+        snapshot_template: None,
+        snapshot_network_slot: None,
+    };
+    let jail = jail_root(&config, &source.machine_id);
+    fs::create_dir_all(&jail)?;
+    fs::write(jail.join("overlay.ublk"), b"external disk marker")?;
+    let error = capture_snapshot_template(
+        &config,
+        &source,
+        &"a".repeat(64),
+        SnapshotTemplateLifecycle::Snapshot,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+    );
+    assert_eq!(
+        fs::read(jail.join("overlay.ublk"))?,
+        b"external disk marker"
+    );
+    assert!(
+        !jail_dir(&config, &source.machine_id)
+            .join("snapshot-pending")
+            .exists()
+    );
+    assert!(!config.state_root.join("snapshots").exists());
+    Ok(())
+}
+
 #[tokio::test]
 async fn vsock_request_uses_firecracker_handshake_and_framing() {
     let directory = tempfile::tempdir().unwrap();
@@ -1046,6 +1094,7 @@ pub(super) fn test_shared(
         capacity_gate: Mutex::new(()),
         starting_machines: Arc::new(StdMutex::new(HashSet::new())),
         base_image_digests: StdMutex::new(HashMap::new()),
+        filesystem_disks: StdMutex::new(HashMap::new()),
     }))
 }
 
