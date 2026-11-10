@@ -194,7 +194,7 @@ async fn native_external_restart_and_stale_registration() -> Result<()> {
     request.spec.mounts.clear();
     request.spec.durable_file_systems.clear();
     request.spec.default_workdir = "/".into();
-    let result: Result<()> = async {
+    let result: Result<SnapshotPayload> = async {
         let source = backend.acquire(request.clone()).await?;
         let state = parse_provider_state(&source.provider_state().context("provider state")?)?;
         let local_image = backend
@@ -316,11 +316,75 @@ async fn native_external_restart_and_stale_registration() -> Result<()> {
         assert_eq!(captured.format, SnapshotFormat::FirecrackerFilesystemRef);
         assert_eq!(disk.captures.load(Ordering::SeqCst), calls);
         drop(registration);
-        Ok(())
+        Ok(captured)
     }
     .await;
     let cleanup = backend.terminate_all().await;
-    result?;
+    let snapshot = result?;
     cleanup?;
+
+    // The last controller owner must stop its VMM before releasing device owners.
+    let files = backend.filesystem_snapshot_files(snapshot.clone()).await?;
+    let disk = LoopDisk::new(temp.path(), 2, &files.disks[0])?;
+    let partial = backend
+        .import_lazy_filesystem_snapshot(
+            snapshot,
+            files.base_image.clone(),
+            vec![disk.backing.clone()],
+        )
+        .await?;
+    let registration = backend.register_filesystem_disks(
+        request.sandbox_id.clone(),
+        partial.clone(),
+        vec![disk.clone()],
+    )?;
+    let handle = backend
+        .acquire_from_snapshot(request.clone(), partial)
+        .await?;
+    let id = backend.shared.warm_machines.lock().await[&request.sandbox_id]
+        .machine_id
+        .clone();
+    let record = backend
+        .shared
+        .load_machine_record(&id)
+        .await?
+        .context("external record")?;
+    let pid = backend.shared.pid_path(&id);
+    let weak = Arc::downgrade(&disk);
+    request.spec.image = record.resolved_image.clone();
+    request.provider_state = handle.provider_state();
+    drop(disk);
+    drop(registration);
+    drop(handle);
+    drop(backend);
+    assert!(!process_running(&pid));
+    assert!(weak.upgrade().is_none());
+    let backend = FirecrackerSandboxBackend::new(FirecrackerConfig {
+        allow_guest_root: false,
+        ..config
+    })
+    .await?;
+    let error = backend
+        .acquire_resolved(FirecrackerRequest {
+            sandbox: request,
+            egress_proxy: None,
+        })
+        .await
+        .err()
+        .context("external runtime replacement accepted")?;
+    assert!(
+        error
+            .to_string()
+            .contains("external disks require filesystem suspend")
+    );
+    assert!(
+        backend
+            .shared
+            .load_machine_record(&id)
+            .await?
+            .context("allocation lost")?
+            .external_disks
+    );
+    backend.terminate_all().await?;
     Ok(())
 }

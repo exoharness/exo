@@ -2270,6 +2270,7 @@ impl Shared {
             .is_some_and(|record| record.spec_hash == spec_hash && record.runtime == runtime);
         if let Some(record) = existing.as_ref() {
             if record.spec_hash != spec_hash || record.runtime != runtime {
+                self.validate_replacement(machine_id).await?;
                 self.cleanup_machine(machine_id, true).await?;
             } else {
                 self.attached_disks(record)?;
