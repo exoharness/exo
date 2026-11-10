@@ -251,11 +251,8 @@ fn default_snapshot_budget_bytes() -> u64 {
     DEFAULT_SNAPSHOT_BUDGET_BYTES
 }
 
-/// A snapshot operation was rejected by [`FirecrackerConfig::snapshot_budget_bytes`].
-///
-/// This error can be downcast through [`anyhow::Error`] context. It does not
-/// establish that the source sandbox was terminated or an enclosing acquisition
-/// was rolled back; callers must establish those lifecycle outcomes separately.
+/// Snapshot storage exceeded [`FirecrackerConfig::snapshot_budget_bytes`].
+/// Does not imply sandbox termination or acquisition rollback.
 #[derive(Debug, thiserror::Error)]
 #[error("Firecracker snapshot storage budget exhausted; delete unused snapshots")]
 pub struct SnapshotBudgetExhausted {
