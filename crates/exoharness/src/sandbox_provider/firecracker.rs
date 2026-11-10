@@ -103,6 +103,7 @@ pub const DEFAULT_FIRECRACKER_STATE_ROOT: &str = "/var/lib/exo/firecracker/state
 pub const DEFAULT_WORKSPACE_SIZE_GIB: u64 = 20;
 pub const DEFAULT_IMAGE_SIZE_GIB: u64 = 8;
 pub const DEFAULT_NETWORK_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_SNAPSHOT_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const DEFAULT_JAILER_UID_BASE: u32 = 100_000;
 pub const DEFAULT_VCPU_COUNT: u8 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
 pub const DEFAULT_MEMORY_MIB: u32 = crate::DEFAULT_SANDBOX_MEMORY_MIB;
@@ -134,7 +135,6 @@ const FIRECRACKER_API_TIMEOUT: Duration = Duration::from_secs(5);
 const FIRECRACKER_SNAPSHOT_CREATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SNAPSHOT_DELETE_FILE: &str = "deleted";
 const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const SNAPSHOT_STATE_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 const SNAPSHOT_LEASE_FILE: &str = "lease";
 const SNAPSHOT_FORK_TEMPLATE_FILE: &str = "fork-template";
@@ -187,6 +187,10 @@ pub struct FirecrackerConfig {
     pub state_root: PathBuf,
     pub image_size_gib: u64,
     pub workspace_size_gib: u64,
+    /// Shared budget for RAM templates, filesystem captures, and retained snapshot
+    /// memory under `state_root`, in allocated bytes. Defaults to 64 GiB.
+    #[serde(default = "default_snapshot_budget_bytes")]
+    pub snapshot_budget_bytes: u64,
     #[serde(default)]
     pub template_resource_slots: u8,
     pub jailer_uid_base: u32,
@@ -224,6 +228,7 @@ impl Default for FirecrackerConfig {
             state_root: PathBuf::from(DEFAULT_FIRECRACKER_STATE_ROOT),
             image_size_gib: DEFAULT_IMAGE_SIZE_GIB,
             workspace_size_gib: DEFAULT_WORKSPACE_SIZE_GIB,
+            snapshot_budget_bytes: DEFAULT_SNAPSHOT_BUDGET_BYTES,
             template_resource_slots: 0,
             jailer_uid_base: DEFAULT_JAILER_UID_BASE,
             dns_server: Ipv4Addr::new(1, 1, 1, 1),
@@ -240,6 +245,10 @@ impl Default for FirecrackerConfig {
 
 fn default_allow_guest_root() -> bool {
     true
+}
+
+fn default_snapshot_budget_bytes() -> u64 {
+    DEFAULT_SNAPSHOT_BUDGET_BYTES
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4815,7 +4824,7 @@ fn retained_snapshot_bytes(config: &FirecrackerConfig) -> Result<u64> {
 
 fn enforce_snapshot_budget(config: &FirecrackerConfig) -> Result<()> {
     ensure!(
-        retained_snapshot_bytes(config)? <= MAX_SNAPSHOT_BYTES,
+        retained_snapshot_bytes(config)? <= config.snapshot_budget_bytes,
         "Firecracker snapshot storage budget exhausted; delete unused snapshots"
     );
     Ok(())

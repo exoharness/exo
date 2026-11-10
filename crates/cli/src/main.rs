@@ -2,6 +2,8 @@ mod env;
 #[cfg(test)]
 mod env_tests;
 mod environment;
+#[cfg(all(test, feature = "firecracker"))]
+mod firecracker_tests;
 mod identity;
 mod managed_agents;
 #[cfg(test)]
@@ -53,8 +55,8 @@ use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 use executor::{
     DEFAULT_FIRECRACKER_BINARY, DEFAULT_FIRECRACKER_INITRAMFS, DEFAULT_FIRECRACKER_JAILER,
     DEFAULT_FIRECRACKER_KERNEL, DEFAULT_FIRECRACKER_STATE_ROOT, DEFAULT_IMAGE_SIZE_GIB,
-    DEFAULT_JAILER_UID_BASE, DEFAULT_NETWORK_BYTES_PER_SECOND, DEFAULT_WORKSPACE_SIZE_GIB,
-    FirecrackerConfig, FirecrackerLimaConfig,
+    DEFAULT_JAILER_UID_BASE, DEFAULT_NETWORK_BYTES_PER_SECOND, DEFAULT_SNAPSHOT_BUDGET_BYTES,
+    DEFAULT_WORKSPACE_SIZE_GIB, FirecrackerConfig, FirecrackerLimaConfig,
 };
 
 use crate::env::CliEnvironment;
@@ -203,6 +205,13 @@ struct FirecrackerArgs {
         default_value_t = DEFAULT_WORKSPACE_SIZE_GIB
     )]
     workspace_size_gib: u64,
+    /// Shared budget for retained Firecracker snapshots, in allocated bytes.
+    #[arg(
+        long = "firecracker-snapshot-budget-bytes",
+        env = "EXO_FIRECRACKER_SNAPSHOT_BUDGET_BYTES",
+        default_value_t = DEFAULT_SNAPSHOT_BUDGET_BYTES
+    )]
+    snapshot_budget_bytes: u64,
     /// First host UID/GID in the reserved per-VM jailer range.
     #[arg(
         long = "firecracker-jailer-uid-base",
@@ -281,6 +290,7 @@ impl FirecrackerArgs {
             state_root: self.state_root.clone(),
             image_size_gib: self.image_size_gib,
             workspace_size_gib: self.workspace_size_gib,
+            snapshot_budget_bytes: self.snapshot_budget_bytes,
             template_resource_slots: 0,
             jailer_uid_base: self.jailer_uid_base,
             dns_server: self.dns_server,

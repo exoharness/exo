@@ -383,10 +383,14 @@ The imported base is pinned in the destination image cache. Restored sandboxes
 keep using this cache path after the capture is deleted.
 Exo does not upload to S3 or publish/fence the service's durable checkpoint.
 
-Filesystem and full captures share a 64 GiB budget based on allocated
-blocks. Shared extents are conservatively counted for each disk file; immutable
-bases already pinned in the image cache are excluded. They are
-retained until explicitly deleted; this budget does not evict checkpoints.
+RAM templates, filesystem captures, and retained snapshot memory share a budget
+under each `state_root`, configured with `FirecrackerConfig::snapshot_budget_bytes`
+(default: 64 GiB). The CLI accepts `--firecracker-snapshot-budget-bytes` or
+`EXO_FIRECRACKER_SNAPSHOT_BUDGET_BYTES`, both in bytes. Accounting uses allocated
+blocks rather than physical disk utilization. Shared extents are conservatively
+counted for each disk file; immutable bases already pinned in the image cache
+are excluded. Captures are retained until explicitly deleted; this budget does
+not evict checkpoints.
 
 The native round-trip test requires root, KVM, an immutable local image,
 and an XFS temporary directory:
