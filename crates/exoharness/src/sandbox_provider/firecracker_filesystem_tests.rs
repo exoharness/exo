@@ -6,7 +6,6 @@ mod live_memory;
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
-        partial: false,
         memory_mib: None,
         template: false,
         key: "a".repeat(64),
@@ -135,7 +134,7 @@ fn imported_base_cache_hit_does_not_read_the_supplied_image() -> Result<()> {
     let cached = cache_base_image(&config, &source, &digest)?;
     fs::remove_file(&source)?;
     let imported = root.path().join("imported.ext4");
-    prepare_imported_base(&config, &source, &digest, &imported, true)?;
+    prepare_imported_base(&config, &source, &digest, &imported)?;
     assert_eq!(fs::metadata(&cached)?.ino(), fs::metadata(&imported)?.ino());
     Ok(())
 }
@@ -357,7 +356,6 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
         &files.base_image,
         &wrong_digest,
         &mismatched,
-        true,
     )
     .unwrap_err();
     assert!(error.to_string().contains("base image does not match"));
@@ -546,33 +544,3 @@ fn filesystem_and_memory_captures_share_a_budget_without_charging_external_base_
     Ok(())
 }
 
-#[test]
-fn partial_captures_require_matching_external_disks() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let config = FirecrackerConfig {
-        state_root: root.path().into(),
-        ..Default::default()
-    };
-    let payload = fixture(&config)?;
-    let mut manifest = FilesystemManifest::from_payload(&payload)?;
-    assert!(open_capture(&config, payload)?.complete);
-    validate_attached_disks(&manifest, None)?;
-    manifest.partial = true;
-    fs::write(
-        manifest.directory(&config).join("manifest.json"),
-        serde_json::to_vec(&manifest)?,
-    )?;
-    let partial = manifest.payload()?;
-    assert_eq!(partial.format, SnapshotFormat::FirecrackerLazyFilesystemRef);
-    assert_ne!(partial.format, SnapshotFormat::FirecrackerFilesystemRef);
-    assert!(!open_capture(&config, partial)?.complete);
-    assert!(validate_attached_disks(&manifest, None).is_err());
-    let mut attached = AttachedDisks {
-        key: manifest.key.clone(),
-        disks: Vec::new(),
-    };
-    validate_attached_disks(&manifest, Some(&attached))?;
-    attached.key = "c".repeat(64);
-    assert!(validate_attached_disks(&manifest, Some(&attached)).is_err());
-    Ok(())
-}
