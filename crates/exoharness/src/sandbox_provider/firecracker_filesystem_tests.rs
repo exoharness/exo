@@ -134,7 +134,7 @@ fn imported_base_cache_hit_does_not_read_the_supplied_image() -> Result<()> {
     let cached = cache_base_image(&config, &source, &digest)?;
     fs::remove_file(&source)?;
     let imported = root.path().join("imported.ext4");
-    prepare_imported_base(&config, &source, &digest, &imported, true)?;
+    prepare_imported_base(&config, &source, &digest, &imported, ImportMode::Verify)?;
     assert_eq!(fs::metadata(&cached)?.ino(), fs::metadata(&imported)?.ino());
     Ok(())
 }
@@ -343,7 +343,7 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
         &files.base_image,
         &wrong_digest,
         &mismatched,
-        true,
+        ImportMode::Verify,
     )
     .unwrap_err();
     assert!(error.to_string().contains("base image does not match"));
@@ -550,12 +550,12 @@ fn partial_captures_require_matching_external_disks() -> Result<()> {
     )?;
     let partial = manifest.payload()?;
     assert_eq!(partial.format, SnapshotFormat::FirecrackerLazyFilesystemRef);
-    assert_ne!(partial.format, SnapshotFormat::FirecrackerFilesystemRef);
     assert!(!open_capture(&config, partial)?.complete);
     assert!(validate_attached_disks(&manifest, None).is_err());
     let mut attached = AttachedDisks {
         key: manifest.key.clone(),
         disks: Vec::new(),
+        identities: Vec::new(),
     };
     validate_attached_disks(&manifest, Some(&attached))?;
     attached.key = "c".repeat(64);
