@@ -2,8 +2,6 @@ mod env;
 #[cfg(test)]
 mod env_tests;
 mod environment;
-#[cfg(all(test, feature = "firecracker"))]
-mod firecracker_tests;
 mod identity;
 mod managed_agents;
 #[cfg(test)]
