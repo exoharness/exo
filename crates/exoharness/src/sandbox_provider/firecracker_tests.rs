@@ -879,6 +879,20 @@ fn persistent_snapshot_expiry_reclaims_files() {
 }
 
 #[test]
+fn snapshot_headroom_preserves_the_host_reserve() {
+    let gib = 1024 * 1024 * 1024;
+    for (total, available, expected) in [
+        (100 * gib, 20 * gib, Some(10 * gib)),
+        (5 * gib, 2 * gib, Some(gib)),
+        (5 * gib, gib, Some(0)),
+        (100 * gib, 10 * gib - 1, None),
+        (5 * gib, gib - 1, None),
+    ] {
+        assert_eq!(snapshot_disk_headroom(total, available).ok(), expected);
+    }
+}
+
+#[test]
 fn snapshot_budget_config_preserves_default_and_serializes_overrides() {
     let json = r#"{
         "firecracker_bin": "/usr/local/bin/firecracker",

@@ -4845,6 +4845,20 @@ fn enforce_snapshot_budget(config: &FirecrackerConfig) -> Result<()> {
     Ok(())
 }
 
+fn snapshot_disk_headroom(total_bytes: u64, available_bytes: u64) -> Result<u64> {
+    available_bytes
+        .checked_sub((total_bytes / 10).max(1024 * 1024 * 1024))
+        .context("insufficient free disk space for Firecracker snapshot and host reserve")
+}
+
+fn available_snapshot_bytes(config: &FirecrackerConfig) -> Result<u64> {
+    let filesystem = rustix::fs::statvfs(&config.state_root)?;
+    snapshot_disk_headroom(
+        filesystem.f_blocks.saturating_mul(filesystem.f_frsize),
+        filesystem.f_bavail.saturating_mul(filesystem.f_frsize),
+    )
+}
+
 fn with_paused_snapshot_source<T>(
     root: &Path,
     machine_id: &str,
@@ -4941,11 +4955,7 @@ fn capture_snapshot_template(
         let _budget = snapshot_budget_lock(config)?;
         enforce_snapshot_budget(config)?;
     }
-    let filesystem = rustix::fs::statvfs(&config.state_root)?;
-    let available = filesystem.f_bavail.saturating_mul(filesystem.f_frsize);
-    let reserve =
-        (filesystem.f_blocks.saturating_mul(filesystem.f_frsize) / 10).max(1024 * 1024 * 1024);
-    if capture_bytes > available.saturating_sub(reserve) {
+    if capture_bytes > available_snapshot_bytes(config)? {
         bail!("insufficient free disk space for Firecracker snapshot and host reserve");
     }
     let destination = snapshot_template_dir(config, template_key)?;
