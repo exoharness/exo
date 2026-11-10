@@ -30,23 +30,23 @@ case "$sandbox_backend" in
     sudo sysctl -w net.ipv4.ip_forward=1
     archive="$artifact_dir/firecracker.tgz"
     curl --fail --location --retry 3 --max-time 120 \
-      https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.2/firecracker-v1.16.2-x86_64.tgz \
+      https://github.com/firecracker-microvm/firecracker/releases/download/v1.18.0/firecracker-v1.18.0-x86_64.tgz \
       --output "$archive"
-    printf '32e3cdcd4081f91fe2b024a266f57dcb3b4e5fec5033e0cb22467ad7f7820bda  %s\n' "$archive" | sha256sum --check --strict
+    printf '1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd  %s\n' "$archive" | sha256sum --check --strict
     tar -xzf "$archive" -C "$artifact_dir"
     # Hosted runners allow user writes under /usr/local/bin. Firecracker's
     # trusted artifacts require root ownership all the way to the filesystem root.
     runtime_dir=/var/lib/exo/firecracker/bin
     sudo install -d -o root -g root -m 0755 "$runtime_dir"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.16.2-x86_64/firecracker-v1.16.2-x86_64" "$runtime_dir/firecracker"
+      "$artifact_dir/release-v1.18.0-x86_64/firecracker-v1.18.0-x86_64" "$runtime_dir/firecracker"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.16.2-x86_64/jailer-v1.16.2-x86_64" "$runtime_dir/jailer"
+      "$artifact_dir/release-v1.18.0-x86_64/jailer-v1.18.0-x86_64" "$runtime_dir/jailer"
     kernel="$artifact_dir/vmlinux"
     curl --fail --location --retry 3 --max-time 120 \
-      https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260812-48f1b9fb52e9-0/x86_64/vmlinux-6.18.39 \
+      https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20261105-6ea6634994fa-0/x86_64/vmlinux-6.18.56 \
       --output "$kernel"
-    printf '3fde810177aaf9d9a465d00e915924a7a6e2bdd34869d7fcd33c6af73b45e12d  %s\n' "$kernel" | sha256sum --check --strict
+    printf 'af348226aa2a25b846156150d5cdb5dae3bf2a022f1db176e3a2b9a3249817bf  %s\n' "$kernel" | sha256sum --check --strict
     sudo install -d -o root -g root -m 0755 /var/lib/exo/firecracker
     sudo truncate -s 16G /var/lib/exo/firecracker/test-state.img
     sudo mkfs.xfs -f /var/lib/exo/firecracker/test-state.img
