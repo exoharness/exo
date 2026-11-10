@@ -142,12 +142,14 @@ impl FilesystemManifest {
         config: &FirecrackerConfig,
     ) -> Result<(tempfile::TempDir, SnapshotLease)> {
         let destination = self.directory(config);
-        capture_store::staging_directory(
+        let staging = capture_store::staging_directory(
             destination
                 .parent()
                 .context("missing filesystem snapshot parent")?,
             &config.state_root.join("snapshot-budget.lock"),
-        )
+        )?;
+        available_snapshot_bytes(config)?;
+        Ok(staging)
     }
 }
 
@@ -215,7 +217,11 @@ fn publish_capture(
         temporary,
         &manifest.directory(config),
         &config.state_root.join("snapshot-budget.lock"),
-        || enforce_snapshot_budget(config),
+        || {
+            enforce_snapshot_budget(config)?;
+            available_snapshot_bytes(config)?;
+            Ok(())
+        },
     )
 }
 
