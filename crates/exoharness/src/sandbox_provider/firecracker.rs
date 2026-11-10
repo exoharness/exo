@@ -4845,6 +4845,7 @@ fn enforce_snapshot_budget(config: &FirecrackerConfig) -> Result<()> {
     Ok(())
 }
 
+// Reserve the larger of 10% of filesystem capacity or 1 GiB for the host.
 fn snapshot_disk_headroom(total_bytes: u64, available_bytes: u64) -> Result<u64> {
     available_bytes
         .checked_sub((total_bytes / 10).max(1024 * 1024 * 1024))
