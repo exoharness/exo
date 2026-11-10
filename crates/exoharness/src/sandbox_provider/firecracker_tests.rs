@@ -931,14 +931,43 @@ fn snapshot_budget_is_shared_and_uses_the_configured_limit() -> Result<()> {
     assert!(allocated > 0);
     assert_eq!(retained_snapshot_bytes(&config)?, allocated);
     config.snapshot_budget_bytes = allocated - 1;
-    assert!(
-        enforce_snapshot_budget(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("snapshot storage budget exhausted")
+    let error = enforce_snapshot_budget(&config).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Firecracker snapshot storage budget exhausted; delete unused snapshots"
     );
+    let error = error
+        .context("capturing a snapshot")
+        .context("outer operation");
+    let exhausted = error
+        .downcast_ref::<crate::SnapshotBudgetExhausted>()
+        .context("expected typed snapshot budget error through context")?;
+    assert_eq!(exhausted.limit_bytes, allocated - 1);
+    assert_eq!(exhausted.accounted_bytes, allocated);
     config.snapshot_budget_bytes = allocated;
     enforce_snapshot_budget(&config)?;
+    Ok(())
+}
+
+#[test]
+fn snapshot_budget_preserves_accounting_io_errors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: directory.path().into(),
+        snapshot_budget_bytes: 0,
+        ..Default::default()
+    };
+    fs::write(
+        config.state_root.join("filesystem-snapshots"),
+        b"not a directory",
+    )?;
+    let error = enforce_snapshot_budget(&config).unwrap_err();
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    assert!(
+        error
+            .downcast_ref::<crate::SnapshotBudgetExhausted>()
+            .is_none()
+    );
     Ok(())
 }
 
@@ -993,7 +1022,7 @@ fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     assert!(enforce_snapshot_budget(&config).is_ok());
 }
 
-fn test_shared(
+pub(super) fn test_shared(
     config: FirecrackerConfig,
     warm_machines: HashMap<SandboxId, WarmMachineEntry>,
 ) -> Result<Arc<Shared>> {

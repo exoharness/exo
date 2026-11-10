@@ -392,6 +392,19 @@ counted for each disk file; immutable bases already pinned in the image cache
 are excluded. Captures are retained until explicitly deleted; this budget does
 not evict checkpoints.
 
+When this guard rejects a RAM capture, filesystem capture, or filesystem import,
+the error downcasts to `exoharness::SnapshotBudgetExhausted` through `anyhow`
+context. Its `limit_bytes` is the configured budget, and `accounted_bytes` is the
+allocated storage total at rejection, including staged captures. Unrelated I/O,
+corruption, and snapshot failures do not carry this type. A rejected filesystem
+import publishes no capture and removes its staging files; the imported base may
+remain pinned in the image cache.
+
+This error identifies a snapshot-budget rejection. It does not guarantee that
+the source sandbox was terminated or an enclosing acquisition was rolled back.
+Callers must establish those lifecycle outcomes separately before treating the
+operation as having no remaining allocation.
+
 The native round-trip test requires root, KVM, an immutable local image,
 and an XFS temporary directory:
 
