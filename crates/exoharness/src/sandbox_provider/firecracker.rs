@@ -5110,6 +5110,9 @@ fn capture_snapshot_template(
         .runtime
         .memory_ceiling_mib
         .unwrap_or(source.runtime.memory_mib);
+    // Balloon inflation does not clear KVM's dirty bitmap. A first capture can
+    // write pages dirtied during ceiling-sized boot, even after reclamation;
+    // reserve for the dirty delta and merged image, not just the current grant.
     let capture_bytes = u64::from(memory_mib)
         .checked_mul(1024 * 1024)
         .and_then(|bytes| bytes.checked_add(SNAPSHOT_STATE_RESERVE_BYTES))

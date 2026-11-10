@@ -471,11 +471,12 @@ print("verified")'
         let mut output = String::new();
         workload.stdout.read_to_string(&mut output).await?;
         assert_eq!(output, "verified\n");
-        assert!(workload.completion.await?.ok);
+        assert_eq!(workload.wait.await?, 0);
         Ok(())
     }
     .await;
     let cleanup = backend.terminate_all().await;
     result?;
-    cleanup
+    cleanup?;
+    Ok(())
 }
