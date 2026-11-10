@@ -29,6 +29,7 @@ use exo_firecracker_protocol::{
     Message, PROTOCOL_VERSION, TerminalSize as GuestTerminalSize, decode_frame_length,
 };
 use ipnet::Ipv4Net;
+#[cfg(target_os = "linux")]
 use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use rustix::fs::{FlockOperation, flock};
 #[cfg(target_os = "linux")]
@@ -214,6 +215,7 @@ pub struct FirecrackerConfig {
     pub max_machines: Option<NonZeroUsize>,
     /// Opt in to live memory growth by booting with a balloon at this ceiling.
     /// OOM deflation is disabled; callers must reserve capacity before growing.
+    /// Must be even MiB and at most four times each sandbox's initial grant.
     #[serde(default)]
     pub memory_ceiling_mib: Option<std::num::NonZeroU32>,
 }
@@ -279,6 +281,24 @@ struct FirecrackerRuntimeFingerprint {
     template_resource_slots: u8,
     #[serde(default)]
     allow_guest_root: bool,
+}
+
+impl FirecrackerRuntimeFingerprint {
+    fn validate_live_memory(&self) -> Result<()> {
+        if let Some(ceiling) = self.memory_ceiling_mib {
+            ensure!(
+                ceiling.is_multiple_of(2),
+                "Firecracker boot memory ceiling must be a multiple of 2 MiB"
+            );
+            // The guest allocates page metadata for the entire ceiling at boot.
+            // Bound this cost instead of accepting tiny, effectively unusable grants.
+            ensure!(
+                u64::from(ceiling) <= u64::from(self.memory_mib) * 4,
+                "Firecracker memory ceiling must not exceed four times the initial grant"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1282,12 +1302,6 @@ impl FirecrackerSandboxBackend {
                     .context("joining Firecracker snapshot lease acquisition")??
                 }
             };
-            if manifest.memory_mib.is_some() {
-                ensure!(
-                    !process_running(&self.shared.pid_path(&machine_id)),
-                    "Firecracker snapshot restore target is already running"
-                );
-            }
             self.shared
                 .new_machine_record(
                     &request,
@@ -1379,6 +1393,10 @@ impl FirecrackerSandboxBackend {
         capacity_reservation: Option<MachineCapacityReservation>,
         pre_staged: bool,
     ) -> Result<FirecrackerSandboxHandle> {
+        self.shared
+            .host_fingerprint
+            .for_resources(request.spec.resources.unwrap_or_default())
+            .validate_live_memory()?;
         let stable_machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
         let machine_key_prefix = format!("fc-{}-", stable_id(request.sandbox_id.as_str()));
 
@@ -1871,6 +1889,23 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             })
     }
 
+    async fn live_resource_grant(&self) -> Result<Option<SandboxResourceShape>> {
+        let _guard = self
+            .shared
+            .lifecycle_locks
+            .lock_machine(&self.machine.record.machine_id)
+            .await;
+        let record = self
+            .shared
+            .load_machine_record(&self.machine.record.machine_id)
+            .await?
+            .context("Firecracker allocation is missing")?;
+        Ok(SandboxResourceShape::new(
+            record.runtime.vcpu_count,
+            balloon::grant(&record)?,
+        ))
+    }
+
     async fn expand_resources(
         &self,
         resources: SandboxResourceShape,
@@ -2201,7 +2236,7 @@ impl Shared {
         let ready = async {
             match readiness {
                 GuestReadiness::Signal(listener) => {
-                    wait_for_guest(self, machine_id, listener, GUEST_READY_TIMEOUT).await?
+                    wait_for_guest(self, machine_id, listener).await?
                 }
                 GuestReadiness::Probe => wait_for_restored_guest(self, &machine).await?,
             }
@@ -2339,6 +2374,7 @@ impl Shared {
         let idle_ttl_seconds = request.lifecycle.idle_ttl.map(|ttl| ttl.as_secs());
         let resources = request.spec.resources.unwrap_or_default();
         let runtime = self.host_fingerprint.for_resources(resources);
+        runtime.validate_live_memory()?;
         let memory_grant_mib = memory_grant_mib.map(|grant| grant.max(resources.memory_mib));
         if let Some(grant) = memory_grant_mib {
             ensure!(
@@ -2692,6 +2728,12 @@ fn parse_provider_state(value: &Value) -> Result<FirecrackerProviderState> {
 }
 
 fn validate_host_blocking(config: &FirecrackerConfig) -> Result<String> {
+    ensure!(
+        config
+            .memory_ceiling_mib
+            .is_none_or(|ceiling| ceiling.get().is_multiple_of(2)),
+        "Firecracker memory ceiling must be a multiple of 2 MiB for transparent huge pages"
+    );
     if !cfg!(target_os = "linux") {
         bail!("Firecracker sandbox execution is only supported on Linux");
     }
@@ -3358,6 +3400,18 @@ fn write_manifest(state_root: &Path, record: &MachineRecord) -> Result<()> {
     if let Err(error) = fs::remove_file(&temporary) {
         tracing::warn!(%error, path = %temporary.display(), "failed to remove temporary Firecracker manifest");
     }
+    Ok(())
+}
+
+fn replace_manifest(state_root: &Path, record: &MachineRecord) -> Result<()> {
+    let path = manifest_path(state_root, &record.machine_id);
+    ensure!(path.is_file(), "Firecracker allocation is missing");
+    let directory = path.parent().context("missing manifest directory")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(&mut temporary, record)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&path)?;
+    File::open(directory)?.sync_all()?;
     Ok(())
 }
 
@@ -4476,11 +4530,7 @@ fn firecracker_vm_configuration(
             track_dirty_pages: true,
             // The ceiling is mapped at boot. Larger host pages avoid the
             // translation overhead of faulting that mapping in one page at a time.
-            huge_pages: record
-                .runtime
-                .memory_ceiling_mib
-                .filter(|ceiling| ceiling.is_multiple_of(2))
-                .map(|_| "Transparent"),
+            huge_pages: record.runtime.memory_ceiling_mib.map(|_| "Transparent"),
         },
         network_interfaces,
         vsock: FirecrackerVsock {
@@ -5883,15 +5933,12 @@ async fn wait_for_guest(
     shared: &Shared,
     machine_id: &str,
     listener: StdUnixListener,
-    timeout: Duration,
 ) -> Result<()> {
     let pid_path = shared.pid_path(machine_id);
     let stderr_path = jail_root(&shared.config, machine_id).join("firecracker.stderr");
-    tokio::task::spawn_blocking(move || {
-        wait_for_guest_blocking(&pid_path, &stderr_path, listener, timeout)
-    })
-    .await
-    .context("joining Firecracker guest-ready wait")?
+    tokio::task::spawn_blocking(move || wait_for_guest_blocking(&pid_path, &stderr_path, listener))
+        .await
+        .context("joining Firecracker guest-ready wait")?
 }
 
 #[tracing::instrument(name = "firecracker.restored_guest_ready", skip_all)]
@@ -5935,7 +5982,6 @@ fn wait_for_guest_blocking(
     pid_path: &Path,
     stderr_path: &Path,
     listener: StdUnixListener,
-    timeout: Duration,
 ) -> Result<()> {
     let started = Instant::now();
     // With --new-pid-ns the jailer clones Firecracker and only then writes the
@@ -5943,8 +5989,7 @@ fn wait_for_guest_blocking(
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md#jailer-usage
     let mut observed_process = false;
     listener.set_nonblocking(true)?;
-    let mut ready = [PollFd::new(&listener, PollFlags::IN)];
-    while started.elapsed() < timeout {
+    while started.elapsed() < GUEST_READY_TIMEOUT {
         if process_running(pid_path) {
             observed_process = true;
         } else if observed_process {
@@ -5968,14 +6013,7 @@ fn wait_for_guest_blocking(
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error).context("accepting Firecracker guest-ready signal"),
         }
-        let remaining = timeout.saturating_sub(started.elapsed());
-        let interval = Timespec::try_from(remaining.min(Duration::from_millis(100)))?;
-        // Wake immediately for readiness, without continually preempting a
-        // guest that is still booting. Periodic wakes only check VMM liveness.
-        match poll(&mut ready, Some(&interval)) {
-            Ok(_) | Err(rustix::io::Errno::INTR) => {}
-            Err(error) => return Err(error).context("waiting for Firecracker guest readiness"),
-        }
+        std::thread::sleep(Duration::from_millis(1));
     }
     bail!(
         "Firecracker guest agent did not become ready; {}",
@@ -6009,3 +6047,7 @@ async fn touch_machine(
 #[cfg(test)]
 #[path = "firecracker_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "firecracker_live_memory_tests.rs"]
+mod live_memory_tests;
