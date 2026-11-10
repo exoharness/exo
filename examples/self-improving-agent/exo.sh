@@ -49,6 +49,7 @@ declare -a CONTROL_PIDS=()
 INITIAL_PROMPT_FILE="${EXO_INITIAL_PROMPT_FILE:-}"
 MODEL_CREDENTIAL="openai"
 MODEL_BASE_URL=""
+MODEL_PROVIDER=""
 USER_NAME="${EXO_USER_NAME:-}"
 export EXO_LOCAL_PROMPT_FILE="$LOCAL_PROMPT_FILE"
 
@@ -86,6 +87,10 @@ Subcommands:
 
 Options:
   --model <model>              Upstream model name (default: gpt-5.6-terra)
+  --provider <name>            Model provider preset: openai (default) or
+                               openrouter (sets credential "openrouter" and
+                               base URL https://openrouter.ai/api/v1; pair
+                               with --model, e.g. z-ai/glm-5.2)
   --credential <name>         Model secret in a selected vault (default: openai)
   --base-url <url>             Optional model API base URL
   --user-name <name>           User name for write-profile (default: none)
@@ -461,7 +466,10 @@ ensure_agent() {
 
   if ! exo vault get global "$MODEL_CREDENTIAL" >/dev/null; then
     local origin token_env="OPENAI_API_KEY" endpoint="${MODEL_BASE_URL:-https://api.openai.com}"
-    if [[ "$MODEL" == claude* ]]; then
+    if [[ "$MODEL_PROVIDER" == openrouter || "$MODEL_BASE_URL" == *openrouter.ai* ]]; then
+      token_env="OPENROUTER_API_KEY"
+      endpoint="${MODEL_BASE_URL:-https://openrouter.ai/api/v1}"
+    elif [[ "$MODEL" == claude* ]]; then
       token_env="ANTHROPIC_API_KEY"
       endpoint="${MODEL_BASE_URL:-https://api.anthropic.com}"
     fi
@@ -968,6 +976,18 @@ while [[ $# -gt 0 ]]; do
     --model)
       MODEL="${2:-}"
       [[ -n "$MODEL" ]] || die "--model requires a value"
+      shift 2
+      ;;
+    --provider)
+      MODEL_PROVIDER="${2:-}"
+      case "$MODEL_PROVIDER" in
+        openai) MODEL_CREDENTIAL="openai"; MODEL_BASE_URL="" ;;
+        openrouter)
+          MODEL_CREDENTIAL="openrouter"
+          MODEL_BASE_URL="https://openrouter.ai/api/v1"
+          ;;
+        *) die "--provider must be openai or openrouter" ;;
+      esac
       shift 2
       ;;
     --credential)

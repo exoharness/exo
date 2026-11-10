@@ -16,8 +16,21 @@ The simplest path from a fresh checkout to a running Exo.
 
 ```bash
 pnpm install
-cp .env.example .env   # then fill in OPENAI_API_KEY
+cp .env.example .env   # then fill in OPENAI_API_KEY (or OPENROUTER_API_KEY)
 ```
+
+To use [OpenRouter](https://openrouter.ai) instead of OpenAI, set
+`OPENROUTER_API_KEY`, store it in the vault, and pass the provider preset to
+`exo.sh` along with any OpenRouter model id:
+
+```bash
+./target/debug/exo vault secret create global openrouter \
+  --token-env OPENROUTER_API_KEY --allow-origin https://openrouter.ai
+./examples/self-improving-agent/exo.sh fresh \
+  --provider openrouter --model z-ai/glm-5.3
+```
+
+`setup.sh` offers the same choice interactively.
 
 2. Tell Exo who you are (optional but recommended):
 
