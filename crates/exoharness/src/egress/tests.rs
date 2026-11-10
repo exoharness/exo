@@ -742,7 +742,7 @@ async fn proxy_resolves_current_credentials_for_each_request() -> Result<()> {
         .header("authorization", &bearer)
         .send()
         .await?;
-    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(rejected.status(), StatusCode::FAILED_DEPENDENCY);
     assert_eq!(
         rejected.headers()["content-type"],
         "text/plain; charset=utf-8"
@@ -1721,7 +1721,7 @@ async fn credential_refresh_preserves_rejections_and_hides_internal_errors() -> 
     for (error, status, message) in [
         (
             EgressError::Rejected("Refresh rejected.".into()),
-            StatusCode::FORBIDDEN,
+            StatusCode::FAILED_DEPENDENCY,
             "Refresh rejected.\n",
         ),
         (

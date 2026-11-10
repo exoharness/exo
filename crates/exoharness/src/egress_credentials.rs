@@ -324,7 +324,7 @@ impl CredentialBindings {
 /// Failures while authorizing or forwarding an egress request.
 #[derive(Debug, thiserror::Error)]
 pub enum EgressError {
-    /// A denial with a sandbox-safe message, returned as plain-text HTTP 403.
+    /// A denial with a sandbox-safe message, returned as plain-text HTTP 424.
     #[error("{0}")]
     Rejected(String),
     /// A policy denial whose diagnostic must not be exposed by the native proxy.

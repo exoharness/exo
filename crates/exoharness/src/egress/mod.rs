@@ -597,7 +597,7 @@ where
                     tracing::debug!(%error, sandbox_id = %state.identity.sandbox_id, "egress request failed");
                     let (status, message) = match error {
                         EgressError::Rejected(message) => {
-                            (StatusCode::FORBIDDEN, format!("{message}\n"))
+                            (StatusCode::FAILED_DEPENDENCY, format!("{message}\n"))
                         }
                         EgressError::Denied(_) | EgressError::Internal(_) => (
                             StatusCode::BAD_GATEWAY,
