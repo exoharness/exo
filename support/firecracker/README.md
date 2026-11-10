@@ -165,26 +165,25 @@ use forks, the guest kernel must additionally be 5.18 or newer with
 attached virtio-rng device.
 
 Live memory growth is opt-in through `FirecrackerConfig.memory_ceiling_mib` on
-the native Linux backend. It additionally requires `CONFIG_VIRTIO_BALLOON=y`.
-The VM boots at the ceiling and acquisition waits until the balloon removes
-the difference from the initial grant. OOM deflation is disabled. Reserve host
-capacity before calling `ManagedSandboxHandle::expand_resources`; it raises
-cgroup limits before returning pages to the guest and waits for actual balloon
-convergence. CPU changes, shrinking, and requests above the ceiling are rejected.
-The same request can be retried after a failure or caller disconnect.
-Live growth requires matching Firecracker/jailer 1.17 or newer and uses transparent
-huge-page backing for even-MiB boot ceilings, avoiding excessive translation costs
-when the larger allocation is first touched. Odd-MiB ceilings use ordinary pages.
-The ordinary 30-second guest startup deadline applies to both paths.
-The pinned artifact bundle above includes this support.
-Filesystem captures retain the memory grant so a cold restore cannot silently
-return a grown sandbox to its initial size.
-The original request's resource shape remains the sandbox's identity when
-reattaching; the live grant is separate state. RAM forks and both capture kinds
-retain that grant. Restoring requires the requested memory or configured ceiling
-to accommodate the stored grant.
-The macOS Lima bridge does not forward these live-growth methods; invoke the
-native Linux backend inside Lima to use them.
+native Linux, with matching Firecracker/jailer 1.17 or newer and
+`CONFIG_VIRTIO_BALLOON=y`. The even-MiB ceiling uses transparent huge pages and
+must not exceed four times the initial grant. The VM boots at the ceiling;
+acquisition waits for initial balloon inflation. OOM deflation is disabled.
+
+Reserve host capacity before `expand_resources`. Growth raises cgroup limits
+before deflation and waits for balloon convergence. CPU changes, shrinking,
+and over-ceiling requests are rejected. Keep the reservation after an error
+or disconnect until `live_resource_grant` reconciles it, or terminate the VM;
+retrying the same grant is safe. Captures, restores, and RAM forks retain the
+grant separately from the original request's identity.
+
+A larger ceiling costs boot time and guest page metadata even before growth.
+Choose it close to the initial grant. On ARM64 nested KVM, a 512 MiB grant
+acquired in 2.7 s with 460 MiB available without a ceiling, versus 7.9 s and
+143 MiB under an 8 GiB ceiling, and 23.6 s with no available memory under
+16 GiB. Those latter shapes are now rejected. These measurements depend on
+the host and guest kernel; validate production host pressure separately.
+The macOS bridge does not forward live growth; invoke native Linux inside Lima.
 
 Exo enables dirty-page tracking and captures sparse memory snapshots instead
 of writing the entire configured RAM size. Each capture merges changes into a

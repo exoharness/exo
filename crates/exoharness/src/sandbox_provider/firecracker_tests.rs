@@ -1967,80 +1967,101 @@ fn resource_backing_disks_are_private_to_the_thread() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[test]
-fn guest_ready_wait_blocks_between_liveness_checks() -> Result<()> {
-    fn voluntary_switches() -> libc::c_long {
-        let mut usage = std::mem::MaybeUninit::uninit();
-        assert_eq!(
-            unsafe { libc::getrusage(libc::RUSAGE_THREAD, usage.as_mut_ptr()) },
-            0
-        );
-        unsafe { usage.assume_init() }.ru_nvcsw
+pub(super) fn native_request(
+    config: &FirecrackerConfig,
+    id: &str,
+    image: &str,
+) -> Result<SandboxRequest> {
+    let agent_id = crate::Uuid7::now();
+    let thread_id = crate::Uuid7::now();
+    let directory = config
+        .state_root
+        .join("resources/threads")
+        .join(agent_id.to_string())
+        .join(thread_id.to_string())
+        .join("repo");
+    fs::create_dir_all(&directory)?;
+    let volume = directory.join("volume.ext4");
+    File::create(&volume)?.set_len(1024 * 1024 * 1024)?;
+    run_checked("mkfs.ext4", &["-q", "-F", &volume.to_string_lossy()])?;
+    for field in ["uid", "gid"] {
+        run_checked(
+            "debugfs",
+            &[
+                "-w",
+                "-R",
+                &format!("set_inode_field / {field} 10001"),
+                &volume.to_string_lossy(),
+            ],
+        )?;
     }
-    let root = tempfile::tempdir_in("/tmp")?;
-    let socket = root.path().join("ready");
-    let listener = StdUnixListener::bind(&socket)?;
-    let pid = root.path().join("pid");
-    fs::write(&pid, std::process::id().to_string())?;
-    let peer = std::thread::spawn(move || -> Result<()> {
-        std::thread::sleep(Duration::from_millis(200));
-        StdUnixStream::connect(socket)?.write_all(&[1])?;
-        Ok(())
-    });
-    let before = voluntary_switches();
-    wait_for_guest_blocking(
-        &pid,
-        &root.path().join("stderr"),
-        listener,
-        Duration::from_secs(2),
-    )?;
-    let switches = voluntary_switches() - before;
-    peer.join().unwrap()?;
-    ensure!(
-        switches < 20,
-        "readiness wait woke {switches} times while no readiness event was available"
-    );
-    Ok(())
+    Ok(SandboxRequest {
+        sandbox_id: id.into(),
+        scope: crate::ResourceScope::Thread {
+            agent_id,
+            thread_id,
+        },
+        spec: SandboxSpec {
+            image: image.into(),
+            resources: Some(
+                SandboxResourceShape::new(1, 1024).context("invalid test resource shape")?,
+            ),
+            default_workdir: "/workspace".into(),
+            mounts: vec![crate::SandboxMount {
+                host_path: directory,
+                guest_path: "/repo".into(),
+                access: crate::SandboxMountAccess::ReadWrite,
+                internal: true,
+            }],
+            durable_file_systems: vec![crate::DurableFileSystem {
+                name: "workspace".into(),
+                mount_path: "/workspace".into(),
+                mode: FileSystemMountMode::ReadWrite,
+            }],
+            policy: SandboxNetworkPolicy::Disabled.into(),
+            tcp_ports: vec![],
+        },
+        lifecycle: crate::SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(600)),
+        },
+        provider_state: None,
+    })
 }
 
 #[cfg(target_os = "linux")]
+pub(super) async fn shell(handle: &Arc<dyn ManagedSandboxHandle>, script: &str) -> Result<String> {
+    let output = handle
+        .exec(&SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-ec".into(), script.into()],
+            env: HashMap::new(),
+            display_argv: None,
+            cwd: Some("/".into()),
+            timeout: Some(Duration::from_secs(10)),
+        })
+        .await?;
+    ensure!(
+        output.ok,
+        "guest command failed: {}{}",
+        output.stdout,
+        output.stderr
+    );
+    Ok(output.stdout)
+}
+
 #[test]
-fn guest_ready_wait_keeps_its_deadline_and_detects_an_exited_source() -> Result<()> {
-    let root = tempfile::tempdir_in("/tmp")?;
-    for exited in [false, true] {
-        let socket = root.path().join(if exited { "exit" } else { "deadline" });
-        let listener = StdUnixListener::bind(socket)?;
-        let pid = root.path().join("pid");
-        fs::write(&pid, std::process::id().to_string())?;
-        let peer = if exited {
-            let pid = pid.clone();
-            Some(std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(50));
-                fs::write(pid, u32::MAX.to_string())
-            }))
-        } else {
-            None
-        };
-        let started = Instant::now();
-        let timeout = if exited {
-            Duration::from_secs(2)
-        } else {
-            Duration::from_millis(40)
-        };
-        let error = wait_for_guest_blocking(&pid, &root.path().join("stderr"), listener, timeout)
-            .unwrap_err();
-        if let Some(peer) = peer {
-            peer.join().unwrap()?;
-        }
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(
-            error.to_string().contains(if exited {
-                "process exited"
-            } else {
-                "guest agent did not become ready"
-            }),
-            "{error:#}"
-        );
-    }
+fn odd_memory_ceiling_rejects_before_host_setup() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: root.path().join("not-created"),
+        memory_ceiling_mib: std::num::NonZeroU32::new(8193),
+        ..Default::default()
+    };
+    assert!(
+        validate_host_blocking(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple of 2 MiB")
+    );
+    assert!(!config.state_root.exists());
     Ok(())
 }

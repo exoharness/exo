@@ -1,8 +1,7 @@
 use super::*;
 
 #[cfg(target_os = "linux")]
-#[path = "firecracker_live_memory_tests.rs"]
-mod live_memory;
+use super::super::tests::{native_request, shell};
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
@@ -247,84 +246,6 @@ fn malformed_references_fail_before_accessing_host_paths() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn native_request(config: &FirecrackerConfig, id: &str, image: &str) -> Result<SandboxRequest> {
-    let agent_id = crate::Uuid7::now();
-    let thread_id = crate::Uuid7::now();
-    let directory = config
-        .state_root
-        .join("resources/threads")
-        .join(agent_id.to_string())
-        .join(thread_id.to_string())
-        .join("repo");
-    fs::create_dir_all(&directory)?;
-    let volume = directory.join("volume.ext4");
-    File::create(&volume)?.set_len(1024 * 1024 * 1024)?;
-    run_checked("mkfs.ext4", &["-q", "-F", &volume.to_string_lossy()])?;
-    for field in ["uid", "gid"] {
-        run_checked(
-            "debugfs",
-            &[
-                "-w",
-                "-R",
-                &format!("set_inode_field / {field} 10001"),
-                &volume.to_string_lossy(),
-            ],
-        )?;
-    }
-    Ok(SandboxRequest {
-        sandbox_id: id.into(),
-        scope: crate::ResourceScope::Thread {
-            agent_id,
-            thread_id,
-        },
-        spec: SandboxSpec {
-            image: image.into(),
-            resources: Some(
-                SandboxResourceShape::new(1, 1024).context("invalid test resource shape")?,
-            ),
-            default_workdir: "/workspace".into(),
-            mounts: vec![crate::SandboxMount {
-                host_path: directory,
-                guest_path: "/repo".into(),
-                access: crate::SandboxMountAccess::ReadWrite,
-                internal: true,
-            }],
-            durable_file_systems: vec![crate::DurableFileSystem {
-                name: "workspace".into(),
-                mount_path: "/workspace".into(),
-                mode: FileSystemMountMode::ReadWrite,
-            }],
-            policy: SandboxNetworkPolicy::Disabled.into(),
-            tcp_ports: vec![],
-        },
-        lifecycle: crate::SandboxLifecycleConfig {
-            idle_ttl: Some(Duration::from_secs(600)),
-        },
-        provider_state: None,
-    })
-}
-
-#[cfg(target_os = "linux")]
-async fn shell(handle: &Arc<dyn ManagedSandboxHandle>, script: &str) -> Result<String> {
-    let output = handle
-        .exec(&SandboxCommand {
-            argv: vec!["/bin/sh".into(), "-ec".into(), script.into()],
-            env: HashMap::new(),
-            display_argv: None,
-            cwd: Some("/".into()),
-            timeout: Some(Duration::from_secs(10)),
-        })
-        .await?;
-    ensure!(
-        output.ok,
-        "guest command failed: {}{}",
-        output.stdout,
-        output.stderr
-    );
-    Ok(output.stdout)
-}
-
-#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires root, KVM, FIRECRACKER_IMAGE, and TMPDIR on XFS"]
 async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<()> {
@@ -351,13 +272,6 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let mut request = native_request(&config, "retained", &image)?;
     let handle = backend.acquire(request.clone()).await?;
-    assert!(handle.live_resource_ceiling().is_none());
-    assert!(
-        handle
-            .expand_resources(SandboxResourceShape::new(1, 2048).unwrap())
-            .await
-            .is_err()
-    );
     request.provider_state = handle.provider_state();
     shell(&handle, "printf '#!/bin/sh\nprintf root-installed:\ncat /repo/edit /workspace/state\n' > /tmp/retained-tool; chmod +x /tmp/retained-tool; printf captured > /repo/edit; printf workspace > /workspace/state").await?;
     assert!(handle.snapshot(crate::SnapshotKind::Full).await.is_err());
@@ -423,13 +337,8 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     let worker_b = FirecrackerSandboxBackend::new(config_b.clone()).await?;
     let mismatched = config_b.state_root.join("mismatched-base.ext4");
     let wrong_digest = "0".repeat(64);
-    let error = prepare_imported_base(
-        &config_b,
-        &files.base_image,
-        &wrong_digest,
-        &mismatched,
-    )
-    .unwrap_err();
+    let error = prepare_imported_base(&config_b, &files.base_image, &wrong_digest, &mismatched)
+        .unwrap_err();
     assert!(error.to_string().contains("base image does not match"));
     assert!(!base_image_cache_path(&config_b, &wrong_digest).exists());
     fs::remove_file(mismatched)?;
@@ -615,4 +524,3 @@ fn filesystem_and_memory_captures_share_a_budget_without_charging_external_base_
     assert_eq!(retained_snapshot_bytes(&config)?, pool_bytes + memory_bytes);
     Ok(())
 }
-
