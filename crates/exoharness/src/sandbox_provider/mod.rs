@@ -95,9 +95,8 @@ pub use firecracker::{
     DEFAULT_FIRECRACKER_KERNEL, DEFAULT_FIRECRACKER_STATE_ROOT, DEFAULT_IMAGE_SIZE_GIB,
     DEFAULT_JAILER_UID_BASE, DEFAULT_MEMORY_MIB, DEFAULT_NETWORK_BYTES_PER_SECOND,
     DEFAULT_SNAPSHOT_BUDGET_BYTES, DEFAULT_VCPU_COUNT, DEFAULT_WORKSPACE_SIZE_GIB,
-    FirecrackerConfig, FirecrackerFilesystemCapture, FirecrackerFilesystemDisk,
-    FirecrackerFilesystemDisks, FirecrackerNetworkDevicePolicy, FirecrackerRequest,
-    FirecrackerSandboxBackend, SnapshotBudgetExhausted,
+    FirecrackerConfig, FirecrackerFilesystemCapture, FirecrackerNetworkDevicePolicy,
+    FirecrackerRequest, FirecrackerSandboxBackend, SnapshotBudgetExhausted,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
 pub use firecracker_bridge::run_firecracker_bridge;
