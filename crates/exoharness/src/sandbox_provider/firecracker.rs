@@ -447,6 +447,8 @@ struct MachineRecord {
     runtime: FirecrackerRuntimeFingerprint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_grant_mib: Option<std::num::NonZeroU32>,
+    #[serde(default)]
+    external_disks: bool,
     resolved_image: String,
     slot: u32,
     network_enabled: bool,
@@ -725,10 +727,29 @@ struct Shared {
     starting_machines: Arc<StdMutex<HashSet<String>>>,
     base_image_digests: StdMutex<HashMap<ImageIdentity, String>>,
     filesystem_disks: StdMutex<HashMap<SandboxId, filesystem::AttachedDisks>>,
+    active_filesystem_disks: StdMutex<HashMap<String, filesystem::AttachedDisks>>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
+        // External device servers are process-owned and cannot be adopted by a
+        // later controller. Stop their VMMs before releasing the device owners.
+        for (machine_id, attached) in self
+            .active_filesystem_disks
+            .get_mut()
+            .expect("filesystem disks poisoned")
+            .drain()
+        {
+            if let Err(error) = stop_machine_process_blocking(
+                &machine_id,
+                &jail_root(&self.config, &machine_id).join("firecracker.pid"),
+            ) {
+                tracing::error!(%machine_id, %error, "could not stop external-disk VM; retaining its device owners");
+                // A stuck VMM may still issue I/O. Releasing its device owners
+                // would permit device-number reuse while it remains alive.
+                std::mem::forget(attached);
+            }
+        }
         for transport in self
             .egress_transports
             .get_mut()
@@ -1026,6 +1047,7 @@ impl FirecrackerSandboxBackend {
                 starting_machines: Arc::new(StdMutex::new(HashSet::new())),
                 base_image_digests: StdMutex::new(HashMap::new()),
                 filesystem_disks: StdMutex::new(HashMap::new()),
+                active_filesystem_disks: StdMutex::new(HashMap::new()),
             }),
         })
     }
@@ -1129,14 +1151,6 @@ impl FirecrackerSandboxBackend {
         template_key: String,
         lifecycle: SnapshotTemplateLifecycle,
     ) -> Result<CapturedSnapshot> {
-        ensure!(
-            !shared
-                .filesystem_disks
-                .lock()
-                .expect("filesystem disks poisoned")
-                .contains_key(&request.sandbox_id),
-            "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
-        );
         if request.egress_proxy.is_some() {
             bail!(PROXIED_SNAPSHOT_UNSUPPORTED);
         }
@@ -1151,6 +1165,10 @@ impl FirecrackerSandboxBackend {
             .load_machine_record(source_machine_id)
             .await?
             .context("Firecracker snapshot source manifest is missing")?;
+        ensure!(
+            !source.external_disks,
+            "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+        );
         if source.spec_hash != source_spec_hash
             || sandbox_spec_hash(&request.spec) != source_spec_hash
         {
@@ -1425,20 +1443,27 @@ impl FirecrackerSandboxBackend {
             {
                 bail!("Firecracker provider state does not match the requested sandbox key");
             }
+            self.shared.validate_replacement(&state.machine_id).await?;
             self.shared.cleanup_machine(&state.machine_id, true).await?;
         }
 
         if !one_shot {
-            let replaced = {
-                let mut machines = self.shared.warm_machines.lock().await;
-                match machines.get(request.sandbox_id.as_str()) {
-                    Some(entry) if entry.spec_hash == spec_hash => None,
-                    Some(_) => machines.remove(request.sandbox_id.as_str()),
-                    None => None,
-                }
-            };
+            let replaced = self
+                .shared
+                .warm_machines
+                .lock()
+                .await
+                .get(request.sandbox_id.as_str())
+                .filter(|entry| entry.spec_hash != spec_hash)
+                .cloned();
             if let Some(entry) = replaced {
+                self.shared.validate_replacement(&entry.machine_id).await?;
                 self.shared.cleanup_machine(&entry.machine_id, true).await?;
+                self.shared
+                    .warm_machines
+                    .lock()
+                    .await
+                    .remove(&request.sandbox_id);
             }
         }
 
@@ -2177,6 +2202,16 @@ impl Shared {
         Ok(())
     }
 
+    async fn validate_replacement(&self, machine_id: &str) -> Result<()> {
+        if let Some(record) = self.load_machine_record(machine_id).await? {
+            ensure!(
+                !record.external_disks,
+                "external disks require filesystem suspend and restore before changing the VM specification"
+            );
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(name = "firecracker.ensure_machine", skip_all)]
     async fn ensure_machine(
         self: &Arc<Self>,
@@ -2196,6 +2231,7 @@ impl Shared {
             if record.spec_hash != spec_hash || record.runtime != runtime {
                 self.cleanup_machine(machine_id, true).await?;
             } else {
+                self.attached_disks(record)?;
                 let machine = machine_from_record(&self.config, record.clone());
                 if process_running(&self.pid_path(machine_id))
                     && GuestClient::new(Arc::clone(self), machine.vsock_path.clone())
@@ -2420,6 +2456,7 @@ impl Shared {
                 spec_hash,
                 runtime,
                 memory_grant_mib,
+                external_disks: false,
                 resolved_image,
                 slot,
                 network_enabled,
@@ -2452,6 +2489,8 @@ impl Shared {
         record: &MachineRecord,
         pre_staged: bool,
     ) -> Result<GuestReadiness> {
+        self.attached_disks(record)?;
+        let pre_staged = pre_staged || record.external_disks;
         let config = self.config.clone();
         let request = request.clone();
         let record = record.clone();
@@ -2571,6 +2610,12 @@ impl Shared {
         }
         let record = self.load_machine_record(machine_id).await?;
         self.stop_machine_process(machine_id).await?;
+        if delete_rootfs {
+            self.active_filesystem_disks
+                .lock()
+                .expect("filesystem disks poisoned")
+                .remove(machine_id);
+        }
         if delete_rootfs && let Some(record) = record.as_ref() {
             let cow = snapshot_cow_path(&self.config, &record.machine_id);
             tokio::task::spawn_blocking(move || {
@@ -4498,12 +4543,15 @@ fn firecracker_vm_configuration(
             io_engine: "Sync",
         });
     }
-    for drive in drives.iter_mut().skip(1) {
-        let path = Path::new(drive.path_on_host.trim_start_matches('/')).with_extension("ublk");
-        if jail_root(config, &record.machine_id)
-            .join(&path)
-            .try_exists()?
-        {
+    if record.external_disks {
+        for drive in drives.iter_mut().skip(1) {
+            let path = Path::new(drive.path_on_host.trim_start_matches('/')).with_extension("ublk");
+            ensure!(
+                jail_root(config, &record.machine_id)
+                    .join(&path)
+                    .try_exists()?,
+                "external block device node is missing"
+            );
             drive.path_on_host = format!("/{}", path.display());
         }
     }
@@ -5085,9 +5133,7 @@ fn capture_snapshot_template(
     lifecycle: SnapshotTemplateLifecycle,
 ) -> Result<File> {
     ensure!(
-        !jail_root(config, &source.machine_id)
-            .join("overlay.ublk")
-            .try_exists()?,
+        !source.external_disks,
         "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
     );
     let capture_pending = jail_dir(config, &source.machine_id).join("snapshot-pending");

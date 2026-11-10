@@ -155,6 +155,7 @@ mod tests {
             spec_hash: "spec".to_owned(),
             runtime,
             memory_grant_mib: None,
+            external_disks: false,
             resolved_image: "image".to_owned(),
             slot: 1,
             network_enabled: false,

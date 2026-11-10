@@ -15,6 +15,114 @@ pub trait FirecrackerFilesystemDisk: Send + Sync {
 pub(super) struct AttachedDisks {
     key: String,
     disks: Vec<Arc<dyn FirecrackerFilesystemDisk>>,
+    identities: Vec<DiskIdentity>,
+}
+
+#[derive(Clone)]
+struct DiskIdentity {
+    device: Arc<File>,
+    sequence: u64,
+    backing: (u64, u64, u64),
+}
+
+#[cfg(target_os = "linux")]
+fn disk_sequence(device: &File) -> Result<u64> {
+    use std::os::fd::AsRawFd;
+    let mut sequence = 0_u64;
+    // Linux BLKGETDISKSEQ identifies a device generation, unlike reusable rdev.
+    if unsafe {
+        libc::ioctl(
+            device.as_raw_fd(),
+            0x80081280_u64 as libc::c_ulong,
+            &mut sequence,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(sequence)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn disk_sequence(_device: &File) -> Result<u64> {
+    bail!("external Firecracker block devices require a Linux host")
+}
+
+impl DiskIdentity {
+    fn open(disk: &dyn FirecrackerFilesystemDisk, size: u64) -> Result<Self> {
+        use std::os::unix::fs::FileTypeExt;
+        let backing = fs::symlink_metadata(disk.backing_file())?;
+        ensure!(
+            backing.is_file() && backing.len() == size,
+            "external filesystem backing size mismatch"
+        );
+        let device = Arc::new(File::open(disk.device_path())?);
+        ensure!(
+            device.metadata()?.file_type().is_block_device(),
+            "external disk is not a block device"
+        );
+        Ok(Self {
+            sequence: disk_sequence(&device)?,
+            device,
+            backing: (backing.dev(), backing.ino(), backing.len()),
+        })
+    }
+
+    fn validate(&self, disk: &dyn FirecrackerFilesystemDisk, jailed: &Path) -> Result<()> {
+        let backing = fs::symlink_metadata(disk.backing_file())?;
+        let linked = fs::symlink_metadata(jailed)?;
+        ensure!(
+            backing.is_file()
+                && linked.is_file()
+                && (backing.dev(), backing.ino(), backing.len()) == self.backing
+                && (linked.dev(), linked.ino(), linked.len()) == self.backing,
+            "external filesystem backing was replaced"
+        );
+        for path in [disk.device_path().to_owned(), jailed.with_extension("ublk")] {
+            let device = File::open(path)?;
+            ensure!(
+                device.metadata()?.rdev() == self.device.metadata()?.rdev()
+                    && disk_sequence(&device)? == self.sequence
+                    && disk_sequence(&self.device)? == self.sequence,
+                "external block device generation changed"
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Shared {
+    pub(super) fn attached_disks(&self, record: &MachineRecord) -> Result<Option<AttachedDisks>> {
+        let attached = self
+            .active_filesystem_disks
+            .lock()
+            .expect("filesystem disks poisoned")
+            .get(&record.machine_id)
+            .cloned();
+        ensure!(
+            record.external_disks == attached.is_some(),
+            "external filesystem disk ownership is unavailable; restore with registered disks"
+        );
+        if let Some(attached) = &attached {
+            let root = jail_root(&self.config, &record.machine_id);
+            for (index, (disk, identity)) in
+                attached.disks.iter().zip(&attached.identities).enumerate()
+            {
+                let path = if index == 0 {
+                    "overlay.ext4".into()
+                } else if record.workspace_id.is_some() && index == 1 {
+                    "workspace.ext4".into()
+                } else {
+                    format!(
+                        "resource-{}.ext4",
+                        index - 1 - usize::from(record.workspace_id.is_some())
+                    )
+                };
+                identity.validate(disk.as_ref(), &root.join(path))?;
+            }
+        }
+        Ok(attached)
+    }
 }
 
 fn validate_attached_disks(
@@ -34,6 +142,9 @@ fn validate_attached_disks(
     Ok(())
 }
 
+/// Controls registration for future restores. Running VMs retain their own
+/// disk owners until termination, even after this guard is dropped.
+#[must_use]
 pub struct FirecrackerFilesystemDisks {
     shared: Arc<Shared>,
     sandbox_id: SandboxId,
@@ -306,9 +417,12 @@ fn capture_disks(
                 copy_sparse_reflink(&root.join(name), &destination)
                     .with_context(|| format!("capturing required filesystem disk {name}"))?;
             }
-            manifest
-                .disk_sizes
-                .push(fs::metadata(temporary.path().join(name))?.len());
+            let captured = fs::symlink_metadata(&destination)?;
+            ensure!(
+                captured.is_file() && captured.len() == fs::metadata(root.join(name))?.len(),
+                "filesystem capture disk size mismatch: {name}"
+            );
+            manifest.disk_sizes.push(captured.len());
         }
         if suspend {
             publish_capture(config, temporary.path(), &manifest)?;
@@ -380,13 +494,11 @@ impl FirecrackerSandboxBackend {
             disks.len() == manifest.disk_sizes.len(),
             "external filesystem disk set is incomplete"
         );
-        for (disk, size) in disks.iter().zip(&manifest.disk_sizes) {
-            let metadata = fs::metadata(disk.backing_file())?;
-            ensure!(
-                metadata.is_file() && metadata.len() == *size,
-                "external filesystem backing size mismatch"
-            );
-        }
+        let identities = disks
+            .iter()
+            .zip(&manifest.disk_sizes)
+            .map(|(disk, size)| DiskIdentity::open(disk.as_ref(), *size))
+            .collect::<Result<Vec<_>>>()?;
         let mut attached = self
             .shared
             .filesystem_disks
@@ -401,6 +513,7 @@ impl FirecrackerSandboxBackend {
             AttachedDisks {
                 key: manifest.key.clone(),
                 disks,
+                identities,
             },
         );
         Ok(FirecrackerFilesystemDisks {
@@ -410,14 +523,15 @@ impl FirecrackerSandboxBackend {
         })
     }
 
-    /// Import a partial disk set that can only boot with registered external disks.
+    /// Import partial disks that can only boot with registered external disks.
+    /// The immutable base is verified before entering the shared cache.
     pub async fn import_lazy_filesystem_snapshot(
         &self,
         payload: SnapshotPayload,
         base_image: PathBuf,
         disks: Vec<PathBuf>,
     ) -> Result<SnapshotPayload> {
-        self.import_filesystem_snapshot_inner(payload, base_image, disks, false, true)
+        self.import_filesystem_snapshot_inner(payload, base_image, disks, ImportMode::Lazy)
             .await
     }
 
@@ -439,12 +553,14 @@ impl FirecrackerSandboxBackend {
         base_image: PathBuf,
         disks: Vec<PathBuf>,
     ) -> Result<SnapshotPayload> {
-        self.import_filesystem_snapshot_inner(payload, base_image, disks, true, false)
+        self.import_filesystem_snapshot_inner(payload, base_image, disks, ImportMode::Verify)
             .await
     }
 
     /// Imports files whose contents and identity have already been verified by the caller.
-    /// The caller must authenticate the snapshot metadata and verify every disk against it.
+    /// The caller must authenticate metadata and verify the base and every disk
+    /// against it. All ranges must be materialized, including those missing from
+    /// a partial parent. This trusted path deliberately skips redundant hashing.
     /// Files must remain stable until import completes, as with ordinary filesystem import.
     pub async fn import_verified_filesystem_snapshot(
         &self,
@@ -452,8 +568,13 @@ impl FirecrackerSandboxBackend {
         base_image: PathBuf,
         disks: Vec<PathBuf>,
     ) -> Result<SnapshotPayload> {
-        self.import_filesystem_snapshot_inner(payload, base_image, disks, false, false)
-            .await
+        self.import_filesystem_snapshot_inner(
+            payload,
+            base_image,
+            disks,
+            ImportMode::VerifiedComplete,
+        )
+        .await
     }
 
     async fn import_filesystem_snapshot_inner(
@@ -461,8 +582,7 @@ impl FirecrackerSandboxBackend {
         payload: SnapshotPayload,
         base_image: PathBuf,
         disks: Vec<PathBuf>,
-        verify_base_digest: bool,
-        partial: bool,
+        mode: ImportMode,
     ) -> Result<SnapshotPayload> {
         let config = self.shared.config.clone();
         tokio::task::spawn_blocking(move || {
@@ -472,14 +592,18 @@ impl FirecrackerSandboxBackend {
                 "filesystem import disk set is incomplete"
             );
             manifest.key = new_capture_key();
-            manifest.partial = partial || (verify_base_digest && manifest.partial);
+            manifest.partial = match mode {
+                ImportMode::Lazy => true,
+                ImportMode::Verify => manifest.partial,
+                ImportMode::VerifiedComplete => false,
+            };
             let (temporary, _staging_lease) = manifest.staging_directory(&config)?;
             prepare_imported_base(
                 &config,
                 &base_image,
                 &manifest.base_image_sha256,
                 &temporary.path().join("base.ext4"),
-                verify_base_digest,
+                mode,
             )?;
             for ((name, source), size) in manifest
                 .layout
@@ -615,10 +739,19 @@ impl FirecrackerSandboxBackend {
         })
         .await??;
         let reservation = self.shared.reserve_machine_capacity(&id).await?;
-        let record = self
+        let mut record = self
             .shared
             .new_machine_record(&resolved, &id, &spec_hash, None, manifest.memory_mib)
             .await?;
+        if let Some(attached) = &attached {
+            record.external_disks = true;
+            replace_manifest(&self.shared.config.state_root, &record)?;
+            self.shared
+                .active_filesystem_disks
+                .lock()
+                .expect("filesystem disks poisoned")
+                .insert(id.clone(), attached.clone());
+        }
         let config = self.shared.config.clone();
         let request_for_disks = resolved.clone();
         let capture_for_disks = Arc::clone(&capture);
@@ -753,8 +886,7 @@ pub(super) async fn snapshot_filesystem(
             .await
             .context("syncing filesystem capture source")?;
         }
-        let attached = shared.filesystem_disks.lock().expect("filesystem disks poisoned")
-            .get(&request.sandbox_id).cloned();
+        let attached = shared.attached_disks(&source)?;
         let capture_shared = Arc::clone(&shared);
         let source_for_capture = source.clone();
         let payload = tokio::task::spawn_blocking(move || {
@@ -849,17 +981,24 @@ fn base_image_cache_path(config: &FirecrackerConfig, digest: &str) -> PathBuf {
         .join(format!("{digest}.ext4"))
 }
 
+#[derive(Clone, Copy)]
+enum ImportMode {
+    Verify,
+    Lazy,
+    VerifiedComplete,
+}
+
 fn prepare_imported_base(
     config: &FirecrackerConfig,
     source: &Path,
     digest: &str,
     target: &Path,
-    verify_digest: bool,
+    mode: ImportMode,
 ) -> Result<()> {
     let cached = base_image_cache_path(config, digest);
     if !cached.try_exists()? {
         copy_sparse_reflink(source, target)?;
-        if verify_digest {
+        if !matches!(mode, ImportMode::VerifiedComplete) {
             ensure!(
                 super::super::firecracker_image::sha256_hex_of_file(target)? == digest,
                 "filesystem import base image does not match"
@@ -1044,7 +1183,9 @@ fn install_disks(
         }
         fs::set_permissions(&jailed, Permissions::from_mode(0o600))?;
         File::open(&jailed)?.sync_all()?;
-        if let Some(target) = target {
+        if attached.is_none()
+            && let Some(target) = target
+        {
             installed.targets.push((jailed, target));
         }
     }
@@ -1076,3 +1217,7 @@ fn install_block_device(_source: &Path, _target: &Path, _uid: u32) -> Result<()>
 #[cfg(test)]
 #[path = "firecracker_filesystem_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "firecracker_external_disk_tests.rs"]
+mod external_disk_tests;
