@@ -396,6 +396,8 @@ restored VM and checks device generations and backing-file identities before
 reuse or capture. Dropping the registration guard prevents future restores;
 the running VM keeps its device owners until termination. A controller exiting
 stops its external-disk VMs; recover them from a filesystem checkpoint.
+External backing files are not published as ordinary local volumes; changing
+VM specifications requires filesystem suspend and restore.
 
 Capture calls each disk's hook while the guest is paused. Incomplete captures
 use `firecracker-lazy-filesystem-ref-v1` and require registered disks to boot.
