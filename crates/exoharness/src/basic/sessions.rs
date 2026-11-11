@@ -289,8 +289,8 @@ mod tests {
     use crate::{
         AttachSandboxRequest, ExoHarness, LocalProcessSandboxBackend, ManagedSandboxBackend,
         ManagedSandboxHandle, NewThreadRequest, SandboxAttachment, SandboxBackendRegistration,
-        SandboxProvider, SandboxRequest, SnapshotFormat, SnapshotPayload, WriteArtifactRequest,
-        test_support,
+        SandboxProvider, SandboxRequest, SandboxResult, SnapshotFormat, SnapshotPayload,
+        WriteArtifactRequest, test_support,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -321,19 +321,12 @@ mod tests {
         async fn acquire(
             &self,
             request: SandboxRequest,
-        ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-            let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-                self.acquisitions.fetch_add(1, Ordering::SeqCst);
-                if self.pause_acquisitions.load(Ordering::SeqCst) {
-                    self.resume_acquisition.notified().await;
-                }
-                LocalProcessSandboxBackend::new()
-                    .acquire(request)
-                    .await
-                    .map_err(anyhow::Error::from)
+        ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+            self.acquisitions.fetch_add(1, Ordering::SeqCst);
+            if self.pause_acquisitions.load(Ordering::SeqCst) {
+                self.resume_acquisition.notified().await;
             }
-            .await;
-            result.map_err(crate::SandboxError::from)
+            LocalProcessSandboxBackend::new().acquire(request).await
         }
         async fn stop(&self, _request: SandboxRequest) -> Result<()> {
             self.stops.fetch_add(1, Ordering::SeqCst);
@@ -354,9 +347,9 @@ mod tests {
             &self,
             _request: SandboxRequest,
             _kind: crate::SnapshotKind,
-        ) -> crate::SandboxResult<SnapshotPayload> {
+        ) -> SandboxResult<SnapshotPayload> {
             Err(crate::SandboxFailure::InvalidRequest {
-                message: format!("test recovery backend does not support suspension"),
+                message: "test recovery backend does not support suspension".into(),
             }
             .into())
         }
@@ -365,9 +358,9 @@ mod tests {
             &self,
             _request: SandboxRequest,
             _payload: SnapshotPayload,
-        ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
             Err(crate::SandboxFailure::InvalidRequest {
-                message: format!("unsupported"),
+                message: "unsupported".into(),
             }
             .into())
         }

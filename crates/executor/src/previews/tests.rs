@@ -1,5 +1,7 @@
 use super::*;
-use exoharness::{ManagedSandboxBackend, ManagedSandboxHandle, SandboxProvider, SandboxRequest};
+use exoharness::{
+    ManagedSandboxBackend, ManagedSandboxHandle, SandboxProvider, SandboxRequest, SandboxResult,
+};
 
 struct TcpBackend;
 
@@ -18,11 +20,10 @@ impl ManagedSandboxBackend for TcpBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> exoharness::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         exoharness::LocalProcessSandboxBackend::new()
             .acquire(request)
             .await
-            .map_err(exoharness::SandboxError::from)
     }
     async fn attach(
         &self,
@@ -45,9 +46,9 @@ impl ManagedSandboxBackend for TcpBackend {
         &self,
         _request: SandboxRequest,
         _kind: exoharness::SnapshotKind,
-    ) -> exoharness::SandboxResult<exoharness::SnapshotPayload> {
+    ) -> SandboxResult<exoharness::SnapshotPayload> {
         Err(exoharness::SandboxFailure::InvalidRequest {
-            message: format!("test TCP backend does not support suspension"),
+            message: "test TCP backend does not support suspension".into(),
         }
         .into())
     }
@@ -56,9 +57,9 @@ impl ManagedSandboxBackend for TcpBackend {
         &self,
         _request: SandboxRequest,
         _payload: exoharness::SnapshotPayload,
-    ) -> exoharness::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         Err(exoharness::SandboxFailure::InvalidRequest {
-            message: format!("unsupported"),
+            message: "unsupported".into(),
         }
         .into())
     }

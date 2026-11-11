@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -30,13 +30,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload,
     WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
 use crate::sandbox_provider::shell_quote;
+use crate::{SandboxAttachment, SandboxResult};
 
 pub const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
 
@@ -271,42 +271,38 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            request.spec.policy.validate_basic("daytona")?;
-            reject_unsupported_mounts(&request)?;
-            let spec_hash = sandbox_spec_hash(&request.spec);
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.policy.validate_basic("daytona")?;
+        reject_unsupported_mounts(&request)?;
+        let spec_hash = sandbox_spec_hash(&request.spec);
 
-            // Only warm sandboxes keep their filesystem across stop and can be
-            // recovered by label after an exo restart.
-            let existing = if request.lifecycle.idle_ttl.is_some() {
-                self.find_sandbox_by_labels(request.sandbox_id.as_str(), &spec_hash)
-                    .await?
-            } else {
-                None
-            };
-            let sandbox = match existing {
-                // Replace a terminal/error sandbox; start only durably-stopped ones
-                // (starting a running/mid-transition sandbox would race).
-                Some(existing) if existing.is_reusable() => {
-                    if existing.needs_start() {
-                        self.start_sandbox(&existing.id).await?;
-                    }
-                    existing
+        // Only warm sandboxes keep their filesystem across stop and can be
+        // recovered by label after an exo restart.
+        let existing = if request.lifecycle.idle_ttl.is_some() {
+            self.find_sandbox_by_labels(request.sandbox_id.as_str(), &spec_hash)
+                .await?
+        } else {
+            None
+        };
+        let sandbox = match existing {
+            // Replace a terminal/error sandbox; start only durably-stopped ones
+            // (starting a running/mid-transition sandbox would race).
+            Some(existing) if existing.is_reusable() => {
+                if existing.needs_start() {
+                    self.start_sandbox(&existing.id).await?;
                 }
-                _ => self.create_sandbox(&request, &spec_hash, None).await?,
-            };
+                existing
+            }
+            _ => self.create_sandbox(&request, &spec_hash, None).await?,
+        };
 
-            self.wait_until_started(&sandbox.id).await?;
-            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(DaytonaSandboxHandle {
-                id: format!("daytona:{}", request.sandbox_id.as_str()),
-                sandbox_id: sandbox.id,
-                request,
-                backend: self.handle_backend(),
-            }))
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+        self.wait_until_started(&sandbox.id).await?;
+        Ok(Arc::new(DaytonaSandboxHandle {
+            id: format!("daytona:{}", request.sandbox_id.as_str()),
+            sandbox_id: sandbox.id,
+            request,
+            backend: self.handle_backend(),
+        }))
     }
 
     async fn attach(
@@ -321,9 +317,9 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::SandboxResult<SnapshotPayload> {
+    ) -> SandboxResult<SnapshotPayload> {
         Err(crate::SandboxFailure::InvalidRequest {
-            message: format!("Daytona sandbox backend does not support suspension"),
+            message: "Daytona sandbox backend does not support suspension".into(),
         }
         .into())
     }
@@ -332,36 +328,33 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            request.spec.policy.validate_basic("daytona")?;
-            reject_unsupported_mounts(&request)?;
-            let snapshot_name = if payload.format == SnapshotFormat::DaytonaRef {
-                let manifest: DaytonaSnapshotManifest = serde_json::from_slice(&payload.bytes)
-                    .context("decoding Daytona snapshot manifest")?;
-                manifest.snapshot_name
-            } else if payload.format == SnapshotFormat::DockerImageTar {
-                import_docker_image_tar(&self.handle_backend(), &payload.bytes).await?
-            } else {
-                bail!(
-                    "the Daytona backend cannot restore a {} payload",
-                    payload.format
-                )
-            };
-            let spec_hash = sandbox_spec_hash(&request.spec);
-            let sandbox = self
-                .create_sandbox(&request, &spec_hash, Some(&snapshot_name))
-                .await?;
-            self.wait_until_started(&sandbox.id).await?;
-            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(DaytonaSandboxHandle {
-                id: format!("daytona:{}", request.sandbox_id.as_str()),
-                sandbox_id: sandbox.id,
-                request,
-                backend: self.handle_backend(),
-            }))
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.policy.validate_basic("daytona")?;
+        reject_unsupported_mounts(&request)?;
+        let snapshot_name = if payload.format == SnapshotFormat::DaytonaRef {
+            let manifest: DaytonaSnapshotManifest = serde_json::from_slice(&payload.bytes)
+                .context("decoding Daytona snapshot manifest")?;
+            manifest.snapshot_name
+        } else if payload.format == SnapshotFormat::DockerImageTar {
+            import_docker_image_tar(&self.handle_backend(), &payload.bytes).await?
+        } else {
+            return Err(anyhow!(
+                "the Daytona backend cannot restore a {} payload",
+                payload.format
+            )
+            .into());
+        };
+        let spec_hash = sandbox_spec_hash(&request.spec);
+        let sandbox = self
+            .create_sandbox(&request, &spec_hash, Some(&snapshot_name))
+            .await?;
+        self.wait_until_started(&sandbox.id).await?;
+        Ok(Arc::new(DaytonaSandboxHandle {
+            id: format!("daytona:{}", request.sandbox_id.as_str()),
+            sandbox_id: sandbox.id,
+            request,
+            backend: self.handle_backend(),
+        }))
     }
 }
 
@@ -543,18 +536,13 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
         bail!("Daytona sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
-        let result: Result<SnapshotPayload> = async {
-            ensure!(
-                kind == crate::SnapshotKind::Filesystem,
-                "daytona does not support the requested snapshot kind"
-            );
-            save_as_snapshot_via_backend(&self.backend, &self.sandbox_id)
-                .await
-                .map_err(anyhow::Error::from)
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        if kind != crate::SnapshotKind::Filesystem {
+            return Err(anyhow!("daytona does not support the requested snapshot kind").into());
         }
-        .await;
-        result.map_err(crate::SandboxError::from)
+        save_as_snapshot_via_backend(&self.backend, &self.sandbox_id)
+            .await
+            .map_err(crate::SandboxError::from)
     }
 }
 

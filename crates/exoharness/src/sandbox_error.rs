@@ -40,29 +40,20 @@ pub enum SandboxRetryAdvice {
 }
 
 #[derive(Debug)]
-pub enum SandboxError {
-    Failure {
-        failure: SandboxFailure,
-        source: anyhow::Error,
-    },
-    Internal(anyhow::Error),
+pub struct SandboxError {
+    pub(crate) failure: Option<SandboxFailure>,
+    pub(crate) source: anyhow::Error,
 }
 
 impl std::fmt::Display for SandboxError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Failure { source, .. } | Self::Internal(source) => {
-                std::fmt::Display::fmt(source, formatter)
-            }
-        }
+        std::fmt::Display::fmt(&self.source, formatter)
     }
 }
 
 impl std::error::Error for SandboxError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Failure { source, .. } | Self::Internal(source) => source.source(),
-        }
+        self.source.source()
     }
 }
 
@@ -70,10 +61,7 @@ pub type SandboxResult<T> = std::result::Result<T, SandboxError>;
 
 impl SandboxError {
     pub fn failure(&self) -> Option<&SandboxFailure> {
-        match self {
-            Self::Failure { failure, .. } => Some(failure),
-            Self::Internal(_) => None,
-        }
+        self.failure.as_ref()
     }
 
     /// Applies to acquisition failures. A capture failure must leave its source intact.
@@ -94,9 +82,9 @@ impl SandboxError {
 
 impl From<SandboxFailure> for SandboxError {
     fn from(failure: SandboxFailure) -> Self {
-        Self::Failure {
+        Self {
             source: anyhow::Error::new(failure.clone()),
-            failure,
+            failure: Some(failure),
         }
     }
 }
@@ -117,12 +105,9 @@ impl From<anyhow::Error> for SandboxError {
                     accounted_bytes: error.accounted_bytes,
                 })
         });
-        match failure {
-            Some(failure) => Self::Failure {
-                failure,
-                source: error,
-            },
-            None => Self::Internal(error),
+        Self {
+            failure,
+            source: error,
         }
     }
 }
@@ -195,7 +180,7 @@ mod tests {
             assert_eq!(SandboxError::from(failure).acquisition_retry(), expected);
         }
         let error = SandboxError::from(
-            anyhow::Error::new(SandboxError::Internal(anyhow::anyhow!("connection closed")))
+            anyhow::Error::new(SandboxError::from(anyhow::anyhow!("connection closed")))
                 .context("acquiring remote sandbox"),
         );
         assert!(format!("{error:#}").contains("acquiring remote sandbox"));

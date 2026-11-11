@@ -41,7 +41,6 @@ use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
-use crate::SandboxAttachment;
 #[cfg(test)]
 use crate::egress::UpstreamResolver;
 use crate::egress::{
@@ -52,6 +51,7 @@ use crate::sandbox::{
     SandboxCommandOutput, SandboxMountAccess, SandboxNetworkPolicy, SandboxRequest, SandboxSpec,
     SnapshotFormat, SnapshotPayload, WARM_SANDBOX_KEY_LABEL, run_command, spawn_sandbox_process,
 };
+use crate::{SandboxAttachment, SandboxResult};
 
 /// Default binary name; overridable with `SMOLVM_BIN` for a non-PATH install.
 const SMOLVM_BIN_ENV: &str = "SMOLVM_BIN";
@@ -1010,60 +1010,55 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            self.require_capabilities(&request).await?;
-            let binary = self.binary().await?;
-            if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
-                ensure!(
-                    request.spec.tcp_ports.is_empty(),
-                    "smolvm TCP forwarding requires a warm sandbox"
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.require_capabilities(&request).await?;
+        let binary = self.binary().await?;
+        if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
+            if !(request.spec.tcp_ports.is_empty()) {
+                return Err(
+                    anyhow::anyhow!("smolvm TCP forwarding requires a warm sandbox").into(),
                 );
-                let image = self.prepare_image(&request.spec.image).await?;
-                reject_unsupported_spec(&request.spec, &image)?;
-                let boot_binary = self.boot_binary().await?.clone();
-                return Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(
-                    SmolvmOneShotHandle {
-                        id: format!("smolvm-oneshot:{}", request.sandbox_id),
-                        binary: binary.clone(),
-                        image,
-                        boot_binary,
-                        storage_gib: self.storage_gib,
-                        overlay_gib: self.overlay_gib,
-                        request,
-                    },
-                ));
             }
-            let machine = machine_name(&request.sandbox_id);
-            #[cfg(unix)]
-            let _guard = filesystem::lock_machine(&self.snapshot_root, &machine).await?;
-            let handle = self
-                .egress
-                .acquire_with_proxy(
-                    crate::egress::AcquisitionMode::Acquire,
-                    request.clone(),
-                    self.external_proxy.as_ref(),
-                    SmolvmProxy::start,
-                    |egress| async {
-                        let image = self.prepare_image(&request.spec.image).await?;
-                        reject_unsupported_spec(&request.spec, &image)?;
-                        self.ensure_machine_started(
-                            &machine,
-                            request.clone(),
-                            MachineSource::Image(&image),
-                            egress,
-                        )
-                        .await
-                    },
-                    self.delete_machine_if_present(&machine),
-                )
-                .await?;
-            handle.touch();
-            self.invalidate_tcp_forwards(&request.sandbox_id);
-            Ok(handle)
+            let image = self.prepare_image(&request.spec.image).await?;
+            reject_unsupported_spec(&request.spec, &image)?;
+            let boot_binary = self.boot_binary().await?.clone();
+            return Ok(Arc::new(SmolvmOneShotHandle {
+                id: format!("smolvm-oneshot:{}", request.sandbox_id),
+                binary: binary.clone(),
+                image,
+                boot_binary,
+                storage_gib: self.storage_gib,
+                overlay_gib: self.overlay_gib,
+                request,
+            }));
         }
-        .await;
-        result.map_err(crate::SandboxError::from)
+        let machine = machine_name(&request.sandbox_id);
+        #[cfg(unix)]
+        let _guard = filesystem::lock_machine(&self.snapshot_root, &machine).await?;
+        let handle = self
+            .egress
+            .acquire_with_proxy(
+                crate::egress::AcquisitionMode::Acquire,
+                request.clone(),
+                self.external_proxy.as_ref(),
+                SmolvmProxy::start,
+                |egress| async {
+                    let image = self.prepare_image(&request.spec.image).await?;
+                    reject_unsupported_spec(&request.spec, &image)?;
+                    self.ensure_machine_started(
+                        &machine,
+                        request.clone(),
+                        MachineSource::Image(&image),
+                        egress,
+                    )
+                    .await
+                },
+                self.delete_machine_if_present(&machine),
+            )
+            .await?;
+        handle.touch();
+        self.invalidate_tcp_forwards(&request.sandbox_id);
+        Ok(handle)
     }
 
     #[cfg(unix)]
@@ -1128,9 +1123,9 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::SandboxResult<SnapshotPayload> {
+    ) -> SandboxResult<SnapshotPayload> {
         Err(crate::SandboxFailure::InvalidRequest {
-            message: format!("smolvm sandbox backend does not support suspension"),
+            message: "smolvm sandbox backend does not support suspension".into(),
         }
         .into())
     }
@@ -1140,13 +1135,12 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            let backend = self.clone();
-            tokio::spawn(async move { backend.restore_snapshot(request, payload).await }).await?
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let backend = self.clone();
+        tokio::spawn(async move { backend.restore_snapshot(request, payload).await })
+            .await
+            .map_err(anyhow::Error::from)?
+            .map_err(crate::SandboxError::from)
     }
 }
 
@@ -1216,13 +1210,11 @@ impl ManagedSandboxHandle for SmolvmOneShotHandle {
         bail!("one-shot smolvm sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
-        let result: Result<SnapshotPayload> = async {
-        bail!(
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!(
             "snapshot needs a persistent VM; construct the backend with SmolvmExecutionMode::Warm"
         )
-}.await;
-        result.map_err(crate::SandboxError::from)
+        .into())
     }
 }
 
@@ -1387,27 +1379,24 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
     }
 
     #[cfg(not(unix))]
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest { message: format!(
-            "complete smolvm filesystem captures require APFS or a reflink-capable Unix filesystem"
-        ) }.into())
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "complete smolvm filesystem captures require APFS or a reflink-capable Unix filesystem".into(),
+        }
+        .into())
     }
 
     #[cfg(unix)]
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
-        let result: Result<SnapshotPayload> = async {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "smolvm does not support full execution snapshots"
-        );
-        ensure!(
-            self.request.lifecycle.idle_ttl.is_some(),
-            "filesystem capture requires a managed lifecycle"
-        );
-        ensure!(
-            self.filesystem_snapshots,
-            "complete filesystem capture requires smolvm {MIN_FILESYSTEM_SNAPSHOT_VERSION} or newer with --include-workspace"
-        );
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        if kind != crate::SnapshotKind::Filesystem {
+            return Err(anyhow::anyhow!("smolvm does not support full execution snapshots").into());
+        }
+        if self.request.lifecycle.idle_ttl.is_none() {
+            return Err(anyhow::anyhow!("filesystem capture requires a managed lifecycle").into());
+        }
+        if !self.filesystem_snapshots {
+            return Err(anyhow::anyhow!("complete filesystem capture requires smolvm {MIN_FILESYSTEM_SNAPSHOT_VERSION} or newer with --include-workspace").into());
+        }
         let handle = self.clone();
         tokio::spawn(async move {
             let snapshot_guard =
@@ -1451,9 +1440,9 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
             run_checked(start, "smolvm machine start after capture").await?;
             result
         })
-        .await?
-}.await;
-        result.map_err(crate::SandboxError::from)
+        .await
+        .map_err(anyhow::Error::from)?
+        .map_err(crate::SandboxError::from)
     }
 }
 

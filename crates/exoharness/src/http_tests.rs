@@ -13,8 +13,8 @@ use crate::{
     ExoHarness, HttpExoHarness, ManagedSandboxBackend, ManagedSandboxHandle, RestoreSandboxRequest,
     RunInSandboxRequest, SandboxAttachment, SandboxCommand, SandboxCommandOutput,
     SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
-    SandboxProcessStdin, SandboxProvider, SandboxRequest, SnapshotFormat, SnapshotPayload,
-    StartSandboxProcessRequest, StartSandboxRequest, WaitSandboxProcessRequest,
+    SandboxProcessStdin, SandboxProvider, SandboxRequest, SandboxResult, SnapshotFormat,
+    SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, WaitSandboxProcessRequest,
     WriteSandboxProcessInputRequest, serve_exoharness_http_listener,
 };
 
@@ -550,12 +550,8 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
     async fn acquire(
         &self,
         _request: SandboxRequest,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: crate::Result<Arc<dyn ManagedSandboxHandle>> = async {
-            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(SnapshotTestSandboxHandle))
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Ok(Arc::new(SnapshotTestSandboxHandle))
     }
 
     async fn attach(
@@ -570,9 +566,9 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::SandboxResult<SnapshotPayload> {
+    ) -> SandboxResult<SnapshotPayload> {
         Err(crate::SandboxFailure::InvalidRequest {
-            message: format!("snapshot test backend does not support suspension"),
+            message: "snapshot test backend does not support suspension".into(),
         }
         .into())
     }
@@ -581,13 +577,9 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
         &self,
         _request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: crate::Result<Arc<dyn ManagedSandboxHandle>> = async {
-            assert_eq!(payload.bytes, Bytes::from_static(b"snapshot"));
-            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(SnapshotTestSandboxHandle))
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        assert_eq!(payload.bytes, Bytes::from_static(b"snapshot"));
+        Ok(Arc::new(SnapshotTestSandboxHandle))
     }
 }
 
@@ -615,16 +607,12 @@ impl ManagedSandboxHandle for SnapshotTestSandboxHandle {
         bail!("snapshot test handle does not support detachment")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
-        let result: crate::Result<SnapshotPayload> = async {
-            assert_eq!(kind, crate::SnapshotKind::Full);
-            Ok(SnapshotPayload {
-                format: SnapshotFormat::DaytonaRef,
-                bytes: Bytes::from_static(b"snapshot"),
-            })
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        assert_eq!(kind, crate::SnapshotKind::Full);
+        Ok(SnapshotPayload {
+            format: SnapshotFormat::DaytonaRef,
+            bytes: Bytes::from_static(b"snapshot"),
+        })
     }
 }
 

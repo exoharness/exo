@@ -415,7 +415,7 @@ impl<H, P> Drop for EgressRuntime<H, P> {
 mod tests {
     use super::*;
     use crate::egress::PublicUpstreamResolver;
-    use crate::{SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxSpec};
+    use crate::{SandboxLifecycleConfig, SandboxNetworkPolicy, SandboxResult, SandboxSpec};
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -447,7 +447,7 @@ mod tests {
         async fn snapshot(
             &self,
             _kind: crate::SnapshotKind,
-        ) -> crate::SandboxResult<crate::SnapshotPayload> {
+        ) -> SandboxResult<crate::SnapshotPayload> {
             unreachable!()
         }
     }

@@ -40,7 +40,7 @@ use crate::sandbox::{
     BoxSandboxTcpStream, ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand,
     SandboxCommandOutput, SnapshotFormat, SnapshotPayload,
 };
-use crate::{FirecrackerRequest, SandboxRequest};
+use crate::{FirecrackerRequest, SandboxRequest, SandboxResult};
 use crate::{SandboxAttachment, SandboxProcessParts};
 
 use super::FirecrackerLimaConfig;
@@ -350,24 +350,21 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
     async fn acquire(
         &self,
         mut request: SandboxRequest,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            request.spec.resources.get_or_insert_with(Default::default);
-            let terminate = self.terminate_request(request.clone());
-            self.egress
-                .acquire(
-                    crate::egress::AcquisitionMode::Acquire,
-                    request.clone(),
-                    self.external_proxy.as_ref(),
-                    |policy| async move { self.egress_transport(&policy).await },
-                    |egress| self.acquire_with_egress(request, None, egress),
-                    terminate,
-                )
-                .await
-                .map(|handle| handle as Arc<dyn crate::ManagedSandboxHandle>)
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.resources.get_or_insert_with(Default::default);
+        let terminate = self.terminate_request(request.clone());
+        self.egress
+            .acquire(
+                crate::egress::AcquisitionMode::Acquire,
+                request.clone(),
+                self.external_proxy.as_ref(),
+                |policy| async move { self.egress_transport(&policy).await },
+                |egress| self.acquire_with_egress(request, None, egress),
+                terminate,
+            )
+            .await
+            .map(|handle| handle as Arc<dyn crate::ManagedSandboxHandle>)
+            .map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -388,31 +385,30 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         &self,
         request: SandboxRequest,
         kind: crate::SnapshotKind,
-    ) -> crate::SandboxResult<SnapshotPayload> {
-        let result: Result<SnapshotPayload> = async {
-            let id = request.sandbox_id.clone();
-            self.egress
-                .suspend(&id, async {
-                    let response = self
-                        .request(FirecrackerBridgeRequest::Suspend {
-                            config: self.config.clone(),
-                            request,
-                            kind,
-                        })
-                        .await?;
-                    let FirecrackerBridgeResponse::Snapshot { format, payload } = response else {
-                        bail!("Firecracker Lima bridge returned the wrong response to suspend");
-                    };
-                    Ok(SnapshotPayload {
-                        format,
-                        bytes: BASE64.decode(payload)?.into(),
+    ) -> SandboxResult<SnapshotPayload> {
+        let id = request.sandbox_id.clone();
+        self.egress
+            .suspend(&id, async {
+                let response = self
+                    .request(FirecrackerBridgeRequest::Suspend {
+                        config: self.config.clone(),
+                        request,
+                        kind,
                     })
+                    .await?;
+                let FirecrackerBridgeResponse::Snapshot { format, payload } = response else {
+                    return Err(anyhow!(
+                        "Firecracker Lima bridge returned the wrong response to suspend"
+                    )
+                    .into());
+                };
+                Ok(SnapshotPayload {
+                    format,
+                    bytes: BASE64.decode(payload)?.into(),
                 })
-                .await
-                .map_err(anyhow::Error::from)
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+            })
+            .await
+            .map_err(crate::SandboxError::from)
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
@@ -469,35 +465,35 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         &self,
         mut request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            request.spec.resources.get_or_insert_with(Default::default);
-            if request.lifecycle.idle_ttl.is_none() {
-                bail!("Firecracker Lima snapshot restores require a managed sandbox lifecycle");
-            }
-            if payload.format != SnapshotFormat::FirecrackerFilesystemRef {
-                request
-                    .spec
-                    .policy
-                    .validate_basic("Firecracker snapshot restore")?;
-                let handle = self.acquire_request(request.into(), Some(payload)).await?;
-                return Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(handle));
-            }
-            let terminate = self.terminate_request(request.clone());
-            self.egress
-                .acquire(
-                    crate::egress::AcquisitionMode::Restore,
-                    request.clone(),
-                    self.external_proxy.as_ref(),
-                    |policy| async move { self.egress_transport(&policy).await },
-                    |egress| self.acquire_with_egress(request, Some(payload), egress),
-                    terminate,
-                )
-                .await
-                .map(|handle| handle as Arc<dyn crate::ManagedSandboxHandle>)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.resources.get_or_insert_with(Default::default);
+        if request.lifecycle.idle_ttl.is_none() {
+            return Err(anyhow!(
+                "Firecracker Lima snapshot restores require a managed sandbox lifecycle"
+            )
+            .into());
         }
-        .await;
-        result.map_err(crate::SandboxError::from)
+        if payload.format != SnapshotFormat::FirecrackerFilesystemRef {
+            request
+                .spec
+                .policy
+                .validate_basic("Firecracker snapshot restore")?;
+            let handle = self.acquire_request(request.into(), Some(payload)).await?;
+            return Ok(Arc::new(handle));
+        }
+        let terminate = self.terminate_request(request.clone());
+        self.egress
+            .acquire(
+                crate::egress::AcquisitionMode::Restore,
+                request.clone(),
+                self.external_proxy.as_ref(),
+                |policy| async move { self.egress_transport(&policy).await },
+                |egress| self.acquire_with_egress(request, Some(payload), egress),
+                terminate,
+            )
+            .await
+            .map(|handle| handle as Arc<dyn crate::ManagedSandboxHandle>)
+            .map_err(crate::SandboxError::from)
     }
 }
 
@@ -620,35 +616,35 @@ impl ManagedSandboxHandle for LimaFirecrackerSandboxHandle {
             .await
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
-        let result: Result<SnapshotPayload> = async {
-            if kind == crate::SnapshotKind::Full && self.egress.is_some() {
-                bail!(super::firecracker::PROXIED_SNAPSHOT_UNSUPPORTED);
-            }
-            if self.request.lifecycle.idle_ttl.is_none() {
-                bail!("one-shot Firecracker Lima sandboxes cannot be snapshotted");
-            }
-            let response = self
-                .bridge
-                .request(FirecrackerBridgeRequest::Snapshot {
-                    config: self.config.clone(),
-                    request: self.request.clone(),
-                    kind,
-                })
-                .await?;
-            let FirecrackerBridgeResponse::Snapshot { format, payload } = response else {
-                bail!("Firecracker Lima bridge returned the wrong response to snapshot");
-            };
-            let bytes = BASE64
-                .decode(payload)
-                .context("decoding Firecracker snapshot bridge response")?;
-            Ok(SnapshotPayload {
-                format,
-                bytes: Bytes::from(bytes),
-            })
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        if kind == crate::SnapshotKind::Full && self.egress.is_some() {
+            return Err(anyhow!(super::firecracker::PROXIED_SNAPSHOT_UNSUPPORTED).into());
         }
-        .await;
-        result.map_err(crate::SandboxError::from)
+        if self.request.lifecycle.idle_ttl.is_none() {
+            return Err(
+                anyhow!("one-shot Firecracker Lima sandboxes cannot be snapshotted").into(),
+            );
+        }
+        let response = self
+            .bridge
+            .request(FirecrackerBridgeRequest::Snapshot {
+                config: self.config.clone(),
+                request: self.request.clone(),
+                kind,
+            })
+            .await?;
+        let FirecrackerBridgeResponse::Snapshot { format, payload } = response else {
+            return Err(
+                anyhow!("Firecracker Lima bridge returned the wrong response to snapshot").into(),
+            );
+        };
+        let bytes = BASE64
+            .decode(payload)
+            .context("decoding Firecracker snapshot bridge response")?;
+        Ok(SnapshotPayload {
+            format,
+            bytes: Bytes::from(bytes),
+        })
     }
 }
 
@@ -923,7 +919,7 @@ impl Drop for LimaBridgeManager {
     }
 }
 
-type RpcResult = crate::SandboxResult<FirecrackerBridgeResponse>;
+type RpcResult = SandboxResult<FirecrackerBridgeResponse>;
 type OpenResult = std::result::Result<(), String>;
 type ExitResult = std::result::Result<i32, String>;
 type BridgeReadResult = io::Result<Bytes>;
@@ -1192,10 +1188,7 @@ impl LimaBridgeClientState {
         }
         if let Ok(mut requests) = self.requests.lock() {
             for (_, sender) in requests.drain() {
-                if sender
-                    .send(Err(crate::SandboxError::Internal(anyhow!(reason.clone()))))
-                    .is_err()
-                {
+                if sender.send(Err(anyhow!(reason.clone()).into())).is_err() {
                     tracing::debug!("Firecracker bridge request receiver already closed");
                 }
             }
@@ -1218,12 +1211,9 @@ impl LimaBridgeClientState {
                 result,
                 failure,
             } => {
-                let result = result.map_err(|message| match failure {
-                    Some(failure) => crate::SandboxError::Failure {
-                        failure,
-                        source: anyhow!(message),
-                    },
-                    None => crate::SandboxError::Internal(anyhow!(message)),
+                let result = result.map_err(|message| crate::SandboxError {
+                    failure,
+                    source: anyhow!(message),
                 });
                 let sender = self
                     .requests

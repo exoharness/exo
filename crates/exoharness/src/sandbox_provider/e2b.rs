@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -23,12 +23,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     DEFAULT_SANDBOX_IMAGE, ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand,
     SandboxCommandOutput, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat,
     SnapshotPayload, WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
+use crate::{SandboxAttachment, SandboxResult};
 
 pub const DEFAULT_E2B_API_URL: &str = "https://api.e2b.app";
 pub const DEFAULT_E2B_ENVD_PORT: u16 = 49_983;
@@ -240,50 +240,44 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            request.spec.policy.validate_basic("e2b")?;
-            reject_host_mounts(&request)?;
-            let spec_hash = sandbox_spec_hash(&request.spec);
-            let key_label = request.sandbox_id.clone();
-            let template_id = resolve_template_id(&request.spec, &self.template_id);
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.policy.validate_basic("e2b")?;
+        reject_host_mounts(&request)?;
+        let spec_hash = sandbox_spec_hash(&request.spec);
+        let key_label = request.sandbox_id.clone();
+        let template_id = resolve_template_id(&request.spec, &self.template_id);
 
-            if let Some(existing) = self
-                .find_sandbox_by_metadata(&key_label, &spec_hash)
-                .await?
-            {
-                let mut envd_access_token = None;
-                if existing.state == "paused" {
-                    let timeout_secs = idle_ttl_to_e2b_lifecycle(&request.lifecycle.idle_ttl).0;
-                    let connected = self
-                        .connect_sandbox(&existing.sandbox_id, timeout_secs)
-                        .await?;
-                    envd_access_token = connected.envd_access_token;
-                }
-                return Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(
-                    E2bSandboxHandle {
-                        id: format!("e2b:{}", request.sandbox_id.as_str()),
-                        sandbox_id: existing.sandbox_id,
-                        envd_access_token,
-                        request,
-                        backend: self.handle_backend(),
-                    },
-                ));
+        if let Some(existing) = self
+            .find_sandbox_by_metadata(&key_label, &spec_hash)
+            .await?
+        {
+            let mut envd_access_token = None;
+            if existing.state == "paused" {
+                let timeout_secs = idle_ttl_to_e2b_lifecycle(&request.lifecycle.idle_ttl).0;
+                let connected = self
+                    .connect_sandbox(&existing.sandbox_id, timeout_secs)
+                    .await?;
+                envd_access_token = connected.envd_access_token;
             }
-
-            let sandbox = self
-                .create_sandbox(&request, &spec_hash, &template_id)
-                .await?;
-            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(E2bSandboxHandle {
+            return Ok(Arc::new(E2bSandboxHandle {
                 id: format!("e2b:{}", request.sandbox_id.as_str()),
-                sandbox_id: sandbox.sandbox_id,
-                envd_access_token: sandbox.envd_access_token,
+                sandbox_id: existing.sandbox_id,
+                envd_access_token,
                 request,
                 backend: self.handle_backend(),
-            }))
+            }));
         }
-        .await;
-        result.map_err(crate::SandboxError::from)
+
+        let sandbox = self
+            .create_sandbox(&request, &spec_hash, &template_id)
+            .await?;
+        Ok(Arc::new(E2bSandboxHandle {
+            id: format!("e2b:{}", request.sandbox_id.as_str()),
+            sandbox_id: sandbox.sandbox_id,
+            envd_access_token: sandbox.envd_access_token,
+            request,
+            backend: self.handle_backend(),
+        }))
     }
 
     async fn attach(
@@ -298,9 +292,9 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::SandboxResult<SnapshotPayload> {
+    ) -> SandboxResult<SnapshotPayload> {
         Err(crate::SandboxFailure::InvalidRequest {
-            message: format!("E2B sandbox backend does not support suspension"),
+            message: "E2B sandbox backend does not support suspension".into(),
         }
         .into())
     }
@@ -309,33 +303,30 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            request.spec.policy.validate_basic("e2b")?;
-            reject_host_mounts(&request)?;
-            if payload.format != SnapshotFormat::E2bRef {
-                bail!(
-                    "E2B sandbox backend can only restore from {}, got {}",
-                    SnapshotFormat::E2bRef,
-                    payload.format
-                );
-            }
-            let manifest: E2bSnapshotManifest =
-                serde_json::from_slice(&payload.bytes).context("decoding E2bSnapshot manifest")?;
-            let spec_hash = sandbox_spec_hash(&request.spec);
-            let sandbox = self
-                .create_sandbox(&request, &spec_hash, &manifest.snapshot_id)
-                .await?;
-            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(E2bSandboxHandle {
-                id: format!("e2b-restored:{}", request.sandbox_id.as_str()),
-                sandbox_id: sandbox.sandbox_id,
-                envd_access_token: sandbox.envd_access_token,
-                request,
-                backend: self.handle_backend(),
-            }))
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.policy.validate_basic("e2b")?;
+        reject_host_mounts(&request)?;
+        if payload.format != SnapshotFormat::E2bRef {
+            return Err(anyhow!(
+                "E2B sandbox backend can only restore from {}, got {}",
+                SnapshotFormat::E2bRef,
+                payload.format
+            )
+            .into());
         }
-        .await;
-        result.map_err(crate::SandboxError::from)
+        let manifest: E2bSnapshotManifest =
+            serde_json::from_slice(&payload.bytes).context("decoding E2bSnapshot manifest")?;
+        let spec_hash = sandbox_spec_hash(&request.spec);
+        let sandbox = self
+            .create_sandbox(&request, &spec_hash, &manifest.snapshot_id)
+            .await?;
+        Ok(Arc::new(E2bSandboxHandle {
+            id: format!("e2b-restored:{}", request.sandbox_id.as_str()),
+            sandbox_id: sandbox.sandbox_id,
+            envd_access_token: sandbox.envd_access_token,
+            request,
+            backend: self.handle_backend(),
+        }))
     }
 }
 
@@ -421,19 +412,14 @@ impl ManagedSandboxHandle for E2bSandboxHandle {
         bail!("E2B sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
-        let result: Result<SnapshotPayload> = async {
-            ensure!(
-                kind == crate::SnapshotKind::Full,
-                "e2b does not support the requested snapshot kind"
-            );
-            let base_template = resolve_template_id(&self.request.spec, &self.backend.template_id);
-            save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template)
-                .await
-                .map_err(anyhow::Error::from)
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        if kind != crate::SnapshotKind::Full {
+            return Err(anyhow!("e2b does not support the requested snapshot kind").into());
         }
-        .await;
-        result.map_err(crate::SandboxError::from)
+        let base_template = resolve_template_id(&self.request.spec, &self.backend.template_id);
+        save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template)
+            .await
+            .map_err(crate::SandboxError::from)
     }
 }
 

@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use executor::runtime_host::RuntimeHost;
 use exoharness::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxAttachment, SandboxCommand,
-    SandboxCommandOutput, SandboxProcessParts, SandboxRequest, SnapshotFormat, SnapshotKind,
-    SnapshotPayload,
+    SandboxCommandOutput, SandboxProcessParts, SandboxRequest, SandboxResult, SnapshotFormat,
+    SnapshotKind, SnapshotPayload,
 };
 use futures::future::BoxFuture;
 use futures::io::AsyncWrite;
@@ -149,7 +149,7 @@ impl ManagedSandboxBackend for CloudflareBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> exoharness::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         self.acquire(request, None)
             .await
             .map_err(exoharness::SandboxError::from)
@@ -180,9 +180,9 @@ impl ManagedSandboxBackend for CloudflareBackend {
         &self,
         _request: SandboxRequest,
         _kind: SnapshotKind,
-    ) -> exoharness::SandboxResult<SnapshotPayload> {
+    ) -> SandboxResult<SnapshotPayload> {
         Err(exoharness::SandboxFailure::InvalidRequest {
-            message: format!("Cloudflare sandbox suspension is not supported"),
+            message: "Cloudflare sandbox suspension is not supported".into(),
         }
         .into())
     }
@@ -190,18 +190,16 @@ impl ManagedSandboxBackend for CloudflareBackend {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> exoharness::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            ensure!(
-                payload.format == SNAPSHOT_FORMAT,
-                "unsupported Cloudflare snapshot format"
-            );
-            self.acquire(request, Some(serde_json::from_slice(&payload.bytes)?))
-                .await
-                .map_err(anyhow::Error::from)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        if payload.format != SNAPSHOT_FORMAT {
+            return Err(anyhow::anyhow!("unsupported Cloudflare snapshot format").into());
         }
-        .await;
-        result.map_err(exoharness::SandboxError::from)
+        self.acquire(
+            request,
+            Some(serde_json::from_slice(&payload.bytes).map_err(anyhow::Error::from)?),
+        )
+        .await
+        .map_err(exoharness::SandboxError::from)
     }
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
         self.0
@@ -334,27 +332,26 @@ impl ManagedSandboxHandle for CloudflareHandle {
     async fn detach(&self) -> Result<SandboxAttachment> {
         bail!("Cloudflare sandbox detach is not supported")
     }
-    async fn snapshot(&self, kind: SnapshotKind) -> exoharness::SandboxResult<SnapshotPayload> {
-        let result: Result<SnapshotPayload> = async {
-            ensure!(
-                kind == SnapshotKind::Filesystem,
-                "Cloudflare does not support the requested snapshot kind"
+    async fn snapshot(&self, kind: SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        if kind != SnapshotKind::Filesystem {
+            return Err(
+                anyhow::anyhow!("Cloudflare does not support the requested snapshot kind").into(),
             );
-            let snapshot: Snapshot = self
-                .host
-                .call(HostRequest::Sandbox {
-                    command: Command::Snapshot {
-                        request: self.request.clone(),
-                    },
-                })
-                .await?;
-            Ok(SnapshotPayload {
-                format: SNAPSHOT_FORMAT,
-                bytes: serde_json::to_vec(&snapshot)?.into(),
-            })
         }
-        .await;
-        result.map_err(exoharness::SandboxError::from)
+        let snapshot: Snapshot = self
+            .host
+            .call(HostRequest::Sandbox {
+                command: Command::Snapshot {
+                    request: self.request.clone(),
+                },
+            })
+            .await?;
+        Ok(SnapshotPayload {
+            format: SNAPSHOT_FORMAT,
+            bytes: serde_json::to_vec(&snapshot)
+                .map_err(anyhow::Error::from)?
+                .into(),
+        })
     }
 }
 struct CloudflareActivity {

@@ -8,13 +8,13 @@ use aws_sdk_bedrockagentcore::Client;
 use aws_sdk_bedrockagentcore::primitives::Blob;
 use serde::{Deserialize, Serialize};
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload,
     sandbox_spec_hash, validate_durable_file_systems,
 };
 use crate::sandbox_provider::process_bridge;
+use crate::{SandboxAttachment, SandboxResult};
 
 pub fn default_aws_agentcore_image() -> String {
     String::new()
@@ -107,28 +107,22 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
-            request.spec.policy.validate_basic("aws_agentcore")?;
-            reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
-            let spec_hash = sandbox_spec_hash(&request.spec);
-            let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
-            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(
-                AwsAgentCoreSandboxHandle {
-                    id: format!("aws-agentcore:{runtime_session_id}"),
-                    runtime_session_id,
-                    request,
-                    backend: AwsAgentCoreBackendHandle {
-                        client: self.client.clone(),
-                        runtime_arn: self.runtime_arn.clone(),
-                        invoke_target: self.invoke_target.clone(),
-                        qualifier: self.qualifier.clone(),
-                    },
-                },
-            ))
-        }
-        .await;
-        result.map_err(crate::SandboxError::from)
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.spec.policy.validate_basic("aws_agentcore")?;
+        reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
+        let spec_hash = sandbox_spec_hash(&request.spec);
+        let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
+        Ok(Arc::new(AwsAgentCoreSandboxHandle {
+            id: format!("aws-agentcore:{runtime_session_id}"),
+            runtime_session_id,
+            request,
+            backend: AwsAgentCoreBackendHandle {
+                client: self.client.clone(),
+                runtime_arn: self.runtime_arn.clone(),
+                invoke_target: self.invoke_target.clone(),
+                qualifier: self.qualifier.clone(),
+            },
+        }))
     }
 
     async fn attach(
@@ -143,9 +137,9 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::SandboxResult<SnapshotPayload> {
+    ) -> SandboxResult<SnapshotPayload> {
         Err(crate::SandboxFailure::InvalidRequest {
-            message: format!("AWS AgentCore sandbox backend does not support suspension"),
+            message: "AWS AgentCore sandbox backend does not support suspension".into(),
         }
         .into())
     }
@@ -154,11 +148,9 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         Err(crate::SandboxFailure::InvalidRequest {
-            message: format!(
-                "restoring an AgentCore sandbox from a snapshot is not implemented yet"
-            ),
+            message: "restoring an AgentCore sandbox from a snapshot is not implemented yet".into(),
         }
         .into())
     }
@@ -234,9 +226,9 @@ impl ManagedSandboxHandle for AwsAgentCoreSandboxHandle {
         bail!("AWS AgentCore sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         Err(crate::SandboxFailure::InvalidRequest {
-            message: format!("AgentCore sandbox snapshots are not implemented yet"),
+            message: "AgentCore sandbox snapshots are not implemented yet".into(),
         }
         .into())
     }
