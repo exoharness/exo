@@ -1219,7 +1219,10 @@ impl LimaBridgeClientState {
                 failure,
             } => {
                 let result = result.map_err(|message| match failure {
-                    Some(failure) => crate::SandboxError::Failure(failure),
+                    Some(failure) => crate::SandboxError::Failure {
+                        failure,
+                        source: anyhow!(message),
+                    },
                     None => crate::SandboxError::Internal(anyhow!(message)),
                 });
                 let sender = self
@@ -1793,7 +1796,7 @@ mod egress_cleanup_tests {
                 };
                 let frame = FirecrackerBridgeServerFrame::Response {
                     id,
-                    result: Err("backend rejected request".into()),
+                    result: Err("snapshot budget exhausted; source resume also failed".into()),
                     failure,
                 };
                 let wire = serde_json::to_vec(&frame)?;
@@ -1808,6 +1811,7 @@ mod egress_cleanup_tests {
             replied?;
             let error = crate::SandboxError::from(result.unwrap_err());
             assert_eq!(error.failure(), expected.as_ref());
+            assert!(format!("{error:#}").contains("source resume also failed"));
             assert_eq!(
                 error.acquisition_retry(),
                 if expected.is_some() {

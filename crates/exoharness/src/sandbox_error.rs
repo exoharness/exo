@@ -39,12 +39,31 @@ pub enum SandboxRetryAdvice {
     Unknown,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum SandboxError {
-    #[error(transparent)]
-    Failure(SandboxFailure),
-    #[error(transparent)]
+    Failure {
+        failure: SandboxFailure,
+        source: anyhow::Error,
+    },
     Internal(anyhow::Error),
+}
+
+impl std::fmt::Display for SandboxError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failure { source, .. } | Self::Internal(source) => {
+                std::fmt::Display::fmt(source, formatter)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SandboxError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Failure { source, .. } | Self::Internal(source) => source.source(),
+        }
+    }
 }
 
 pub type SandboxResult<T> = std::result::Result<T, SandboxError>;
@@ -52,7 +71,7 @@ pub type SandboxResult<T> = std::result::Result<T, SandboxError>;
 impl SandboxError {
     pub fn failure(&self) -> Option<&SandboxFailure> {
         match self {
-            Self::Failure(failure) => Some(failure),
+            Self::Failure { failure, .. } => Some(failure),
             Self::Internal(_) => None,
         }
     }
@@ -60,52 +79,51 @@ impl SandboxError {
     /// Applies to acquisition failures. A capture failure must leave its source intact.
     /// The caller chooses eligible backends and backoff; cleanup failure forbids failover.
     pub fn acquisition_retry(&self) -> SandboxRetryAdvice {
-        match self {
-            Self::Failure(
+        match self.failure() {
+            Some(
                 SandboxFailure::VmCapacityExhausted { .. }
                 | SandboxFailure::SnapshotBudgetExhausted { .. }
                 | SandboxFailure::DiskSpaceExhausted { .. },
             ) => SandboxRetryAdvice::DifferentBackendAfterCleanup,
-            Self::Failure(SandboxFailure::SnapshotUnavailable { .. }) => {
-                SandboxRetryAdvice::RecoverSnapshot
-            }
-            Self::Failure(SandboxFailure::InvalidRequest { .. }) => SandboxRetryAdvice::Never,
-            Self::Internal(_) => SandboxRetryAdvice::Unknown,
+            Some(SandboxFailure::SnapshotUnavailable { .. }) => SandboxRetryAdvice::RecoverSnapshot,
+            Some(SandboxFailure::InvalidRequest { .. }) => SandboxRetryAdvice::Never,
+            None => SandboxRetryAdvice::Unknown,
         }
     }
 }
 
 impl From<SandboxFailure> for SandboxError {
     fn from(failure: SandboxFailure) -> Self {
-        Self::Failure(failure)
+        Self::Failure {
+            source: anyhow::Error::new(failure.clone()),
+            failure,
+        }
     }
 }
 
 impl From<anyhow::Error> for SandboxError {
     fn from(error: anyhow::Error) -> Self {
-        if matches!(error.downcast_ref::<Self>(), Some(Self::Internal(_))) {
-            return Self::Internal(error);
-        }
-        let error = match error.downcast::<Self>() {
-            Ok(error) => return error,
-            Err(error) => error,
-        };
-        let error = match error.downcast::<SandboxFailure>() {
-            Ok(failure) => return Self::Failure(failure),
-            Err(error) => error,
-        };
+        let failure = error
+            .downcast_ref::<Self>()
+            .and_then(Self::failure)
+            .or_else(|| error.downcast_ref::<SandboxFailure>())
+            .cloned();
         #[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
-        let error = match error.downcast::<crate::SnapshotBudgetExhausted>() {
-            Ok(error) => {
-                return SandboxFailure::SnapshotBudgetExhausted {
+        let failure = failure.or_else(|| {
+            error
+                .downcast_ref::<crate::SnapshotBudgetExhausted>()
+                .map(|error| SandboxFailure::SnapshotBudgetExhausted {
                     limit_bytes: error.limit_bytes,
                     accounted_bytes: error.accounted_bytes,
-                }
-                .into();
-            }
-            Err(error) => error,
-        };
-        Self::Internal(error)
+                })
+        });
+        match failure {
+            Some(failure) => Self::Failure {
+                failure,
+                source: error,
+            },
+            None => Self::Internal(error),
+        }
     }
 }
 
@@ -121,12 +139,16 @@ mod tests {
         };
         let error = SandboxError::from(anyhow::Error::new(failure.clone()).context("acquiring VM"));
         assert_eq!(error.failure(), Some(&failure));
+        assert!(format!("{error:#}").contains("acquiring VM"));
         assert_eq!(
             error.acquisition_retry(),
             SandboxRetryAdvice::DifferentBackendAfterCleanup
         );
         let round_trip = SandboxError::from(anyhow::Error::new(error).context("backend operation"));
         assert_eq!(round_trip.failure(), Some(&failure));
+        let diagnostic = format!("{round_trip:#}");
+        assert!(diagnostic.contains("acquiring VM"));
+        assert!(diagnostic.contains("backend operation"));
     }
 
     #[test]
@@ -136,14 +158,22 @@ mod tests {
             limit_bytes: 100,
             accounted_bytes: 101,
         })
-        .context("capturing snapshot");
-        assert!(matches!(
-            SandboxError::from(error),
-            SandboxError::Failure(SandboxFailure::SnapshotBudgetExhausted {
-                limit_bytes: 100,
-                accounted_bytes: 101
-            })
-        ));
+        .context("source resume also failed: connection closed");
+        let error = SandboxError::from(error);
+        let failure = SandboxFailure::SnapshotBudgetExhausted {
+            limit_bytes: 100,
+            accounted_bytes: 101,
+        };
+        assert_eq!(error.failure(), Some(&failure));
+        assert!(format!("{error:#}").contains("source resume also failed: connection closed"));
+        let error = SandboxError::from(
+            anyhow::Error::new(error)
+                .context("deleting failed filesystem capture: permission denied"),
+        );
+        assert_eq!(error.failure(), Some(&failure));
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("source resume also failed: connection closed"));
+        assert!(diagnostic.contains("deleting failed filesystem capture: permission denied"));
     }
 
     #[test]
