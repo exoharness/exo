@@ -181,20 +181,27 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("sprites")?;
-        if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
-            bail!("Sprites does not support policy.networking.disabled");
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            request.spec.policy.validate_basic("sprites")?;
+            if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
+                bail!("Sprites does not support policy.networking.disabled");
+            }
+            reject_host_mounts(&request)?;
+            let sprite_name = sprite_name_for_request(&request);
+            self.ensure_sprite(&sprite_name, &request).await?;
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(SpritesSandboxHandle {
+                id: format!("sprites:{}", request.sandbox_id.as_str()),
+                sprite_name,
+                request,
+                backend: self.handle_backend(),
+            }))
         }
-        reject_host_mounts(&request)?;
-        let sprite_name = sprite_name_for_request(&request);
-        self.ensure_sprite(&sprite_name, &request).await?;
-        Ok(Arc::new(SpritesSandboxHandle {
-            id: format!("sprites:{}", request.sandbox_id.as_str()),
-            sprite_name,
-            request,
-            backend: self.handle_backend(),
-        }))
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -209,50 +216,57 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("Sprites sandbox backend does not support suspension")
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("Sprites sandbox backend does not support suspension"),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("sprites")?;
-        if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
-            bail!("Sprites does not support policy.networking.disabled");
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            request.spec.policy.validate_basic("sprites")?;
+            if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
+                bail!("Sprites does not support policy.networking.disabled");
+            }
+            reject_host_mounts(&request)?;
+            if payload.format != SnapshotFormat::SpritesRef {
+                bail!(
+                    "Sprites sandbox backend can only restore from {}, got {}",
+                    SnapshotFormat::SpritesRef,
+                    payload.format
+                );
+            }
+            let manifest: SpritesSnapshotManifest = serde_json::from_slice(&payload.bytes)
+                .context("decoding SpritesSnapshot manifest")?;
+            let sprite_name = sprite_name_for_request(&request);
+            if manifest.sprite_name != sprite_name {
+                bail!(
+                    "Sprites snapshot belongs to sprite {}, but this sandbox key maps to {}",
+                    manifest.sprite_name,
+                    sprite_name
+                );
+            }
+            self.ensure_sprite(&sprite_name, &request).await?;
+            restore_checkpoint_via_backend(
+                &self.handle_backend(),
+                &sprite_name,
+                &manifest.checkpoint_id,
+            )
+            .await?;
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(SpritesSandboxHandle {
+                id: format!("sprites-restored:{}", request.sandbox_id.as_str()),
+                sprite_name,
+                request,
+                backend: self.handle_backend(),
+            }))
         }
-        reject_host_mounts(&request)?;
-        if payload.format != SnapshotFormat::SpritesRef {
-            bail!(
-                "Sprites sandbox backend can only restore from {}, got {}",
-                SnapshotFormat::SpritesRef,
-                payload.format
-            );
-        }
-        let manifest: SpritesSnapshotManifest =
-            serde_json::from_slice(&payload.bytes).context("decoding SpritesSnapshot manifest")?;
-        let sprite_name = sprite_name_for_request(&request);
-        if manifest.sprite_name != sprite_name {
-            bail!(
-                "Sprites snapshot belongs to sprite {}, but this sandbox key maps to {}",
-                manifest.sprite_name,
-                sprite_name
-            );
-        }
-        self.ensure_sprite(&sprite_name, &request).await?;
-        restore_checkpoint_via_backend(
-            &self.handle_backend(),
-            &sprite_name,
-            &manifest.checkpoint_id,
-        )
-        .await?;
-        Ok(Arc::new(SpritesSandboxHandle {
-            id: format!("sprites-restored:{}", request.sandbox_id.as_str()),
-            sprite_name,
-            request,
-            backend: self.handle_backend(),
-        }))
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 
@@ -326,12 +340,18 @@ impl ManagedSandboxHandle for SpritesSandboxHandle {
         bail!("Sprites sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "sprites does not support the requested snapshot kind"
-        );
-        save_checkpoint_via_backend(&self.backend, &self.sprite_name).await
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        let result: Result<SnapshotPayload> = async {
+            ensure!(
+                kind == crate::SnapshotKind::Filesystem,
+                "sprites does not support the requested snapshot kind"
+            );
+            save_checkpoint_via_backend(&self.backend, &self.sprite_name)
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 

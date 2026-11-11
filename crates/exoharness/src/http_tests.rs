@@ -550,8 +550,12 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
     async fn acquire(
         &self,
         _request: SandboxRequest,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
-        Ok(Arc::new(SnapshotTestSandboxHandle))
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: crate::Result<Arc<dyn ManagedSandboxHandle>> = async {
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(SnapshotTestSandboxHandle))
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -566,17 +570,24 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::Result<SnapshotPayload> {
-        bail!("snapshot test backend does not support suspension")
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("snapshot test backend does not support suspension"),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
-        assert_eq!(payload.bytes, Bytes::from_static(b"snapshot"));
-        Ok(Arc::new(SnapshotTestSandboxHandle))
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: crate::Result<Arc<dyn ManagedSandboxHandle>> = async {
+            assert_eq!(payload.bytes, Bytes::from_static(b"snapshot"));
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(SnapshotTestSandboxHandle))
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 
@@ -604,12 +615,16 @@ impl ManagedSandboxHandle for SnapshotTestSandboxHandle {
         bail!("snapshot test handle does not support detachment")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
-        assert_eq!(kind, crate::SnapshotKind::Full);
-        Ok(SnapshotPayload {
-            format: SnapshotFormat::DaytonaRef,
-            bytes: Bytes::from_static(b"snapshot"),
-        })
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        let result: crate::Result<SnapshotPayload> = async {
+            assert_eq!(kind, crate::SnapshotKind::Full);
+            Ok(SnapshotPayload {
+                format: SnapshotFormat::DaytonaRef,
+                bytes: Bytes::from_static(b"snapshot"),
+            })
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 

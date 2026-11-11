@@ -188,60 +188,67 @@ impl ManagedSandboxBackend for VercelSandboxBackend {
         &[]
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        ensure!(
-            request.spec.tcp_ports.iter().all(|port| *port != 0),
-            "sandbox TCP ports must be nonzero"
-        );
-        ensure!(
-            request
-                .spec
-                .tcp_ports
-                .iter()
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .len()
-                == request.spec.tcp_ports.len(),
-            "sandbox TCP ports must be unique"
-        );
-        let network_policy = VercelNetworkPolicy::from_policy(&request.spec.policy)?;
-        reject_unsupported_mounts(&request)?;
-        let spec_hash = sandbox_spec_hash(&request.spec);
-        let sandbox_name = vercel_sandbox_name(&request, &spec_hash);
-        let response = match self.get_sandbox_session(&sandbox_name, false).await? {
-            Some(response) => {
-                if response.sandbox.network_policy != serde_json::to_value(&network_policy)? {
-                    self.update_network_policy(&sandbox_name, network_policy)
-                        .await?;
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            ensure!(
+                request.spec.tcp_ports.iter().all(|port| *port != 0),
+                "sandbox TCP ports must be nonzero"
+            );
+            ensure!(
+                request
+                    .spec
+                    .tcp_ports
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .len()
+                    == request.spec.tcp_ports.len(),
+                "sandbox TCP ports must be unique"
+            );
+            let network_policy = VercelNetworkPolicy::from_policy(&request.spec.policy)?;
+            reject_unsupported_mounts(&request)?;
+            let spec_hash = sandbox_spec_hash(&request.spec);
+            let sandbox_name = vercel_sandbox_name(&request, &spec_hash);
+            let response = match self.get_sandbox_session(&sandbox_name, false).await? {
+                Some(response) => {
+                    if response.sandbox.network_policy != serde_json::to_value(&network_policy)? {
+                        self.update_network_policy(&sandbox_name, network_policy)
+                            .await?;
+                    }
+                    if response
+                        .session
+                        .as_ref()
+                        .is_some_and(|session| session.status == "running")
+                    {
+                        response
+                    } else {
+                        self.get_sandbox_session(&sandbox_name, true)
+                            .await?
+                            .context("Vercel sandbox disappeared while resuming")?
+                    }
                 }
-                if response
-                    .session
-                    .as_ref()
-                    .is_some_and(|session| session.status == "running")
-                {
-                    response
-                } else {
-                    self.get_sandbox_session(&sandbox_name, true)
+                None => {
+                    self.create_sandbox(&request, &sandbox_name, &spec_hash, network_policy)
                         .await?
-                        .context("Vercel sandbox disappeared while resuming")?
                 }
-            }
-            None => {
-                self.create_sandbox(&request, &sandbox_name, &spec_hash, network_policy)
-                    .await?
-            }
-        };
+            };
 
-        Ok(Arc::new(VercelSandboxHandle {
-            id: format!("vercel:{sandbox_name}"),
-            sandbox_name,
-            session_id: response
-                .session
-                .context("Vercel sandbox did not return a running session")?
-                .id,
-            request,
-            backend: self.handle_backend(),
-        }))
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(VercelSandboxHandle {
+                id: format!("vercel:{sandbox_name}"),
+                sandbox_name,
+                session_id: response
+                    .session
+                    .context("Vercel sandbox did not return a running session")?
+                    .id,
+                request,
+                backend: self.handle_backend(),
+            }))
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -256,16 +263,22 @@ impl ManagedSandboxBackend for VercelSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("Vercel sandbox backend does not support suspension")
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("Vercel sandbox backend does not support suspension"),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("restoring a Vercel sandbox from a snapshot is not implemented yet");
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("restoring a Vercel sandbox from a snapshot is not implemented yet"),
+        }
+        .into())
     }
 }
 
@@ -324,8 +337,11 @@ impl ManagedSandboxHandle for VercelSandboxHandle {
         bail!("Vercel sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!("Vercel sandbox snapshots are not implemented yet");
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("Vercel sandbox snapshots are not implemented yet"),
+        }
+        .into())
     }
 }
 

@@ -340,15 +340,25 @@ struct FirecrackerSnapshotManifest {
 impl FirecrackerSnapshotManifest {
     fn from_payload(payload: SnapshotPayload) -> Result<Self> {
         if payload.format != SnapshotFormat::FirecrackerHostRef {
-            bail!(
-                "Firecracker sandbox backend can only restore a {} payload, got {}",
-                SnapshotFormat::FirecrackerHostRef,
-                payload.format
-            );
+            return Err(crate::SandboxFailure::InvalidRequest {
+                message: format!(
+                    "Firecracker sandbox backend can only restore a {} payload, got {}",
+                    SnapshotFormat::FirecrackerHostRef,
+                    payload.format
+                ),
+            }
+            .into());
         }
-        let manifest: Self = serde_json::from_slice(&payload.bytes)
-            .context("decoding FirecrackerSnapshot manifest")?;
-        manifest.validate()?;
+        let manifest: Self = serde_json::from_slice(&payload.bytes).map_err(|error| {
+            crate::SandboxFailure::SnapshotUnavailable {
+                message: format!("decoding snapshot manifest: {error}"),
+            }
+        })?;
+        manifest
+            .validate()
+            .map_err(|error| crate::SandboxFailure::SnapshotUnavailable {
+                message: error.to_string(),
+            })?;
         Ok(manifest)
     }
 
@@ -1203,10 +1213,18 @@ impl FirecrackerSandboxBackend {
         let restore = async {
             manifest.validate()?;
             if request.lifecycle.idle_ttl.is_none() {
-                bail!("Firecracker snapshot restore requires a warm sandbox lifecycle")
+                return Err(crate::SandboxFailure::InvalidRequest {
+                    message: "Firecracker snapshot restore requires a warm sandbox lifecycle"
+                        .into(),
+                }
+                .into());
             }
             if !request.spec.durable_file_systems.is_empty() {
-                bail!("Firecracker snapshot restore does not support durable filesystems")
+                return Err(crate::SandboxFailure::InvalidRequest {
+                    message: "Firecracker snapshot restore does not support durable filesystems"
+                        .into(),
+                }
+                .into());
             }
             let expected_hash = if manifest.template {
                 ensure!(
@@ -1227,7 +1245,12 @@ impl FirecrackerSandboxBackend {
                 spec_hash.clone()
             };
             if expected_hash != manifest.spec_hash {
-                bail!("Firecracker snapshot specification does not match the requested sandbox")
+                return Err(crate::SandboxFailure::InvalidRequest {
+                    message:
+                        "Firecracker snapshot specification does not match the requested sandbox"
+                            .into(),
+                }
+                .into());
             }
             if manifest.runtime
                 != self
@@ -1235,7 +1258,11 @@ impl FirecrackerSandboxBackend {
                     .host_fingerprint
                     .for_resources(request.spec.resources.unwrap_or_default())
             {
-                bail!("Firecracker snapshot runtime does not match the configured runtime")
+                return Err(crate::SandboxFailure::SnapshotUnavailable {
+                    message: "Firecracker snapshot runtime does not match the configured runtime"
+                        .into(),
+                }
+                .into());
             }
 
             let capacity_reservation = self.shared.reserve_machine_capacity(&machine_id).await?;
@@ -1248,7 +1275,12 @@ impl FirecrackerSandboxBackend {
             .await
             .context("joining Firecracker snapshot template validation")??;
             if !template_ready {
-                bail!("Firecracker snapshot {template_key} is not available on this host")
+                return Err(crate::SandboxFailure::SnapshotUnavailable {
+                    message: format!(
+                        "Firecracker snapshot {template_key} is not available on this host"
+                    ),
+                }
+                .into());
             }
             let snapshot_lease = match captured_lease {
                 Some(lease) => lease,
@@ -1552,26 +1584,36 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         .context("joining Firecracker image configuration read")?
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        self.acquire_managed(request, None).await
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.acquire_managed(request, None)
+            .await
+            .map_err(crate::SandboxError::from)
     }
 
     async fn suspend(
         &self,
         request: SandboxRequest,
         kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "Firecracker full suspension is not implemented"
-        );
-        let id = request.sandbox_id.clone();
-        self.egress
-            .suspend(
-                &id,
-                filesystem::snapshot_filesystem(Arc::clone(&self.shared), request, true, false),
-            )
-            .await
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        let result: Result<SnapshotPayload> = async {
+            ensure!(
+                kind == crate::SnapshotKind::Filesystem,
+                "Firecracker full suspension is not implemented"
+            );
+            let id = request.sandbox_id.clone();
+            self.egress
+                .suspend(
+                    &id,
+                    filesystem::snapshot_filesystem(Arc::clone(&self.shared), request, true, false),
+                )
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -1668,15 +1710,20 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
-            return self.acquire_filesystem_snapshot(request, payload).await;
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
+                return self.acquire_filesystem_snapshot(request, payload).await;
+            }
+            self.acquire_managed(
+                request,
+                Some(FirecrackerSnapshotManifest::from_payload(payload)?),
+            )
+            .await
+            .map_err(anyhow::Error::from)
         }
-        self.acquire_managed(
-            request,
-            Some(FirecrackerSnapshotManifest::from_payload(payload)?),
-        )
-        .await
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 
@@ -1863,30 +1910,45 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         self.shared.delete_snapshot(payload).await
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        if kind == crate::SnapshotKind::Filesystem {
-            return filesystem::snapshot_filesystem(
-                Arc::clone(&self.shared),
-                self.request.sandbox.clone(),
-                false,
-                false,
-            )
-            .await;
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        let result: Result<SnapshotPayload> = async {
+            if kind == crate::SnapshotKind::Filesystem {
+                return filesystem::snapshot_filesystem(
+                    Arc::clone(&self.shared),
+                    self.request.sandbox.clone(),
+                    false,
+                    false,
+                )
+                .await;
+            }
+            self.capture_snapshot(false)
+                .await
+                .map_err(anyhow::Error::from)
         }
-        self.capture_snapshot(false).await
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
-    async fn snapshot_template(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        if kind == crate::SnapshotKind::Filesystem {
-            return filesystem::snapshot_filesystem(
-                Arc::clone(&self.shared),
-                self.request.sandbox.clone(),
-                false,
-                true,
-            )
-            .await;
+    async fn snapshot_template(
+        &self,
+        kind: crate::SnapshotKind,
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        let result: Result<SnapshotPayload> = async {
+            if kind == crate::SnapshotKind::Filesystem {
+                return filesystem::snapshot_filesystem(
+                    Arc::clone(&self.shared),
+                    self.request.sandbox.clone(),
+                    false,
+                    true,
+                )
+                .await;
+            }
+            self.capture_snapshot(true)
+                .await
+                .map_err(anyhow::Error::from)
         }
-        self.capture_snapshot(true).await
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 
@@ -2552,69 +2614,77 @@ impl Shared {
 }
 
 fn prepare_request(mut request: FirecrackerRequest) -> Result<FirecrackerRequest> {
-    if let Some(proxy) = request.egress_proxy {
-        if request.spec.policy.networking == SandboxNetworkPolicy::Disabled {
-            bail!("disabled networking cannot use an egress proxy");
-        }
-        proxy.validate()?;
-    } else {
-        request
-            .spec
-            .policy
-            .validate_basic("Firecracker without a configured egress runtime")?;
-    }
-    if request.spec.image.trim().is_empty() {
-        request.spec.image = super::default_firecracker_image();
-    }
-    ensure!(
-        request.spec.mounts.len() <= 20,
-        "Firecracker supports at most 20 resource mounts"
-    );
-    for (index, mount) in request.spec.mounts.iter().enumerate() {
-        ensure!(
-            mount.internal,
-            "Firecracker does not support host bind mounts; declare a filesystem resource instead"
-        );
-        let path = Path::new(&mount.guest_path);
-        ensure!(
-            path.is_absolute()
-                && path != Path::new("/")
-                && path.components().all(|c| matches!(
-                    c,
-                    std::path::Component::RootDir | std::path::Component::Normal(_)
-                ))
-                && !mount.guest_path.contains('\0'),
-            "resource mount path must be absolute and normalized"
-        );
-        for other in &request.spec.mounts[..index] {
-            crate::resources::validate_mount_overlap(&mount.guest_path, &other.guest_path)?;
-        }
-        for other in &request.spec.durable_file_systems {
-            crate::resources::validate_mount_overlap(&mount.guest_path, &other.mount_path)?;
-        }
-    }
-    match request.spec.durable_file_systems.as_slice() {
-        [] => {}
-        [file_system] => {
-            if file_system.mode == FileSystemMountMode::ReadOnly {
-                bail!("Firecracker durable workspace must be read-write");
+    let result: Result<FirecrackerRequest> = (|| {
+        if let Some(proxy) = request.egress_proxy {
+            if request.spec.policy.networking == SandboxNetworkPolicy::Disabled {
+                bail!("disabled networking cannot use an egress proxy");
             }
-            if file_system.mount_path != request.spec.default_workdir {
-                bail!(
-                    "Firecracker durable workspace path {:?} must match the default workdir {:?}",
-                    file_system.mount_path,
-                    request.spec.default_workdir
-                );
+            proxy.validate()?;
+        } else {
+            request
+                .spec
+                .policy
+                .validate_basic("Firecracker without a configured egress runtime")?;
+        }
+        if request.spec.image.trim().is_empty() {
+            request.spec.image = super::default_firecracker_image();
+        }
+        ensure!(
+            request.spec.mounts.len() <= 20,
+            "Firecracker supports at most 20 resource mounts"
+        );
+        for (index, mount) in request.spec.mounts.iter().enumerate() {
+            ensure!(
+                mount.internal,
+                "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+            );
+            let path = Path::new(&mount.guest_path);
+            ensure!(
+                path.is_absolute()
+                    && path != Path::new("/")
+                    && path.components().all(|c| matches!(
+                        c,
+                        std::path::Component::RootDir | std::path::Component::Normal(_)
+                    ))
+                    && !mount.guest_path.contains('\0'),
+                "resource mount path must be absolute and normalized"
+            );
+            for other in &request.spec.mounts[..index] {
+                crate::resources::validate_mount_overlap(&mount.guest_path, &other.guest_path)?;
+            }
+            for other in &request.spec.durable_file_systems {
+                crate::resources::validate_mount_overlap(&mount.guest_path, &other.mount_path)?;
             }
         }
-        _ => bail!("Firecracker supports at most one durable file system"),
-    }
-    if request.spec.default_workdir.split_whitespace().count() != 1
-        || !request.spec.default_workdir.starts_with('/')
-    {
-        bail!("Firecracker workdir must be an absolute path without whitespace");
-    }
-    Ok(request)
+        match request.spec.durable_file_systems.as_slice() {
+            [] => {}
+            [file_system] => {
+                if file_system.mode == FileSystemMountMode::ReadOnly {
+                    bail!("Firecracker durable workspace must be read-write");
+                }
+                if file_system.mount_path != request.spec.default_workdir {
+                    bail!(
+                        "Firecracker durable workspace path {:?} must match the default workdir {:?}",
+                        file_system.mount_path,
+                        request.spec.default_workdir
+                    );
+                }
+            }
+            _ => bail!("Firecracker supports at most one durable file system"),
+        }
+        if request.spec.default_workdir.split_whitespace().count() != 1
+            || !request.spec.default_workdir.starts_with('/')
+        {
+            bail!("Firecracker workdir must be an absolute path without whitespace");
+        }
+        Ok(request)
+    })();
+    result.map_err(|error| {
+        crate::SandboxFailure::InvalidRequest {
+            message: error.to_string(),
+        }
+        .into()
+    })
 }
 
 fn parse_provider_state(value: &Value) -> Result<FirecrackerProviderState> {
@@ -3218,10 +3288,11 @@ fn ensure_machine_capacity(
     if target_already_exists || live_machines < max_machines.get() {
         return Ok(());
     }
-    bail!(
-        "Firecracker host VM capacity exhausted: {live_machines} live, limit {}; stop a VM or raise the host limit",
-        max_machines.get()
-    )
+    Err(crate::SandboxFailure::VmCapacityExhausted {
+        limit: max_machines.get(),
+        occupied: live_machines,
+    }
+    .into())
 }
 
 fn admit_machine_capacity(
@@ -4945,8 +5016,13 @@ fn capture_snapshot_template(
     let available = filesystem.f_bavail.saturating_mul(filesystem.f_frsize);
     let reserve =
         (filesystem.f_blocks.saturating_mul(filesystem.f_frsize) / 10).max(1024 * 1024 * 1024);
-    if capture_bytes > available.saturating_sub(reserve) {
-        bail!("insufficient free disk space for Firecracker snapshot and host reserve");
+    let available_bytes = available.saturating_sub(reserve);
+    if capture_bytes > available_bytes {
+        return Err(crate::SandboxFailure::DiskSpaceExhausted {
+            required_bytes: capture_bytes,
+            available_bytes,
+        }
+        .into());
     }
     let destination = snapshot_template_dir(config, template_key)?;
     if destination.try_exists()? {

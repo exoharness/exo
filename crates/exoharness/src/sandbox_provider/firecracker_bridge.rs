@@ -187,6 +187,8 @@ pub enum FirecrackerBridgeServerFrame {
     Response {
         id: u64,
         result: std::result::Result<FirecrackerBridgeResponse, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<crate::SandboxFailure>,
     },
     StreamOpened {
         id: u64,
@@ -338,10 +340,18 @@ pub async fn run_firecracker_bridge() -> Result<Option<i32>> {
                 let writer = Arc::clone(&writer);
                 let backends = Arc::clone(&backends);
                 tokio::spawn(async move {
-                    let result = handle_request(*request, &backends).await;
+                    let result = handle_request(*request, &backends)
+                        .await
+                        .map_err(crate::SandboxError::from);
+                    let failure = result
+                        .as_ref()
+                        .err()
+                        .and_then(crate::SandboxError::failure)
+                        .cloned();
                     let frame = FirecrackerBridgeServerFrame::Response {
                         id,
                         result: result.map_err(|error| format!("{error:#}")),
+                        failure,
                     };
                     if let Err(error) = send_server_frame(&writer, &frame).await {
                         // A response can exceed the frame limit (eg. exec
@@ -355,6 +365,7 @@ pub async fn run_firecracker_bridge() -> Result<Option<i32>> {
                         // broken and the client fails every pending request.
                         let fallback = FirecrackerBridgeServerFrame::Response {
                             id,
+                            failure: None,
                             result: Err(format!(
                                 "sending Firecracker bridge response failed: {error:#}"
                             )),

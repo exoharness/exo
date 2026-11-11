@@ -71,10 +71,17 @@ impl ManagedSandboxBackend for ResourceBackend {
         Ok(())
     }
 
-    async fn acquire(&self, _request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        Ok(Arc::new(CaptureHandle {
-            gate: self.capture_gate.lock().unwrap().take(),
-        }))
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(CaptureHandle {
+                gate: self.capture_gate.lock().unwrap().take(),
+            }))
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn terminate(&self, _request: SandboxRequest) -> Result<()> {
@@ -93,18 +100,27 @@ impl ManagedSandboxBackend for ResourceBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("test resource backend does not support suspension")
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("test resource backend does not support suspension"),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        assert_eq!(payload.format, SnapshotFormat::FirecrackerFilesystemRef);
-        assert_eq!(payload.bytes, bytes::Bytes::from_static(b"capture"));
-        Ok(Arc::new(CaptureHandle { gate: None }))
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            assert_eq!(payload.format, SnapshotFormat::FirecrackerFilesystemRef);
+            assert_eq!(payload.bytes, bytes::Bytes::from_static(b"capture"));
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(CaptureHandle {
+                gate: None,
+            }))
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 
@@ -142,15 +158,19 @@ impl ManagedSandboxHandle for CaptureHandle {
         bail!("capture test does not attach VMs")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        if let Some(gate) = &self.gate {
-            gate.entered.notify_one();
-            gate.release.acquire().await?.forget();
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        let result: Result<SnapshotPayload> = async {
+            if let Some(gate) = &self.gate {
+                gate.entered.notify_one();
+                gate.release.acquire().await?.forget();
+            }
+            Ok(SnapshotPayload {
+                format: SnapshotFormat::FirecrackerFilesystemRef,
+                bytes: bytes::Bytes::from_static(b"capture"),
+            })
         }
-        Ok(SnapshotPayload {
-            format: SnapshotFormat::FirecrackerFilesystemRef,
-            bytes: bytes::Bytes::from_static(b"capture"),
-        })
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 

@@ -318,12 +318,22 @@ mod tests {
         fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
             &[]
         }
-        async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-            self.acquisitions.fetch_add(1, Ordering::SeqCst);
-            if self.pause_acquisitions.load(Ordering::SeqCst) {
-                self.resume_acquisition.notified().await;
+        async fn acquire(
+            &self,
+            request: SandboxRequest,
+        ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+            let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+                self.acquisitions.fetch_add(1, Ordering::SeqCst);
+                if self.pause_acquisitions.load(Ordering::SeqCst) {
+                    self.resume_acquisition.notified().await;
+                }
+                LocalProcessSandboxBackend::new()
+                    .acquire(request)
+                    .await
+                    .map_err(anyhow::Error::from)
             }
-            LocalProcessSandboxBackend::new().acquire(request).await
+            .await;
+            result.map_err(crate::SandboxError::from)
         }
         async fn stop(&self, _request: SandboxRequest) -> Result<()> {
             self.stops.fetch_add(1, Ordering::SeqCst);
@@ -338,22 +348,28 @@ mod tests {
             request: SandboxRequest,
             _attachment: SandboxAttachment,
         ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-            self.acquire(request).await
+            self.acquire(request).await.map_err(anyhow::Error::from)
         }
         async fn suspend(
             &self,
             _request: SandboxRequest,
             _kind: crate::SnapshotKind,
-        ) -> Result<SnapshotPayload> {
-            anyhow::bail!("test recovery backend does not support suspension")
+        ) -> crate::SandboxResult<SnapshotPayload> {
+            Err(crate::SandboxFailure::InvalidRequest {
+                message: format!("test recovery backend does not support suspension"),
+            }
+            .into())
         }
 
         async fn acquire_from_snapshot(
             &self,
             _request: SandboxRequest,
             _payload: SnapshotPayload,
-        ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-            anyhow::bail!("unsupported")
+        ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+            Err(crate::SandboxFailure::InvalidRequest {
+                message: format!("unsupported"),
+            }
+            .into())
         }
     }
 

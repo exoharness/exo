@@ -104,22 +104,31 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         &[]
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("aws_agentcore")?;
-        reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
-        let spec_hash = sandbox_spec_hash(&request.spec);
-        let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
-        Ok(Arc::new(AwsAgentCoreSandboxHandle {
-            id: format!("aws-agentcore:{runtime_session_id}"),
-            runtime_session_id,
-            request,
-            backend: AwsAgentCoreBackendHandle {
-                client: self.client.clone(),
-                runtime_arn: self.runtime_arn.clone(),
-                invoke_target: self.invoke_target.clone(),
-                qualifier: self.qualifier.clone(),
-            },
-        }))
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            request.spec.policy.validate_basic("aws_agentcore")?;
+            reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
+            let spec_hash = sandbox_spec_hash(&request.spec);
+            let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(
+                AwsAgentCoreSandboxHandle {
+                    id: format!("aws-agentcore:{runtime_session_id}"),
+                    runtime_session_id,
+                    request,
+                    backend: AwsAgentCoreBackendHandle {
+                        client: self.client.clone(),
+                        runtime_arn: self.runtime_arn.clone(),
+                        invoke_target: self.invoke_target.clone(),
+                        qualifier: self.qualifier.clone(),
+                    },
+                },
+            ))
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -134,16 +143,24 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("AWS AgentCore sandbox backend does not support suspension")
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("AWS AgentCore sandbox backend does not support suspension"),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("restoring an AgentCore sandbox from a snapshot is not implemented yet");
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!(
+                "restoring an AgentCore sandbox from a snapshot is not implemented yet"
+            ),
+        }
+        .into())
     }
 }
 
@@ -217,8 +234,11 @@ impl ManagedSandboxHandle for AwsAgentCoreSandboxHandle {
         bail!("AWS AgentCore sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!("AgentCore sandbox snapshots are not implemented yet");
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("AgentCore sandbox snapshots are not implemented yet"),
+        }
+        .into())
     }
 }
 

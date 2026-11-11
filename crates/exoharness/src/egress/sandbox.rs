@@ -444,7 +444,10 @@ mod tests {
         async fn detach(&self) -> Result<crate::SandboxAttachment> {
             unreachable!()
         }
-        async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<crate::SnapshotPayload> {
+        async fn snapshot(
+            &self,
+            _kind: crate::SnapshotKind,
+        ) -> crate::SandboxResult<crate::SnapshotPayload> {
             unreachable!()
         }
     }

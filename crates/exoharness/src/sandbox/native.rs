@@ -401,71 +401,82 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         }
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
-        let request = self.prepare_request(request).await?;
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            request.spec.policy.validate_basic("container sandbox")?;
+            let request = self.prepare_request(request).await?;
 
-        if request.lifecycle.idle_ttl.is_none() {
-            return Ok(Arc::new(OneShotSandboxHandle {
-                id: format!("oneshot:{}", request.sandbox_id.as_str()),
-                container_bin: self.container_bin.clone(),
-                request,
-            }));
-        }
-
-        self.reap_expired_warm_sandboxes().await;
-
-        let replaced = {
-            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
-            match warm_sandboxes.get(request.sandbox_id.as_str()) {
-                Some(entry) if entry.request.spec == request.spec => {
-                    return Ok(Arc::new(WarmSandboxHandle {
-                        id: format!("warm:{}", request.sandbox_id.as_str()),
-                        cli: self.cli,
+            if request.lifecycle.idle_ttl.is_none() {
+                return Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(
+                    OneShotSandboxHandle {
+                        id: format!("oneshot:{}", request.sandbox_id.as_str()),
                         container_bin: self.container_bin.clone(),
                         request,
-                        warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-                    }));
-                }
-                Some(_) => warm_sandboxes.remove(request.sandbox_id.as_str()),
-                None => None,
+                    },
+                ));
             }
-        };
-        if let Some(entry) = replaced
-            && entry.owned
-        {
-            schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
-        }
 
-        let (name, owned) =
-            match find_running_warm_sandbox(&self.container_bin, self.cli, &request).await? {
-                Some(name) => (name, false),
-                None => (
-                    create_unique_warm_sandbox(&self.container_bin, &request).await?,
-                    true,
-                ),
+            self.reap_expired_warm_sandboxes().await;
+
+            let replaced = {
+                let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+                match warm_sandboxes.get(request.sandbox_id.as_str()) {
+                    Some(entry) if entry.request.spec == request.spec => {
+                        return Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(
+                            WarmSandboxHandle {
+                                id: format!("warm:{}", request.sandbox_id.as_str()),
+                                cli: self.cli,
+                                container_bin: self.container_bin.clone(),
+                                request,
+                                warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+                            },
+                        ));
+                    }
+                    Some(_) => warm_sandboxes.remove(request.sandbox_id.as_str()),
+                    None => None,
+                }
             };
+            if let Some(entry) = replaced
+                && entry.owned
+            {
+                schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
+            }
 
-        {
-            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
-            warm_sandboxes.insert(
-                request.sandbox_id.clone(),
-                WarmSandboxEntry {
-                    name: name.clone(),
-                    request: request.clone(),
-                    last_used_at: Instant::now(),
-                    owned,
-                },
-            );
+            let (name, owned) =
+                match find_running_warm_sandbox(&self.container_bin, self.cli, &request).await? {
+                    Some(name) => (name, false),
+                    None => (
+                        create_unique_warm_sandbox(&self.container_bin, &request).await?,
+                        true,
+                    ),
+                };
+
+            {
+                let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+                warm_sandboxes.insert(
+                    request.sandbox_id.clone(),
+                    WarmSandboxEntry {
+                        name: name.clone(),
+                        request: request.clone(),
+                        last_used_at: Instant::now(),
+                        owned,
+                    },
+                );
+            }
+
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(WarmSandboxHandle {
+                id: format!("warm:{}", request.sandbox_id.as_str()),
+                cli: self.cli,
+                container_bin: self.container_bin.clone(),
+                request,
+                warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+            }))
         }
-
-        Ok(Arc::new(WarmSandboxHandle {
-            id: format!("warm:{}", request.sandbox_id.as_str()),
-            cli: self.cli,
-            container_bin: self.container_bin.clone(),
-            request,
-            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-        }))
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -496,63 +507,74 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("container sandbox backend does not support suspension")
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("container sandbox backend does not support suspension"),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
-        if request.lifecycle.idle_ttl.is_none() {
-            bail!("restore-from-snapshot requires a warm sandbox lifecycle (idle_ttl must be set)");
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            request.spec.policy.validate_basic("container sandbox")?;
+            if request.lifecycle.idle_ttl.is_none() {
+                bail!(
+                    "restore-from-snapshot requires a warm sandbox lifecycle (idle_ttl must be set)"
+                );
+            }
+            if self.cli == ContainerCliFlavor::AppleContainer {
+                bail!(
+                    "restore-from-snapshot is not yet implemented for the apple-container backend"
+                );
+            }
+
+            let image_tag = docker_load_image(&self.container_bin, &payload.bytes).await?;
+
+            // Build a fresh request that points at the loaded image. Mounts,
+            // network policy, lifecycle, and key are all preserved from the
+            // original request so the restored sandbox is otherwise identical.
+            let mut request = self.prepare_request(request).await?;
+            request.spec.image = image_tag;
+
+            // Evict any pre-existing warm container for this key — we want a
+            // fresh container booted from the restored image, not a reuse of
+            // whatever was running before.
+            let replaced = {
+                let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+                warm_sandboxes.remove(request.sandbox_id.as_str())
+            };
+            if let Some(entry) = replaced {
+                schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
+            }
+
+            let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
+            {
+                let mut warm_sandboxes = self.warm_sandboxes.lock().await;
+                warm_sandboxes.insert(
+                    request.sandbox_id.clone(),
+                    WarmSandboxEntry {
+                        name: name.clone(),
+                        request: request.clone(),
+                        last_used_at: Instant::now(),
+                        owned: true,
+                    },
+                );
+            }
+
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(WarmSandboxHandle {
+                id: format!("warm:{}", request.sandbox_id.as_str()),
+                cli: self.cli,
+                container_bin: self.container_bin.clone(),
+                request,
+                warm_sandboxes: Arc::clone(&self.warm_sandboxes),
+            }))
         }
-        if self.cli == ContainerCliFlavor::AppleContainer {
-            bail!("restore-from-snapshot is not yet implemented for the apple-container backend");
-        }
-
-        let image_tag = docker_load_image(&self.container_bin, &payload.bytes).await?;
-
-        // Build a fresh request that points at the loaded image. Mounts,
-        // network policy, lifecycle, and key are all preserved from the
-        // original request so the restored sandbox is otherwise identical.
-        let mut request = self.prepare_request(request).await?;
-        request.spec.image = image_tag;
-
-        // Evict any pre-existing warm container for this key — we want a
-        // fresh container booted from the restored image, not a reuse of
-        // whatever was running before.
-        let replaced = {
-            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
-            warm_sandboxes.remove(request.sandbox_id.as_str())
-        };
-        if let Some(entry) = replaced {
-            schedule_cleanup_named_container(self.container_bin.clone(), self.cli, entry.name);
-        }
-
-        let name = create_unique_warm_sandbox(&self.container_bin, &request).await?;
-        {
-            let mut warm_sandboxes = self.warm_sandboxes.lock().await;
-            warm_sandboxes.insert(
-                request.sandbox_id.clone(),
-                WarmSandboxEntry {
-                    name: name.clone(),
-                    request: request.clone(),
-                    last_used_at: Instant::now(),
-                    owned: true,
-                },
-            );
-        }
-
-        Ok(Arc::new(WarmSandboxHandle {
-            id: format!("warm:{}", request.sandbox_id.as_str()),
-            cli: self.cli,
-            container_bin: self.container_bin.clone(),
-            request,
-            warm_sandboxes: Arc::clone(&self.warm_sandboxes),
-        }))
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
@@ -621,8 +643,11 @@ impl ManagedSandboxHandle for BorrowedDockerSandboxHandle {
         })
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!("borrowed Docker containers cannot be snapshotted")
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("borrowed Docker containers cannot be snapshotted"),
+        }
+        .into())
     }
 }
 
@@ -666,10 +691,10 @@ impl ManagedSandboxHandle for OneShotSandboxHandle {
         bail!("one-shot sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!(
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest { message: format!(
             "snapshot is not supported for one-shot sandboxes (set a positive idle_ttl to enable warm sandbox + snapshotting)"
-        )
+        ) }.into())
     }
 }
 
@@ -766,48 +791,53 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
         Ok(SandboxAttachment::DockerContainer { container_id })
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "container backend does not support full execution snapshots"
-        );
-        ensure!(
-            self.request
-                .spec
-                .durable_file_systems
-                .iter()
-                .all(|filesystem| { filesystem.mode == crate::FileSystemMountMode::ReadOnly })
-                && self
-                    .request
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        let result: Result<SnapshotPayload> = async {
+            ensure!(
+                kind == crate::SnapshotKind::Filesystem,
+                "container backend does not support full execution snapshots"
+            );
+            ensure!(
+                self.request
                     .spec
-                    .mounts
+                    .durable_file_systems
                     .iter()
-                    .all(|mount| mount.access == SandboxMountAccess::ReadOnly),
-            "Docker filesystem snapshots cannot capture writable mounted volumes"
-        );
-        match self.cli {
-            ContainerCliFlavor::Docker => {
-                let name = ensure_warm_sandbox_ready(
-                    &self.container_bin,
-                    self.cli,
-                    &self.request,
-                    &self.warm_sandboxes,
-                )
-                .await?;
-                touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str()).await;
-                docker_snapshot_container(&self.container_bin, &name).await
-            }
-            // The Apple `container` CLI exposes `container image save` and a
-            // `container commit`-style flow on its roadmap but neither is in
-            // the released versions we target today. When it lands, the path
-            // will mirror docker_snapshot_container: produce a single tarball
-            // and tag it with a new SnapshotFormat. Until then, fail explicitly so callers
-            // know to choose Docker for snapshot-using flows.
-            ContainerCliFlavor::AppleContainer => bail!(
-                "snapshot is not yet implemented for the apple-container backend; \
+                    .all(|filesystem| { filesystem.mode == crate::FileSystemMountMode::ReadOnly })
+                    && self
+                        .request
+                        .spec
+                        .mounts
+                        .iter()
+                        .all(|mount| mount.access == SandboxMountAccess::ReadOnly),
+                "Docker filesystem snapshots cannot capture writable mounted volumes"
+            );
+            match self.cli {
+                ContainerCliFlavor::Docker => {
+                    let name = ensure_warm_sandbox_ready(
+                        &self.container_bin,
+                        self.cli,
+                        &self.request,
+                        &self.warm_sandboxes,
+                    )
+                    .await?;
+                    touch_warm_sandbox(&self.warm_sandboxes, self.request.sandbox_id.as_str())
+                        .await;
+                    docker_snapshot_container(&self.container_bin, &name).await
+                }
+                // The Apple `container` CLI exposes `container image save` and a
+                // `container commit`-style flow on its roadmap but neither is in
+                // the released versions we target today. When it lands, the path
+                // will mirror docker_snapshot_container: produce a single tarball
+                // and tag it with a new SnapshotFormat. Until then, fail explicitly so callers
+                // know to choose Docker for snapshot-using flows.
+                ContainerCliFlavor::AppleContainer => bail!(
+                    "snapshot is not yet implemented for the apple-container backend; \
                  use --sandbox docker for snapshot-using flows"
-            ),
+                ),
+            }
         }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 
@@ -838,19 +868,28 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         &[]
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("local process")?;
-        ensure!(
-            request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
-            "local process does not support policy.networking.disabled"
-        );
-        if !request.spec.durable_file_systems.is_empty() {
-            bail!("local-process sandbox backend does not support durable file systems");
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: Result<Arc<dyn ManagedSandboxHandle>> = async {
+            request.spec.policy.validate_basic("local process")?;
+            ensure!(
+                request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
+                "local process does not support policy.networking.disabled"
+            );
+            if !request.spec.durable_file_systems.is_empty() {
+                bail!("local-process sandbox backend does not support durable file systems");
+            }
+            Ok::<Arc<dyn ManagedSandboxHandle>, anyhow::Error>(Arc::new(
+                LocalProcessSandboxHandle {
+                    id: format!("local:{}", request.sandbox_id.as_str()),
+                    request,
+                },
+            ))
         }
-        Ok(Arc::new(LocalProcessSandboxHandle {
-            id: format!("local:{}", request.sandbox_id.as_str()),
-            request,
-        }))
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -865,16 +904,24 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("local-process sandbox backend does not support suspension")
+    ) -> crate::SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!("local-process sandbox backend does not support suspension"),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("restore-from-snapshot is not supported by the local-process sandbox backend")
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: format!(
+                "restore-from-snapshot is not supported by the local-process sandbox backend"
+            ),
+        }
+        .into())
     }
 
     async fn terminate(&self, _request: SandboxRequest) -> Result<()> {
@@ -949,13 +996,17 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
         bail!("local-process sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        // The local-process backend runs commands directly on the host; there
-        // is no container filesystem to capture. A meaningful implementation
-        // would tar up the writable mounts, but the semantics differ enough
-        // from container snapshots (no isolated filesystem, no rollback of
-        // host-side state) that we don't pretend to support it.
-        bail!("snapshot is not supported by the local-process sandbox backend")
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::SandboxResult<SnapshotPayload> {
+        let result: Result<SnapshotPayload> = async {
+            // The local-process backend runs commands directly on the host; there
+            // is no container filesystem to capture. A meaningful implementation
+            // would tar up the writable mounts, but the semantics differ enough
+            // from container snapshots (no isolated filesystem, no rollback of
+            // host-side state) that we don't pretend to support it.
+            bail!("snapshot is not supported by the local-process sandbox backend")
+        }
+        .await;
+        result.map_err(crate::SandboxError::from)
     }
 }
 
