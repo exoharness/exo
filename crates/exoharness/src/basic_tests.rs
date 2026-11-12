@@ -29,7 +29,7 @@ use crate::{
     SandboxBackendRegistration, SandboxCommand, SandboxCommandOutput, SandboxLifecycleConfig,
     SandboxNetworkPolicy, SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts,
     SandboxProcessStatus, SandboxProcessStdin, SandboxProvider, SandboxProviderConfig,
-    SandboxRequest, SandboxSpec, Secret, SnapshotFormat, SnapshotPayload,
+    SandboxRequest, SandboxResult, SandboxSpec, Secret, SnapshotFormat, SnapshotPayload,
     StartSandboxProcessRequest, StartSandboxRequest, Uuid7, WaitSandboxProcessRequest,
     WriteArtifactRequest, WriteSandboxProcessInputRequest,
 };
@@ -2811,7 +2811,7 @@ impl ManagedSandboxBackend for WebSocketOnlyBackend {
     async fn acquire(
         &self,
         _request: SandboxRequest,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         Ok(Arc::new(WebSocketOnlyHandle))
     }
 
@@ -2827,16 +2827,16 @@ impl ManagedSandboxBackend for WebSocketOnlyBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::Result<SnapshotPayload> {
-        bail!("websocket-only backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("websocket-only backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("websocket-only backend does not support snapshot restore")
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(anyhow::anyhow!("websocket-only backend does not support snapshot restore").into())
     }
 }
 
@@ -2888,8 +2888,8 @@ impl ManagedSandboxHandle for WebSocketOnlyHandle {
         bail!("websocket-only handle does not support detachment")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
-        bail!("websocket-only handle does not support snapshots")
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("websocket-only handle does not support snapshots").into())
     }
 }
 
@@ -2934,7 +2934,7 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         self.policies.lock().await.push(request.spec.policy.clone());
         self.requests.lock().await.push(request.provider_state);
         Ok(Arc::new(TestProviderStateHandle {
@@ -2961,16 +2961,16 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::Result<SnapshotPayload> {
-        bail!("test provider-state backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("test provider-state backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("test provider-state backend does not support snapshot restore")
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(anyhow::anyhow!("test provider-state backend does not support snapshot restore").into())
     }
 }
 
@@ -3015,8 +3015,8 @@ impl ManagedSandboxHandle for TestProviderStateHandle {
         bail!("test provider-state handle does not support detachment")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
-        bail!("test provider-state handle does not support snapshots")
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("test provider-state handle does not support snapshots").into())
     }
 }
 
@@ -3049,7 +3049,7 @@ impl ManagedSandboxBackend for TestSandboxBackend {
     async fn acquire(
         &self,
         _request: SandboxRequest,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         Ok(Arc::new(TestSandboxHandle {
             process: Arc::clone(&self.process),
         }))
@@ -3067,16 +3067,16 @@ impl ManagedSandboxBackend for TestSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::Result<SnapshotPayload> {
-        bail!("test sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("test sandbox backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("test sandbox backend does not support snapshot restore")
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(anyhow::anyhow!("test sandbox backend does not support snapshot restore").into())
     }
 }
 
@@ -3118,8 +3118,8 @@ impl ManagedSandboxHandle for TestSandboxHandle {
         bail!("test sandbox handle does not support detachment")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
-        bail!("test sandbox handle does not support snapshots")
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("test sandbox handle does not support snapshots").into())
     }
 }
 
@@ -3369,7 +3369,7 @@ impl ManagedSandboxBackend for RestoreImageTestBackend {
     async fn acquire(
         &self,
         request: SandboxRequest,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         self.acquired_images
             .lock()
             .await
@@ -3391,15 +3391,15 @@ impl ManagedSandboxBackend for RestoreImageTestBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::Result<SnapshotPayload> {
-        bail!("restore-image test backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("restore-image test backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         // Like the docker backend, a restore boots from a freshly loaded tag
         // rather than the requested image.
         Ok(Arc::new(RestoreImageTestHandle {
@@ -3438,7 +3438,7 @@ impl ManagedSandboxHandle for RestoreImageTestHandle {
         bail!("restore-image test handle does not support detachment")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         Ok(SnapshotPayload {
             format: SnapshotFormat::DockerImageTar,
             bytes: bytes::Bytes::from_static(b"restore-image-test"),

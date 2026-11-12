@@ -202,7 +202,7 @@ fn publish_capture(
     config: &FirecrackerConfig,
     temporary: &Path,
     manifest: &FilesystemManifest,
-) -> Result<()> {
+) -> crate::SandboxResult<()> {
     fs::write(
         temporary.join("manifest.json"),
         serde_json::to_vec(manifest)?,
@@ -224,7 +224,7 @@ fn capture_disks(
     source: &MachineRecord,
     mut manifest: FilesystemManifest,
     suspend: bool,
-) -> Result<SnapshotPayload> {
+) -> crate::SandboxResult<SnapshotPayload> {
     let (temporary, staging_lease) = manifest.staging_directory(config)?;
     let root = jail_root(config, &source.machine_id);
     fs::hard_link(root.join("rootfs.ext4"), temporary.path().join("base.ext4"))?;
@@ -252,7 +252,7 @@ fn capture_disks(
     if !suspend {
         publish_capture(config, temporary.path(), &manifest)?;
     }
-    manifest.payload()
+    Ok(manifest.payload()?)
 }
 
 pub(super) fn delete_capture(config: &FirecrackerConfig, payload: SnapshotPayload) -> Result<()> {
@@ -277,14 +277,13 @@ impl FirecrackerSandboxBackend {
         payload: SnapshotPayload,
         base_image: PathBuf,
         disks: Vec<PathBuf>,
-    ) -> Result<SnapshotPayload> {
+    ) -> crate::SandboxResult<SnapshotPayload> {
         let config = self.shared.config.clone();
         tokio::task::spawn_blocking(move || {
             let mut manifest = FilesystemManifest::from_payload(&payload)?;
-            ensure!(
-                disks.len() == manifest.disk_sizes.len(),
-                "filesystem import disk set is incomplete"
-            );
+            if disks.len() != manifest.disk_sizes.len() {
+                return Err(anyhow::anyhow!("filesystem import disk set is incomplete").into());
+            }
             manifest.key = new_capture_key();
             let (temporary, _staging_lease) = manifest.staging_directory(&config)?;
             prepare_imported_base(
@@ -300,16 +299,19 @@ impl FirecrackerSandboxBackend {
                 .zip(&disks)
                 .zip(&manifest.disk_sizes)
             {
-                ensure!(
-                    fs::metadata(source)?.len() == *size,
-                    "filesystem import disk size does not match: {name}"
-                );
+                if fs::metadata(source)?.len() != *size {
+                    return Err(anyhow::anyhow!(
+                        "filesystem import disk size does not match: {name}"
+                    )
+                    .into());
+                }
                 copy_sparse_reflink(source, &temporary.path().join(name))?;
             }
             publish_capture(&config, temporary.path(), &manifest)?;
-            manifest.payload()
+            Ok::<_, crate::SandboxError>(manifest.payload()?)
         })
-        .await?
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     /// Used by the hosted sandbox service for local checkpoint garbage collection.
@@ -322,7 +324,7 @@ impl FirecrackerSandboxBackend {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
         self.egress
             .acquire(
@@ -347,7 +349,8 @@ impl FirecrackerSandboxBackend {
                                 )
                                 .await
                         })
-                        .await?
+                        .await
+                        .map_err(anyhow::Error::from)?
                     }
                 },
                 terminate,
@@ -361,21 +364,20 @@ impl FirecrackerSandboxBackend {
         request: FirecrackerRequest,
         payload: SnapshotPayload,
         egress: Option<Arc<SandboxEgress>>,
-    ) -> Result<FirecrackerSandboxHandle> {
+    ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         let manifest = FilesystemManifest::from_payload(&payload)?;
-        ensure!(
-            request.lifecycle.idle_ttl.is_some(),
-            "filesystem restore requires a warm sandbox"
-        );
+        if request.lifecycle.idle_ttl.is_none() {
+            return Err(anyhow::anyhow!("filesystem restore requires a warm sandbox").into());
+        }
         let template = manifest.template;
-        ensure!(
-            (template
-                && manifest.layout.workdir == request.spec.default_workdir
-                && manifest.layout.mounts.is_empty()
-                && manifest.layout.workspaces.is_empty())
-                || (!template && FilesystemLayout::from_spec(&request.spec) == manifest.layout),
-            "filesystem restore mount layout does not match"
-        );
+        if !((template
+            && manifest.layout.workdir == request.spec.default_workdir
+            && manifest.layout.mounts.is_empty()
+            && manifest.layout.workspaces.is_empty())
+            || (!template && FilesystemLayout::from_spec(&request.spec) == manifest.layout))
+        {
+            return Err(anyhow::anyhow!("filesystem restore mount layout does not match").into());
+        }
         let capture = Arc::new(self.filesystem_snapshot_files(payload).await?);
         let mut resolved = prepare_request(request)?;
         validate_resource_shape(resolved.spec.resources.unwrap_or_default())?;
@@ -385,7 +387,8 @@ impl FirecrackerSandboxBackend {
         let image = tokio::task::spawn_blocking(move || {
             cache_base_image(&config, &capture_for_image.base_image, &digest)
         })
-        .await??;
+        .await
+        .map_err(anyhow::Error::from)??;
         resolved.sandbox.spec.image = image
             .to_str()
             .context("cached base path is not UTF-8")?
@@ -410,7 +413,8 @@ impl FirecrackerSandboxBackend {
             }
             Ok::<_, anyhow::Error>(())
         })
-        .await??;
+        .await
+        .map_err(anyhow::Error::from)??;
         let reservation = self.shared.reserve_machine_capacity(&id).await?;
         let record = self
             .shared
@@ -429,7 +433,8 @@ impl FirecrackerSandboxBackend {
                     template,
                 )
             })
-            .await??;
+            .await
+            .map_err(anyhow::Error::from)??;
             let mut handle = self
                 .acquire_resolved_locked(
                     resolved,
@@ -448,7 +453,9 @@ impl FirecrackerSandboxBackend {
                     .await?;
                 handle.egress = Some(egress);
             }
-            tokio::task::spawn_blocking(move || disks.commit()).await??;
+            tokio::task::spawn_blocking(move || disks.commit())
+                .await
+                .map_err(anyhow::Error::from)??;
             Ok(handle)
         }
         .await;
@@ -481,25 +488,26 @@ pub(super) async fn snapshot_filesystem(
     mut request: SandboxRequest,
     suspend: bool,
     template: bool,
-) -> Result<SnapshotPayload> {
+) -> crate::SandboxResult<SnapshotPayload> {
     tokio::spawn(async move {
         let _guard = shared
             .lifecycle_locks
             .lock_sandbox(&request.sandbox_id)
             .await;
         validate_capture_runtime(&shared.host_fingerprint.firecracker_version)?;
-        if template {
-            ensure!(
-                request.spec.policy == SandboxNetworkPolicy::Disabled.into()
-                    && request.spec.mounts.is_empty()
-                    && request.spec.durable_file_systems.is_empty(),
+        if template
+            && (request.spec.policy != SandboxNetworkPolicy::Disabled.into()
+                || !request.spec.mounts.is_empty()
+                || !request.spec.durable_file_systems.is_empty())
+        {
+            return Err(anyhow::anyhow!(
                 "filesystem templates require disabled networking and no mounted resources"
-            );
+            )
+            .into());
         }
-        ensure!(
-            request.lifecycle.idle_ttl.is_some(),
-            "filesystem capture requires a warm sandbox"
-        );
+        if request.lifecycle.idle_ttl.is_none() {
+            return Err(anyhow::anyhow!("filesystem capture requires a warm sandbox").into());
+        }
         let entry = shared
             .warm_machines
             .lock()
@@ -518,20 +526,22 @@ pub(super) async fn snapshot_filesystem(
                     .machine_id
             }
         };
-        ensure!(
-            valid_machine_id(&machine_id)
-                && machine_id.starts_with(&format!("fc-{}-", stable_id(&request.sandbox_id))),
-            "filesystem capture provider state belongs to another sandbox"
-        );
+        if !valid_machine_id(&machine_id)
+            || !machine_id.starts_with(&format!("fc-{}-", stable_id(&request.sandbox_id)))
+        {
+            return Err(anyhow::anyhow!(
+                "filesystem capture provider state belongs to another sandbox"
+            )
+            .into());
+        }
         let source = shared
             .load_machine_record(&machine_id)
             .await?
             .context("filesystem capture source is missing")?;
         request.spec.image = source.resolved_image.clone();
-        ensure!(
-            sandbox_spec_hash(&request.spec) == source.spec_hash,
-            "filesystem capture specification changed"
-        );
+        if sandbox_spec_hash(&request.spec) != source.spec_hash {
+            return Err(anyhow::anyhow!("filesystem capture specification changed").into());
+        }
         let layout = FilesystemLayout::from_spec(&request.spec);
         if process_running(&shared.pid_path(&machine_id)) {
             let guest = GuestClient::new(
@@ -570,7 +580,8 @@ pub(super) async fn snapshot_filesystem(
                 suspend,
             )
         })
-        .await??;
+        .await
+        .map_err(anyhow::Error::from)??;
         if suspend {
             shared
                 .warm_machines
@@ -583,7 +594,8 @@ pub(super) async fn snapshot_filesystem(
         }
         Ok(payload)
     })
-    .await?
+    .await
+        .map_err(anyhow::Error::from)?
 }
 
 pub(super) fn shared_base_image_inodes(config: &FirecrackerConfig) -> Result<HashSet<(u64, u64)>> {

@@ -1,5 +1,7 @@
 use super::*;
-use exoharness::{ManagedSandboxBackend, ManagedSandboxHandle, SandboxProvider, SandboxRequest};
+use exoharness::{
+    ManagedSandboxBackend, ManagedSandboxHandle, SandboxProvider, SandboxRequest, SandboxResult,
+};
 
 struct TcpBackend;
 
@@ -15,7 +17,10 @@ impl ManagedSandboxBackend for TcpBackend {
     fn consumable_snapshot_formats(&self) -> &[exoharness::SnapshotFormat] {
         &[]
     }
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         exoharness::LocalProcessSandboxBackend::new()
             .acquire(request)
             .await
@@ -41,16 +46,16 @@ impl ManagedSandboxBackend for TcpBackend {
         &self,
         _request: SandboxRequest,
         _kind: exoharness::SnapshotKind,
-    ) -> Result<exoharness::SnapshotPayload> {
-        anyhow::bail!("test TCP backend does not support suspension")
+    ) -> SandboxResult<exoharness::SnapshotPayload> {
+        Err(anyhow::anyhow!("test TCP backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: exoharness::SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        anyhow::bail!("unsupported")
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(anyhow::anyhow!("unsupported").into())
     }
 }
 

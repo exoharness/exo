@@ -289,8 +289,8 @@ mod tests {
     use crate::{
         AttachSandboxRequest, ExoHarness, LocalProcessSandboxBackend, ManagedSandboxBackend,
         ManagedSandboxHandle, NewThreadRequest, SandboxAttachment, SandboxBackendRegistration,
-        SandboxProvider, SandboxRequest, SnapshotFormat, SnapshotPayload, WriteArtifactRequest,
-        test_support,
+        SandboxProvider, SandboxRequest, SandboxResult, SnapshotFormat, SnapshotPayload,
+        WriteArtifactRequest, test_support,
     };
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -318,7 +318,10 @@ mod tests {
         fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
             &[]
         }
-        async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        async fn acquire(
+            &self,
+            request: SandboxRequest,
+        ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
             self.acquisitions.fetch_add(1, Ordering::SeqCst);
             if self.pause_acquisitions.load(Ordering::SeqCst) {
                 self.resume_acquisition.notified().await;
@@ -338,22 +341,22 @@ mod tests {
             request: SandboxRequest,
             _attachment: SandboxAttachment,
         ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-            self.acquire(request).await
+            self.acquire(request).await.map_err(anyhow::Error::from)
         }
         async fn suspend(
             &self,
             _request: SandboxRequest,
             _kind: crate::SnapshotKind,
-        ) -> Result<SnapshotPayload> {
-            anyhow::bail!("test recovery backend does not support suspension")
+        ) -> SandboxResult<SnapshotPayload> {
+            Err(anyhow::anyhow!("test recovery backend does not support suspension").into())
         }
 
         async fn acquire_from_snapshot(
             &self,
             _request: SandboxRequest,
             _payload: SnapshotPayload,
-        ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-            anyhow::bail!("unsupported")
+        ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+            Err(anyhow::anyhow!("unsupported").into())
         }
     }
 

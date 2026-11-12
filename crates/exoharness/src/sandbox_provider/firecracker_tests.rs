@@ -170,7 +170,11 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
         },
         egress_proxy,
     };
-    assert!(prepare_request(request(limited.clone(), None)).is_err());
+    let error = prepare_request(request(limited.clone(), None)).unwrap_err();
+    assert!(matches!(
+        error.failure(),
+        Some(crate::SandboxFailure::InvalidRequest { .. })
+    ));
     assert!(prepare_request(request(SandboxNetworkPolicy::Disabled, Some(proxy))).is_err());
     for policy in [limited, SandboxNetworkPolicy::Unrestricted] {
         let rules = network_firewall_rules(&config, &network, &policy.into(), Some(proxy)).unwrap();
@@ -310,11 +314,37 @@ fn resource_slot_claims_are_atomic_and_owner_checked() {
 }
 
 #[test]
+fn invalid_snapshot_payloads_preserve_failure_categories() {
+    let error = |format| {
+        FirecrackerSnapshotManifest::from_payload(SnapshotPayload {
+            format,
+            bytes: Bytes::from_static(b"invalid snapshot"),
+        })
+        .unwrap_err()
+    };
+    assert!(matches!(
+        error(SnapshotFormat::FirecrackerHostRef).failure(),
+        Some(crate::SandboxFailure::SnapshotUnavailable { .. })
+    ));
+    assert!(matches!(
+        error(SnapshotFormat::from_static("unknown-format")).failure(),
+        Some(crate::SandboxFailure::InvalidRequest { .. })
+    ));
+}
+
+#[test]
 fn machine_capacity_allows_reuse_but_rejects_an_additional_vm() {
     let max_machines = NonZeroUsize::new(2).unwrap();
     ensure_machine_capacity(max_machines, 1, false).unwrap();
     ensure_machine_capacity(max_machines, 2, true).unwrap();
-    assert!(ensure_machine_capacity(max_machines, 2, false).is_err());
+    let error = ensure_machine_capacity(max_machines, 2, false).unwrap_err();
+    assert!(matches!(
+        error.failure(),
+        Some(crate::SandboxFailure::VmCapacityExhausted {
+            limit: 2,
+            occupied: 2
+        })
+    ));
 }
 
 #[test]
@@ -939,11 +969,20 @@ fn snapshot_budget_is_shared_and_uses_the_configured_limit() -> Result<()> {
     let error = error
         .context("capturing a snapshot")
         .context("outer operation");
-    let exhausted = error
-        .downcast_ref::<crate::SnapshotBudgetExhausted>()
-        .context("expected typed snapshot budget error through context")?;
-    assert_eq!(exhausted.limit_bytes, allocated - 1);
-    assert_eq!(exhausted.accounted_bytes, allocated);
+    match error {
+        crate::SandboxError::Failure {
+            failure:
+                crate::SandboxFailure::SnapshotBudgetExhausted {
+                    limit_bytes,
+                    accounted_bytes,
+                },
+            ..
+        } => {
+            assert_eq!(limit_bytes, allocated - 1);
+            assert_eq!(accounted_bytes, allocated);
+        }
+        other => panic!("expected snapshot capacity error, got {other:?}"),
+    }
     config.snapshot_budget_bytes = allocated;
     enforce_snapshot_budget(&config)?;
     Ok(())
@@ -962,12 +1001,12 @@ fn snapshot_budget_preserves_accounting_io_errors() -> Result<()> {
         b"not a directory",
     )?;
     let error = enforce_snapshot_budget(&config).unwrap_err();
-    assert!(error.downcast_ref::<std::io::Error>().is_some());
-    assert!(
-        error
-            .downcast_ref::<crate::SnapshotBudgetExhausted>()
-            .is_none()
-    );
+    match error {
+        crate::SandboxError::Internal(error) => {
+            assert!(error.downcast_ref::<std::io::Error>().is_some())
+        }
+        other => panic!("expected internal accounting error, got {other:?}"),
+    }
     Ok(())
 }
 
@@ -1165,8 +1204,11 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
         .err()
         .context("host bind mounts must not restore")?;
     assert_eq!(
-        error.to_string(),
-        "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+        error.failure(),
+        Some(&crate::SandboxFailure::InvalidRequest {
+            message: "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+                .into(),
+        })
     );
     Ok(())
 }

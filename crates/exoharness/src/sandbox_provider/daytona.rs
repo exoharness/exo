@@ -30,13 +30,13 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload,
     WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
 use crate::sandbox_provider::shell_quote;
+use crate::{SandboxAttachment, SandboxResult};
 
 pub const DEFAULT_DAYTONA_API_URL: &str = "https://app.daytona.io/api";
 
@@ -268,7 +268,10 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("daytona")?;
         reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
@@ -314,11 +317,26 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("Daytona sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "Daytona sandbox backend does not support suspension".into(),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.restore_snapshot(request, payload)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+impl DaytonaSandboxBackend {
+    async fn restore_snapshot(
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
@@ -529,12 +547,10 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
         bail!("Daytona sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "daytona does not support the requested snapshot kind"
-        );
-        save_as_snapshot_via_backend(&self.backend, &self.sandbox_id).await
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        save_as_snapshot_via_backend(&self.backend, &self.sandbox_id, kind)
+            .await
+            .map_err(crate::SandboxError::from)
     }
 }
 
@@ -1131,7 +1147,12 @@ async fn stop_via_backend(backend: &DaytonaBackendHandle, id: &str) -> Result<()
 async fn save_as_snapshot_via_backend(
     backend: &DaytonaBackendHandle,
     id: &str,
+    kind: crate::SnapshotKind,
 ) -> Result<SnapshotPayload> {
+    ensure!(
+        kind == crate::SnapshotKind::Filesystem,
+        "daytona does not support the requested snapshot kind"
+    );
     let snapshot_name = format!("exo-snap-{}", Uuid::new_v4().simple());
     let body = DaytonaSnapshotRequest {
         name: snapshot_name.clone(),
