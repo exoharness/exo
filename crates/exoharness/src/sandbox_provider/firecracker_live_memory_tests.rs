@@ -261,35 +261,33 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
         let handle = backend.acquire(request.clone()).await?;
         request.provider_state = handle.provider_state();
         let record = allocation(&backend, &request).await?;
-        // Hold the real lifecycle lock until the caller has disconnected. The
-        // detached expansion must finish once the lock is released.
+        let grown = SandboxResourceShape::new(1, 6144).unwrap();
+        // Disconnect immediately after dispatch, before the detached task is
+        // polled. Reconciliation must wait for its committed grant.
+        let mut expansion = Box::pin(handle.expand_resources(grown));
+        assert!(futures::poll!(&mut expansion).is_pending());
+        drop(expansion);
+        assert_eq!(handle.live_resource_grant().await?, Some(grown));
+        assert_eq!(
+            statistics(&config, &record)?,
+            Statistics {
+                target_pages: 2048 * 256,
+                actual_pages: 2048 * 256
+            }
+        );
+
+        // Cancellation while waiting for ownership must not dispatch growth.
         let guard = backend
             .shared
             .lifecycle_locks
             .lock_machine(&record.machine_id)
             .await;
-        let disconnected_handle = Arc::clone(&handle);
-        let caller = tokio::spawn(async move {
-            disconnected_handle
-                .expand_resources(SandboxResourceShape::new(1, 6144).unwrap())
-                .await
-        });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        caller.abort();
-        assert!(caller.await.unwrap_err().is_cancelled());
+        let mut waiting =
+            Box::pin(handle.expand_resources(SandboxResourceShape::new(1, 8192).unwrap()));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(waiting);
         drop(guard);
-        tokio::time::timeout(Duration::from_secs(60), async {
-            loop {
-                if balloon::grant(&allocation(&backend, &request).await?)? == 6144
-                    && statistics(&config, &record)?.actual_pages == 2048 * 256
-                {
-                    return Ok::<_, anyhow::Error>(());
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .context("disconnected growth did not finish")??;
+        assert_eq!(handle.live_resource_grant().await?, Some(grown));
         let (growth, capture) = tokio::join!(
             handle.expand_resources(SandboxResourceShape::new(1, 8192).unwrap()),
             handle.snapshot(crate::SnapshotKind::Filesystem),

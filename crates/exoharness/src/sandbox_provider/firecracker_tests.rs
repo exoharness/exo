@@ -2065,3 +2065,151 @@ fn odd_memory_ceiling_rejects_before_host_setup() -> Result<()> {
     assert!(!config.state_root.exists());
     Ok(())
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
+    let directory = tempfile::tempdir_in("/tmp")?;
+    for name in ["manifests", "leases", "slots"] {
+        fs::create_dir(directory.path().join(name))?;
+    }
+    let mut shared = test_shared(
+        FirecrackerConfig {
+            state_root: directory.path().into(),
+            ..Default::default()
+        },
+        HashMap::new(),
+    )?;
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .host_fingerprint
+        .memory_ceiling_mib = std::num::NonZeroU32::new(1024);
+    let request = FirecrackerRequest::from(SandboxRequest {
+        sandbox_id: "initial-balloon".into(),
+        scope: crate::ResourceScope::Global,
+        provider_state: None,
+        lifecycle: crate::SandboxLifecycleConfig {
+            idle_ttl: Some(Duration::from_secs(600)),
+        },
+        spec: SandboxSpec {
+            image: "/unused.ext4".into(),
+            resources: SandboxResourceShape::new(1, 512),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            tcp_ports: vec![],
+            default_workdir: "/".into(),
+            policy: SandboxNetworkPolicy::Disabled.into(),
+        },
+    });
+    let spec_hash = sandbox_spec_hash(&request.spec);
+    let id = machine_id(&request.sandbox_id, &spec_hash);
+    let record = shared
+        .new_machine_record(&request, &id, &spec_hash, None, None)
+        .await?;
+    let machine = machine_from_record(&shared.config, record);
+    fs::create_dir_all(machine.vsock_path.parent().unwrap())?;
+    fs::write(shared.pid_path(&id), std::process::id().to_string())?;
+    let guest = UnixListener::bind(&machine.vsock_path)?;
+    let guest_peer = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = guest.accept().await?;
+            let mut reader = AsyncBufReader::new(stream);
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).await?;
+            assert_eq!(handshake, "CONNECT 10052\n");
+            reader.get_mut().write_all(b"OK 1073741824\n").await?;
+            let mut stream = reader.into_inner();
+            let length = stream.read_u32().await? as usize;
+            let mut payload = vec![0; length];
+            stream.read_exact(&mut payload).await?;
+            let request: Message<ProtocolGuestRequest<()>> = serde_json::from_slice(&payload)?;
+            assert!(matches!(request.payload, ProtocolGuestRequest::Ping));
+            let response = GuestResponse {
+                identity: Some(exo_firecracker_protocol::GuestIdentity {
+                    implementation_version: "test".into(),
+                    build_id: "test".into(),
+                }),
+                ..GuestResponse::ok()
+            };
+            let payload = serde_json::to_vec(&Message::new(response))?;
+            stream.write_u32(payload.len() as u32).await?;
+            stream.write_all(&payload).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let api = UnixListener::bind(jail_root(&shared.config, &id).join("run/firecracker.socket"))?;
+    let (waiting, inflation_waiting) = tokio::sync::oneshot::channel();
+    let (release, inflated) = tokio::sync::oneshot::channel();
+    let api_peer = tokio::spawn(async move {
+        let mut waiting = Some(waiting);
+        let mut inflated = Some(inflated);
+        for index in 0..4 {
+            let (stream, _) = api.accept().await?;
+            let mut reader = AsyncBufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).await?;
+            let statistics = index % 2 == 1;
+            assert!(request.starts_with(if statistics {
+                "GET /balloon/statistics "
+            } else {
+                "PATCH /balloon "
+            }));
+            let mut length = 0;
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).await?;
+                if header == "\r\n" {
+                    break;
+                }
+                if let Some(value) = header.strip_prefix("Content-Length: ") {
+                    length = value.trim().parse::<usize>()?;
+                }
+            }
+            reader.read_exact(&mut vec![0; length]).await?;
+            if index == 1 {
+                waiting.take().unwrap().send(()).unwrap();
+                inflated.take().unwrap().await?;
+            }
+            let body = if statistics {
+                serde_json::json!({"target_pages": 512 * 256, "actual_pages": 512 * 256})
+                    .to_string()
+            } else {
+                String::new()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            reader.get_mut().write_all(response.as_bytes()).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let backend = FirecrackerSandboxBackend {
+        external_proxy: None,
+        shared,
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    let acquiring = {
+        let backend = backend.clone();
+        let request = request.clone();
+        tokio::spawn(async move { backend.acquire_resolved(request).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), inflation_waiting).await??;
+    acquiring.abort();
+    assert!(matches!(acquiring.await, Err(error) if error.is_cancelled()));
+    let mut ownership = Box::pin(backend.shared.lifecycle_locks.lock_machine(&id));
+    assert!(futures::poll!(&mut ownership).is_pending());
+    drop(ownership);
+    let mut retry = Box::pin(backend.acquire_resolved(request));
+    assert!(futures::poll!(&mut retry).is_pending());
+    release.send(()).unwrap();
+    let handle = tokio::time::timeout(Duration::from_secs(2), retry).await??;
+    assert_eq!(
+        handle.live_resource_grant().await?,
+        SandboxResourceShape::new(1, 512)
+    );
+    guest_peer.await??;
+    api_peer.await??;
+    Ok(())
+}

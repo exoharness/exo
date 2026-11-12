@@ -156,8 +156,6 @@ impl SnapshotFormat {
     /// Reference to an immutable bundle in a Firecracker host's private root.
     pub const FirecrackerHostRef: Self = Self::from_static("firecracker-host-ref");
     pub const FirecrackerFilesystemRef: Self = Self::from_static("firecracker-filesystem-ref-v1");
-    pub const FirecrackerLazyFilesystemRef: Self =
-        Self::from_static("firecracker-lazy-filesystem-ref-v1");
 
     pub const fn from_static(format: &'static str) -> Self {
         Self(Cow::Borrowed(format))

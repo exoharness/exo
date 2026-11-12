@@ -1225,20 +1225,27 @@ impl FirecrackerSandboxBackend {
     ) -> Result<FirecrackerSandboxHandle> {
         let spec_hash = sandbox_spec_hash(&request.spec);
         let machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
-        let _lifecycle_guard = self
+        let lifecycle_guard = self
             .shared
             .lifecycle_locks
             .lock_sandbox(request.sandbox_id.as_str())
             .await;
-        self.restore_snapshot_locked(
-            request,
-            manifest,
-            lifecycle,
-            captured_lease,
-            spec_hash,
-            machine_id,
-        )
-        .await
+        let backend = self.clone();
+        tokio::spawn(async move {
+            // Readiness retains lifecycle ownership after caller cancellation.
+            let _lifecycle_guard = lifecycle_guard;
+            backend
+                .restore_snapshot_locked(
+                    request,
+                    manifest,
+                    lifecycle,
+                    captured_lease,
+                    spec_hash,
+                    machine_id,
+                )
+                .await
+        })
+        .await?
     }
 
     // The caller holds the target machine family's lifecycle lock. Fork holds
@@ -1392,13 +1399,19 @@ impl FirecrackerSandboxBackend {
         } else {
             machine_id(request.sandbox_id.as_str(), &spec_hash)
         };
-        let _lifecycle_guard = self
+        let lifecycle_guard = self
             .shared
             .lifecycle_locks
             .lock_sandbox(request.sandbox_id.as_str())
             .await;
-        self.acquire_resolved_locked(request, spec_hash, machine_id, one_shot, None, false)
-            .await
+        let backend = self.clone();
+        tokio::spawn(async move {
+            let _lifecycle_guard = lifecycle_guard;
+            backend
+                .acquire_resolved_locked(request, spec_hash, machine_id, one_shot, None, false)
+                .await
+        })
+        .await?
     }
 
     // The caller holds this machine family's lifecycle lock. The capacity
@@ -1678,7 +1691,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         }
         let target_spec_hash = sandbox_spec_hash(&target.spec);
         let target_machine_id = machine_id(&target.sandbox_id, &target_spec_hash);
-        let (_first_lifecycle_guard, _second_lifecycle_guard) = self
+        let lifecycle_guards = self
             .shared
             .lifecycle_locks
             .lock_sandbox_pair(&source.sandbox_id, &target.sandbox_id)
@@ -1714,17 +1727,23 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             SnapshotTemplateLifecycle::Machine,
         )
         .await?;
-        Ok(Arc::new(
-            self.restore_snapshot_locked(
-                target,
-                captured.manifest,
-                SnapshotTemplateLifecycle::Machine,
-                Some(captured.lease),
-                target_spec_hash,
-                target_machine_id,
-            )
-            .await?,
-        ))
+        let backend = self.clone();
+        tokio::spawn(async move {
+            let _lifecycle_guards = lifecycle_guards;
+            Ok(Arc::new(
+                backend
+                    .restore_snapshot_locked(
+                        target,
+                        captured.manifest,
+                        SnapshotTemplateLifecycle::Machine,
+                        Some(captured.lease),
+                        target_spec_hash,
+                        target_machine_id,
+                    )
+                    .await?,
+            ) as Arc<dyn ManagedSandboxHandle>)
+        })
+        .await?
     }
 
     #[tracing::instrument(name = "firecracker.restore", skip_all)]
@@ -1932,8 +1951,10 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
     ) -> Result<SandboxResourceShape> {
         let shared = Arc::clone(&self.shared);
         let machine_id = self.machine.record.machine_id.clone();
+        // Grant queries must not overtake growth that has already been dispatched.
+        let guard = shared.lifecycle_locks.lock_machine(&machine_id).await;
         tokio::spawn(async move {
-            let _guard = shared.lifecycle_locks.lock_machine(&machine_id).await;
+            let _guard = guard;
             let record = shared
                 .load_machine_record(&machine_id)
                 .await?
@@ -2227,6 +2248,7 @@ impl Shared {
                         .await??;
                     }
 
+                    self.initialize_balloon(&machine.record).await?;
                     return Ok(machine);
                 }
                 self.cleanup_machine(machine_id, false).await?;
@@ -2263,12 +2285,7 @@ impl Shared {
             GuestClient::new(Arc::clone(self), machine.vsock_path.clone())
                 .sync_clock()
                 .await?;
-            if machine.record.runtime.memory_ceiling_mib.is_some() {
-                let config = self.config.clone();
-                let record = machine.record.clone();
-                tokio::task::spawn_blocking(move || balloon::initialize(&config, &record))
-                    .await??;
-            }
+            self.initialize_balloon(&machine.record).await?;
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -2317,6 +2334,15 @@ impl Shared {
                 .await?;
         }
         Ok(machine)
+    }
+
+    async fn initialize_balloon(&self, record: &MachineRecord) -> Result<()> {
+        if record.runtime.memory_ceiling_mib.is_some() {
+            let config = self.config.clone();
+            let record = record.clone();
+            tokio::task::spawn_blocking(move || balloon::initialize(&config, &record)).await??;
+        }
+        Ok(())
     }
 
     #[tracing::instrument(name = "firecracker.restore_network", skip_all)]
