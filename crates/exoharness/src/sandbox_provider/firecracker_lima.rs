@@ -1803,17 +1803,9 @@ mod egress_cleanup_tests {
             });
             let (result, replied) = tokio::join!(request, reply);
             replied?;
-            let error = crate::SandboxError::from(result.unwrap_err());
+            let error = result.unwrap_err();
             assert_eq!(error.failure(), expected.as_ref());
             assert!(format!("{error:#}").contains("source resume also failed"));
-            assert_eq!(
-                error.acquisition_retry(),
-                if expected.is_some() {
-                    crate::SandboxRetryAdvice::DifferentBackendAfterCleanup
-                } else {
-                    crate::SandboxRetryAdvice::Unknown
-                }
-            );
         }
         Ok(())
     }

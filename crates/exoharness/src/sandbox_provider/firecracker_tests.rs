@@ -170,13 +170,11 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
         },
         egress_proxy,
     };
-    let error =
-        crate::SandboxError::from(prepare_request(request(limited.clone(), None)).unwrap_err());
+    let error = prepare_request(request(limited.clone(), None)).unwrap_err();
     assert!(matches!(
         error.failure(),
         Some(crate::SandboxFailure::InvalidRequest { .. })
     ));
-    assert_eq!(error.acquisition_retry(), crate::SandboxRetryAdvice::Never);
     assert!(prepare_request(request(SandboxNetworkPolicy::Disabled, Some(proxy))).is_err());
     for policy in [limited, SandboxNetworkPolicy::Unrestricted] {
         let rules = network_firewall_rules(&config, &network, &policy.into(), Some(proxy)).unwrap();
@@ -316,27 +314,22 @@ fn resource_slot_claims_are_atomic_and_owner_checked() {
 }
 
 #[test]
-fn invalid_snapshot_payloads_preserve_recovery_guidance() {
-    for (format, expected) in [
-        (
-            SnapshotFormat::FirecrackerHostRef,
-            crate::SandboxRetryAdvice::RecoverSnapshot,
-        ),
-        (
-            SnapshotFormat::from_static("unknown-format"),
-            crate::SandboxRetryAdvice::Never,
-        ),
-    ] {
-        let error = FirecrackerSnapshotManifest::from_payload(SnapshotPayload {
+fn invalid_snapshot_payloads_preserve_failure_categories() {
+    let error = |format| {
+        FirecrackerSnapshotManifest::from_payload(SnapshotPayload {
             format,
             bytes: Bytes::from_static(b"invalid snapshot"),
         })
-        .unwrap_err();
-        assert_eq!(
-            crate::SandboxError::from(error).acquisition_retry(),
-            expected
-        );
-    }
+        .unwrap_err()
+    };
+    assert!(matches!(
+        error(SnapshotFormat::FirecrackerHostRef).failure(),
+        Some(crate::SandboxFailure::SnapshotUnavailable { .. })
+    ));
+    assert!(matches!(
+        error(SnapshotFormat::from_static("unknown-format")).failure(),
+        Some(crate::SandboxFailure::InvalidRequest { .. })
+    ));
 }
 
 #[test]
@@ -344,8 +337,7 @@ fn machine_capacity_allows_reuse_but_rejects_an_additional_vm() {
     let max_machines = NonZeroUsize::new(2).unwrap();
     ensure_machine_capacity(max_machines, 1, false).unwrap();
     ensure_machine_capacity(max_machines, 2, true).unwrap();
-    let error =
-        crate::SandboxError::from(ensure_machine_capacity(max_machines, 2, false).unwrap_err());
+    let error = ensure_machine_capacity(max_machines, 2, false).unwrap_err();
     assert!(matches!(
         error.failure(),
         Some(crate::SandboxFailure::VmCapacityExhausted {
@@ -353,10 +345,6 @@ fn machine_capacity_allows_reuse_but_rejects_an_additional_vm() {
             occupied: 2
         })
     ));
-    assert_eq!(
-        error.acquisition_retry(),
-        crate::SandboxRetryAdvice::DifferentBackendAfterCleanup
-    );
 }
 
 #[test]

@@ -26,19 +26,6 @@ pub enum SandboxFailure {
     InvalidRequest { message: String },
 }
 
-/// Guidance for a failed acquisition, not proof that the backend rolled it back.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SandboxRetryAdvice {
-    /// Retry cannot fix this request.
-    Never,
-    /// Try a compatible backend only after terminating the failed acquisition.
-    DifferentBackendAfterCleanup,
-    /// Recover the checkpoint or rebuild a template before attempting restoration.
-    RecoverSnapshot,
-    /// The outcome is unknown; this does not authorize creating another sandbox.
-    Unknown,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     #[error("{source:#}")]
@@ -69,29 +56,6 @@ impl SandboxError {
                 source: source.context(context),
             },
             Self::Internal(source) => Self::Internal(source.context(context)),
-        }
-    }
-
-    /// Applies to acquisition failures. A capture failure must leave its source intact.
-    /// The caller chooses eligible backends and backoff; cleanup failure forbids failover.
-    pub fn acquisition_retry(&self) -> SandboxRetryAdvice {
-        match self {
-            Self::Failure {
-                failure:
-                    SandboxFailure::VmCapacityExhausted { .. }
-                    | SandboxFailure::SnapshotBudgetExhausted { .. }
-                    | SandboxFailure::DiskSpaceExhausted { .. },
-                ..
-            } => SandboxRetryAdvice::DifferentBackendAfterCleanup,
-            Self::Failure {
-                failure: SandboxFailure::SnapshotUnavailable { .. },
-                ..
-            } => SandboxRetryAdvice::RecoverSnapshot,
-            Self::Failure {
-                failure: SandboxFailure::InvalidRequest { .. },
-                ..
-            } => SandboxRetryAdvice::Never,
-            Self::Internal(_) => SandboxRetryAdvice::Unknown,
         }
     }
 }
@@ -135,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classified_failures_survive_context_without_promising_rollback() {
+    fn classified_failures_survive_context() {
         let failure = SandboxFailure::VmCapacityExhausted {
             limit: 4,
             occupied: 4,
@@ -143,10 +107,6 @@ mod tests {
         let error = SandboxError::from(failure.clone()).context("acquiring VM");
         assert_eq!(error.failure(), Some(&failure));
         assert!(format!("{error:#}").contains("acquiring VM"));
-        assert_eq!(
-            error.acquisition_retry(),
-            SandboxRetryAdvice::DifferentBackendAfterCleanup
-        );
         let round_trip = error.context("backend operation");
         assert_eq!(round_trip.failure(), Some(&failure));
         let diagnostic = format!("{round_trip:#}");
@@ -176,29 +136,11 @@ mod tests {
     }
 
     #[test]
-    fn recovery_and_invalid_input_do_not_retry_acquisition_blindly() {
-        for (failure, expected) in [
-            (
-                SandboxFailure::InvalidRequest {
-                    message: "invalid workdir".into(),
-                },
-                SandboxRetryAdvice::Never,
-            ),
-            (
-                SandboxFailure::SnapshotUnavailable {
-                    message: "capture is missing".into(),
-                },
-                SandboxRetryAdvice::RecoverSnapshot,
-            ),
-        ] {
-            assert_eq!(SandboxError::from(failure).acquisition_retry(), expected);
-        }
+    fn unexpected_errors_preserve_context_without_classification() {
         let error = SandboxError::from(
-            anyhow::Error::new(SandboxError::from(anyhow::anyhow!("connection closed")))
-                .context("acquiring remote sandbox"),
+            anyhow::anyhow!("connection closed").context("acquiring remote sandbox"),
         );
         assert!(format!("{error:#}").contains("acquiring remote sandbox"));
-        assert_eq!(error.acquisition_retry(), SandboxRetryAdvice::Unknown);
         assert!(error.failure().is_none());
     }
 }
