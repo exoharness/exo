@@ -97,10 +97,7 @@ impl ManagedSandboxBackend for ResourceBackend {
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
     ) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "test resource backend does not support suspension".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test resource backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -329,6 +329,18 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.restore_snapshot(request, payload)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+impl DaytonaSandboxBackend {
+    async fn restore_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("daytona")?;
         reject_unsupported_mounts(&request)?;
         let snapshot_name = if payload.format == SnapshotFormat::DaytonaRef {
@@ -338,11 +350,10 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         } else if payload.format == SnapshotFormat::DockerImageTar {
             import_docker_image_tar(&self.handle_backend(), &payload.bytes).await?
         } else {
-            return Err(anyhow!(
+            bail!(
                 "the Daytona backend cannot restore a {} payload",
                 payload.format
             )
-            .into());
         };
         let spec_hash = sandbox_spec_hash(&request.spec);
         let sandbox = self
@@ -537,10 +548,7 @@ impl ManagedSandboxHandle for DaytonaSandboxHandle {
     }
 
     async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        if kind != crate::SnapshotKind::Filesystem {
-            return Err(anyhow!("daytona does not support the requested snapshot kind").into());
-        }
-        save_as_snapshot_via_backend(&self.backend, &self.sandbox_id)
+        save_as_snapshot_via_backend(&self.backend, &self.sandbox_id, kind)
             .await
             .map_err(crate::SandboxError::from)
     }
@@ -1139,7 +1147,12 @@ async fn stop_via_backend(backend: &DaytonaBackendHandle, id: &str) -> Result<()
 async fn save_as_snapshot_via_backend(
     backend: &DaytonaBackendHandle,
     id: &str,
+    kind: crate::SnapshotKind,
 ) -> Result<SnapshotPayload> {
+    ensure!(
+        kind == crate::SnapshotKind::Filesystem,
+        "daytona does not support the requested snapshot kind"
+    );
     let snapshot_name = format!("exo-snap-{}", Uuid::new_v4().simple());
     let body = DaytonaSnapshotRequest {
         name: snapshot_name.clone(),

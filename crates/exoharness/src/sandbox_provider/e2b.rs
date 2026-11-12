@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -304,15 +304,26 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.restore_snapshot(request, payload)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+impl E2bSandboxBackend {
+    async fn restore_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("e2b")?;
         reject_host_mounts(&request)?;
         if payload.format != SnapshotFormat::E2bRef {
-            return Err(anyhow!(
+            bail!(
                 "E2B sandbox backend can only restore from {}, got {}",
                 SnapshotFormat::E2bRef,
                 payload.format
-            )
-            .into());
+            );
         }
         let manifest: E2bSnapshotManifest =
             serde_json::from_slice(&payload.bytes).context("decoding E2bSnapshot manifest")?;
@@ -413,11 +424,8 @@ impl ManagedSandboxHandle for E2bSandboxHandle {
     }
 
     async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        if kind != crate::SnapshotKind::Full {
-            return Err(anyhow!("e2b does not support the requested snapshot kind").into());
-        }
         let base_template = resolve_template_id(&self.request.spec, &self.backend.template_id);
-        save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template)
+        save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template, kind)
             .await
             .map_err(crate::SandboxError::from)
     }
@@ -1065,7 +1073,12 @@ async fn save_snapshot_via_backend(
     backend: &E2bBackendHandle,
     sandbox_id: &str,
     base_template: String,
+    kind: crate::SnapshotKind,
 ) -> Result<SnapshotPayload> {
+    ensure!(
+        kind == crate::SnapshotKind::Full,
+        "e2b does not support the requested snapshot kind"
+    );
     let snapshot_name = format!("exo-snap-{}", Uuid::new_v4().simple());
     let body = E2bSnapshotCreateRequest {
         name: Some(snapshot_name),

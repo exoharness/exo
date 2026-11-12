@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use async_trait::async_trait;
 use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
@@ -172,49 +172,32 @@ impl VercelSandboxBackend {
             .await
             .context("decoding Vercel create-sandbox response")
     }
-}
-
-#[async_trait]
-impl ManagedSandboxBackend for VercelSandboxBackend {
-    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
-        crate::SandboxBackendCapabilities::default()
-    }
-
-    fn is_local(&self) -> bool {
-        false
-    }
-
-    fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
-        &[]
-    }
-
-    async fn acquire(
+    async fn acquire_sandbox(
         &self,
         request: SandboxRequest,
-    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        if !(request.spec.tcp_ports.iter().all(|port| *port != 0)) {
-            return Err(anyhow::anyhow!("sandbox TCP ports must be nonzero").into());
-        }
-        if !(request
-            .spec
-            .tcp_ports
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .len()
-            == request.spec.tcp_ports.len())
-        {
-            return Err(anyhow::anyhow!("sandbox TCP ports must be unique").into());
-        }
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+        ensure!(
+            request.spec.tcp_ports.iter().all(|port| *port != 0),
+            "sandbox TCP ports must be nonzero"
+        );
+        ensure!(
+            request
+                .spec
+                .tcp_ports
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+                == request.spec.tcp_ports.len(),
+            "sandbox TCP ports must be unique"
+        );
         let network_policy = VercelNetworkPolicy::from_policy(&request.spec.policy)?;
         reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let sandbox_name = vercel_sandbox_name(&request, &spec_hash);
         let response = match self.get_sandbox_session(&sandbox_name, false).await? {
             Some(response) => {
-                if response.sandbox.network_policy
-                    != serde_json::to_value(&network_policy).map_err(anyhow::Error::from)?
-                {
+                if response.sandbox.network_policy != serde_json::to_value(&network_policy)? {
                     self.update_network_policy(&sandbox_name, network_policy)
                         .await?;
                 }
@@ -246,6 +229,30 @@ impl ManagedSandboxBackend for VercelSandboxBackend {
             request,
             backend: self.handle_backend(),
         }))
+    }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for VercelSandboxBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
+    fn is_local(&self) -> bool {
+        false
+    }
+
+    fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
+        &[]
+    }
+
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.acquire_sandbox(request)
+            .await
+            .map_err(crate::SandboxError::from)
     }
 
     async fn attach(

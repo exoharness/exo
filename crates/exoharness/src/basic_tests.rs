@@ -2828,10 +2828,7 @@ impl ManagedSandboxBackend for WebSocketOnlyBackend {
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
     ) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "websocket-only backend does not support suspension".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("websocket-only backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
@@ -2839,10 +2836,7 @@ impl ManagedSandboxBackend for WebSocketOnlyBackend {
         _request: SandboxRequest,
         _payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "websocket-only backend does not support snapshot restore".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("websocket-only backend does not support snapshot restore").into())
     }
 }
 
@@ -2895,10 +2889,7 @@ impl ManagedSandboxHandle for WebSocketOnlyHandle {
     }
 
     async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "websocket-only handle does not support snapshots".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("websocket-only handle does not support snapshots").into())
     }
 }
 
@@ -2971,10 +2962,7 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
     ) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "test provider-state backend does not support suspension".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test provider-state backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
@@ -2982,10 +2970,7 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
         _request: SandboxRequest,
         _payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "test provider-state backend does not support snapshot restore".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test provider-state backend does not support snapshot restore").into())
     }
 }
 
@@ -3031,10 +3016,7 @@ impl ManagedSandboxHandle for TestProviderStateHandle {
     }
 
     async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "test provider-state handle does not support snapshots".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test provider-state handle does not support snapshots").into())
     }
 }
 
@@ -3086,10 +3068,7 @@ impl ManagedSandboxBackend for TestSandboxBackend {
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
     ) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "test sandbox backend does not support suspension".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test sandbox backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
@@ -3097,10 +3076,7 @@ impl ManagedSandboxBackend for TestSandboxBackend {
         _request: SandboxRequest,
         _payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "test sandbox backend does not support snapshot restore".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test sandbox backend does not support snapshot restore").into())
     }
 }
 
@@ -3143,10 +3119,7 @@ impl ManagedSandboxHandle for TestSandboxHandle {
     }
 
     async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "test sandbox handle does not support snapshots".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test sandbox handle does not support snapshots").into())
     }
 }
 
@@ -3419,10 +3392,7 @@ impl ManagedSandboxBackend for RestoreImageTestBackend {
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
     ) -> SandboxResult<SnapshotPayload> {
-        Err(crate::SandboxFailure::InvalidRequest {
-            message: "restore-image test backend does not support suspension".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("restore-image test backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(

@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -186,10 +186,7 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         request: SandboxRequest,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("sprites")?;
-        if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
-            return Err(anyhow!("Sprites does not support policy.networking.disabled").into());
-        }
-        reject_host_mounts(&request)?;
+        reject_unsupported_request(&request)?;
         let sprite_name = sprite_name_for_request(&request);
         self.ensure_sprite(&sprite_name, &request).await?;
         Ok(Arc::new(SpritesSandboxHandle {
@@ -224,29 +221,36 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.restore_snapshot(request, payload)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+impl SpritesSandboxBackend {
+    async fn restore_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("sprites")?;
-        if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
-            return Err(anyhow!("Sprites does not support policy.networking.disabled").into());
-        }
-        reject_host_mounts(&request)?;
+        reject_unsupported_request(&request)?;
         if payload.format != SnapshotFormat::SpritesRef {
-            return Err(anyhow!(
+            bail!(
                 "Sprites sandbox backend can only restore from {}, got {}",
                 SnapshotFormat::SpritesRef,
                 payload.format
-            )
-            .into());
+            );
         }
         let manifest: SpritesSnapshotManifest =
             serde_json::from_slice(&payload.bytes).context("decoding SpritesSnapshot manifest")?;
         let sprite_name = sprite_name_for_request(&request);
         if manifest.sprite_name != sprite_name {
-            return Err(anyhow!(
+            bail!(
                 "Sprites snapshot belongs to sprite {}, but this sandbox key maps to {}",
                 manifest.sprite_name,
                 sprite_name
-            )
-            .into());
+            );
         }
         self.ensure_sprite(&sprite_name, &request).await?;
         restore_checkpoint_via_backend(
@@ -335,10 +339,7 @@ impl ManagedSandboxHandle for SpritesSandboxHandle {
     }
 
     async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        if kind != crate::SnapshotKind::Filesystem {
-            return Err(anyhow!("sprites does not support the requested snapshot kind").into());
-        }
-        save_checkpoint_via_backend(&self.backend, &self.sprite_name)
+        save_checkpoint_via_backend(&self.backend, &self.sprite_name, kind)
             .await
             .map_err(crate::SandboxError::from)
     }
@@ -675,7 +676,12 @@ fn parse_exec_response(body: &str) -> Result<(i32, String, String)> {
 async fn save_checkpoint_via_backend(
     backend: &SpritesBackendHandle,
     sprite_name: &str,
+    kind: crate::SnapshotKind,
 ) -> Result<SnapshotPayload> {
+    ensure!(
+        kind == crate::SnapshotKind::Filesystem,
+        "sprites does not support the requested snapshot kind"
+    );
     let body = serde_json::json!({ "comment": "exo snapshot" });
     let response = backend
         .client
@@ -785,7 +791,11 @@ fn sprite_name_for_request(request: &SandboxRequest) -> String {
     format!("exo-{:016x}", hasher.finish())
 }
 
-fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
+fn reject_unsupported_request(request: &SandboxRequest) -> Result<()> {
+    if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
+        bail!("Sprites does not support policy.networking.disabled");
+    }
+
     if request.spec.mounts.is_empty() {
         return Ok(());
     }

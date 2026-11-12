@@ -348,10 +348,7 @@ mod tests {
             _request: SandboxRequest,
             _kind: crate::SnapshotKind,
         ) -> SandboxResult<SnapshotPayload> {
-            Err(crate::SandboxFailure::InvalidRequest {
-                message: "test recovery backend does not support suspension".into(),
-            }
-            .into())
+            Err(anyhow::anyhow!("test recovery backend does not support suspension").into())
         }
 
         async fn acquire_from_snapshot(
@@ -359,10 +356,7 @@ mod tests {
             _request: SandboxRequest,
             _payload: SnapshotPayload,
         ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-            Err(crate::SandboxFailure::InvalidRequest {
-                message: "unsupported".into(),
-            }
-            .into())
+            Err(anyhow::anyhow!("unsupported").into())
         }
     }
 

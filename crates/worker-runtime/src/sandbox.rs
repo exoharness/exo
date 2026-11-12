@@ -191,15 +191,16 @@ impl ManagedSandboxBackend for CloudflareBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        if payload.format != SNAPSHOT_FORMAT {
-            return Err(anyhow::anyhow!("unsupported Cloudflare snapshot format").into());
+        let result: anyhow::Result<Arc<dyn ManagedSandboxHandle>> = async {
+            ensure!(
+                payload.format == SNAPSHOT_FORMAT,
+                "unsupported Cloudflare snapshot format"
+            );
+            self.acquire(request, Some(serde_json::from_slice(&payload.bytes)?))
+                .await
         }
-        self.acquire(
-            request,
-            Some(serde_json::from_slice(&payload.bytes).map_err(anyhow::Error::from)?),
-        )
-        .await
-        .map_err(exoharness::SandboxError::from)
+        .await;
+        result.map_err(exoharness::SandboxError::from)
     }
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
         self.0
@@ -333,11 +334,18 @@ impl ManagedSandboxHandle for CloudflareHandle {
         bail!("Cloudflare sandbox detach is not supported")
     }
     async fn snapshot(&self, kind: SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        if kind != SnapshotKind::Filesystem {
-            return Err(
-                anyhow::anyhow!("Cloudflare does not support the requested snapshot kind").into(),
-            );
-        }
+        self.capture_snapshot(kind)
+            .await
+            .map_err(exoharness::SandboxError::from)
+    }
+}
+
+impl CloudflareHandle {
+    async fn capture_snapshot(&self, kind: SnapshotKind) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == SnapshotKind::Filesystem,
+            "Cloudflare does not support the requested snapshot kind"
+        );
         let snapshot: Snapshot = self
             .host
             .call(HostRequest::Sandbox {
@@ -348,9 +356,7 @@ impl ManagedSandboxHandle for CloudflareHandle {
             .await?;
         Ok(SnapshotPayload {
             format: SNAPSHOT_FORMAT,
-            bytes: serde_json::to_vec(&snapshot)
-                .map_err(anyhow::Error::from)?
-                .into(),
+            bytes: serde_json::to_vec(&snapshot)?.into(),
         })
     }
 }

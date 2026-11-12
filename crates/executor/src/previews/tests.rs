@@ -47,10 +47,7 @@ impl ManagedSandboxBackend for TcpBackend {
         _request: SandboxRequest,
         _kind: exoharness::SnapshotKind,
     ) -> SandboxResult<exoharness::SnapshotPayload> {
-        Err(exoharness::SandboxFailure::InvalidRequest {
-            message: "test TCP backend does not support suspension".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("test TCP backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
@@ -58,10 +55,7 @@ impl ManagedSandboxBackend for TcpBackend {
         _request: SandboxRequest,
         _payload: exoharness::SnapshotPayload,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        Err(exoharness::SandboxFailure::InvalidRequest {
-            message: "unsupported".into(),
-        }
-        .into())
+        Err(anyhow::anyhow!("unsupported").into())
     }
 }
 

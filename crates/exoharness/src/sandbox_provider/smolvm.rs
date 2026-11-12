@@ -1016,11 +1016,13 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         self.require_capabilities(&request).await?;
         let binary = self.binary().await?;
         if self.resolve_mode(&request).await != SmolvmExecutionMode::Warm {
-            if !(request.spec.tcp_ports.is_empty()) {
-                return Err(
-                    anyhow::anyhow!("smolvm TCP forwarding requires a warm sandbox").into(),
+            (|| -> Result<()> {
+                ensure!(
+                    request.spec.tcp_ports.is_empty(),
+                    "smolvm TCP forwarding requires a warm sandbox"
                 );
-            }
+                Ok(())
+            })()?;
             let image = self.prepare_image(&request.spec.image).await?;
             reject_unsupported_spec(&request.spec, &image)?;
             let boot_binary = self.boot_binary().await?.clone();
@@ -1391,15 +1393,30 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
 
     #[cfg(unix)]
     async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
-        if kind != crate::SnapshotKind::Filesystem {
-            return Err(anyhow::anyhow!("smolvm does not support full execution snapshots").into());
-        }
-        if self.request.lifecycle.idle_ttl.is_none() {
-            return Err(anyhow::anyhow!("filesystem capture requires a managed lifecycle").into());
-        }
-        if !self.filesystem_snapshots {
-            return Err(anyhow::anyhow!("complete filesystem capture requires smolvm {MIN_FILESYSTEM_SNAPSHOT_VERSION} or newer with --include-workspace").into());
-        }
+        self.capture_filesystem_snapshot(kind)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+#[cfg(unix)]
+impl SmolvmWarmHandle {
+    async fn capture_filesystem_snapshot(
+        &self,
+        kind: crate::SnapshotKind,
+    ) -> Result<SnapshotPayload> {
+        ensure!(
+            kind == crate::SnapshotKind::Filesystem,
+            "smolvm does not support full execution snapshots"
+        );
+        ensure!(
+            self.request.lifecycle.idle_ttl.is_some(),
+            "filesystem capture requires a managed lifecycle"
+        );
+        ensure!(
+            self.filesystem_snapshots,
+            "complete filesystem capture requires smolvm {MIN_FILESYSTEM_SNAPSHOT_VERSION} or newer with --include-workspace"
+        );
         let handle = self.clone();
         tokio::spawn(async move {
             let snapshot_guard =
@@ -1443,9 +1460,7 @@ impl ManagedSandboxHandle for SmolvmWarmHandle {
             run_checked(start, "smolvm machine start after capture").await?;
             result
         })
-        .await
-        .map_err(anyhow::Error::from)?
-        .map_err(crate::SandboxError::from)
+        .await?
     }
 }
 
