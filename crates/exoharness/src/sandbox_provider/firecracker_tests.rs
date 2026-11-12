@@ -1204,8 +1204,11 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
         .err()
         .context("host bind mounts must not restore")?;
     assert_eq!(
-        error.to_string(),
-        "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+        error.failure(),
+        Some(&crate::SandboxFailure::InvalidRequest {
+            message: "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+                .into(),
+        })
     );
     Ok(())
 }
