@@ -401,7 +401,10 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         }
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("container sandbox")?;
         let request = self.prepare_request(request).await?;
 
@@ -496,11 +499,47 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("container sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "container sandbox backend does not support suspension".into(),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.restore_snapshot(request, payload)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+
+    async fn terminate(&self, request: SandboxRequest) -> Result<()> {
+        if let Some(entry) = self
+            .warm_sandboxes
+            .lock()
+            .await
+            .remove(request.sandbox_id.as_str())
+        {
+            cleanup_named_container(&self.container_bin, self.cli, &entry.name).await?;
+        }
+        for container in find_sandbox_containers_for_id(
+            &self.container_bin,
+            self.cli,
+            request.sandbox_id.as_str(),
+        )
+        .await?
+        {
+            cleanup_named_container(&self.container_bin, self.cli, &container).await?;
+        }
+        Ok(())
+    }
+}
+
+impl CliContainerSandboxBackend {
+    async fn restore_snapshot(
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
@@ -554,27 +593,6 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
             warm_sandboxes: Arc::clone(&self.warm_sandboxes),
         }))
     }
-
-    async fn terminate(&self, request: SandboxRequest) -> Result<()> {
-        if let Some(entry) = self
-            .warm_sandboxes
-            .lock()
-            .await
-            .remove(request.sandbox_id.as_str())
-        {
-            cleanup_named_container(&self.container_bin, self.cli, &entry.name).await?;
-        }
-        for container in find_sandbox_containers_for_id(
-            &self.container_bin,
-            self.cli,
-            request.sandbox_id.as_str(),
-        )
-        .await?
-        {
-            cleanup_named_container(&self.container_bin, self.cli, &container).await?;
-        }
-        Ok(())
-    }
 }
 
 struct BorrowedDockerSandboxHandle {
@@ -621,8 +639,11 @@ impl ManagedSandboxHandle for BorrowedDockerSandboxHandle {
         })
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!("borrowed Docker containers cannot be snapshotted")
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "borrowed Docker containers cannot be snapshotted".into(),
+        }
+        .into())
     }
 }
 
@@ -666,10 +687,11 @@ impl ManagedSandboxHandle for OneShotSandboxHandle {
         bail!("one-shot sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!(
-            "snapshot is not supported for one-shot sandboxes (set a positive idle_ttl to enable warm sandbox + snapshotting)"
-        )
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "snapshot is not supported for one-shot sandboxes (set a positive idle_ttl to enable warm sandbox + snapshotting)".into(),
+        }
+        .into())
     }
 }
 
@@ -766,7 +788,15 @@ impl ManagedSandboxHandle for WarmSandboxHandle {
         Ok(SandboxAttachment::DockerContainer { container_id })
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        self.capture_snapshot(kind)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+impl WarmSandboxHandle {
+    async fn capture_snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
         ensure!(
             kind == crate::SnapshotKind::Filesystem,
             "container backend does not support full execution snapshots"
@@ -838,15 +868,21 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         &[]
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("local process")?;
-        ensure!(
-            request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
-            "local process does not support policy.networking.disabled"
-        );
-        if !request.spec.durable_file_systems.is_empty() {
-            bail!("local-process sandbox backend does not support durable file systems");
-        }
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        (|| -> Result<()> {
+            request.spec.policy.validate_basic("local process")?;
+            ensure!(
+                request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
+                "local process does not support policy.networking.disabled"
+            );
+            if !request.spec.durable_file_systems.is_empty() {
+                bail!("local-process sandbox backend does not support durable file systems");
+            }
+            Ok(())
+        })()?;
         Ok(Arc::new(LocalProcessSandboxHandle {
             id: format!("local:{}", request.sandbox_id.as_str()),
             request,
@@ -865,16 +901,23 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("local-process sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "local-process sandbox backend does not support suspension".into(),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("restore-from-snapshot is not supported by the local-process sandbox backend")
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "restore-from-snapshot is not supported by the local-process sandbox backend"
+                .into(),
+        }
+        .into())
     }
 
     async fn terminate(&self, _request: SandboxRequest) -> Result<()> {
@@ -949,13 +992,13 @@ impl ManagedSandboxHandle for LocalProcessSandboxHandle {
         bail!("local-process sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         // The local-process backend runs commands directly on the host; there
         // is no container filesystem to capture. A meaningful implementation
         // would tar up the writable mounts, but the semantics differ enough
         // from container snapshots (no isolated filesystem, no rollback of
         // host-side state) that we don't pretend to support it.
-        bail!("snapshot is not supported by the local-process sandbox backend")
+        Err(anyhow!("snapshot is not supported by the local-process sandbox backend").into())
     }
 }
 

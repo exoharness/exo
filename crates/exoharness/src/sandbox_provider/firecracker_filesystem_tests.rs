@@ -134,6 +134,88 @@ fn imported_base_cache_hit_does_not_read_the_supplied_image() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires root and TMPDIR on a reflink-capable filesystem"]
+async fn filesystem_import_budget_rejection_cleans_up_and_allows_retry() -> Result<()> {
+    let source = tempfile::tempdir()?;
+    let source_config = FirecrackerConfig {
+        state_root: source.path().into(),
+        ..Default::default()
+    };
+    let payload = fixture(&source_config)?;
+    let files = open_capture(&source_config, payload.clone())?;
+    let mut manifest = FilesystemManifest::from_payload(&payload)?;
+    manifest.base_image_sha256 =
+        crate::sandbox_provider::firecracker_image::sha256_hex_of_file(&files.base_image)?;
+    let payload = manifest.payload()?;
+
+    let target = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: target.path().into(),
+        snapshot_budget_bytes: 1,
+        ..Default::default()
+    };
+    let captures = manifest.directory(&config).parent().unwrap().to_path_buf();
+    let mut backend = FirecrackerSandboxBackend {
+        external_proxy: None,
+        shared: super::super::tests::test_shared(config.clone(), HashMap::new())?,
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    let error = backend
+        .import_filesystem_snapshot(
+            payload.clone(),
+            files.base_image.clone(),
+            files.disks.clone(),
+        )
+        .await
+        .unwrap_err()
+        .context("importing filesystem snapshot");
+    let accounted_bytes = match error {
+        crate::SandboxError::Failure {
+            failure:
+                crate::SandboxFailure::SnapshotBudgetExhausted {
+                    limit_bytes,
+                    accounted_bytes,
+                },
+            ..
+        } => {
+            assert_eq!(limit_bytes, 1);
+            assert!(accounted_bytes > limit_bytes);
+            accounted_bytes
+        }
+        other => panic!("expected snapshot capacity error, got {other:?}"),
+    };
+    // An empty namespace proves neither a published capture nor staging files remain.
+    assert_eq!(fs::read_dir(&captures)?.count(), 0);
+    assert_eq!(retained_snapshot_bytes(&config)?, 0);
+
+    Arc::get_mut(&mut backend.shared)
+        .context("import retained the backend state")?
+        .config
+        .snapshot_budget_bytes = accounted_bytes;
+    let imported = backend
+        .import_filesystem_snapshot(payload, files.base_image.clone(), files.disks.clone())
+        .await?;
+    let imported_manifest = FilesystemManifest::from_payload(&imported)?;
+    assert_ne!(imported_manifest.key, manifest.key);
+    assert_eq!(fs::read_dir(&captures)?.count(), 1);
+    let imported_files = backend.filesystem_snapshot_files(imported.clone()).await?;
+    assert_eq!(
+        fs::read(&imported_files.base_image)?,
+        fs::read(&files.base_image)?
+    );
+    assert_eq!(imported_files.disks.len(), files.disks.len());
+    for (imported, source) in imported_files.disks.iter().zip(&files.disks) {
+        assert_eq!(fs::read(imported)?, fs::read(source)?);
+    }
+    assert_eq!(retained_snapshot_bytes(&config)?, accounted_bytes);
+    drop(imported_files);
+    backend.delete_snapshot(imported).await?;
+    assert_eq!(fs::read_dir(captures)?.count(), 0);
+    Ok(())
+}
+
 #[test]
 fn restored_disks_leave_previous_contents_until_commit() -> Result<()> {
     let temp = tempfile::tempdir()?;

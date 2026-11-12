@@ -19,13 +19,13 @@ use reqwest::StatusCode;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload,
     WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
 use crate::sandbox_provider::{process_bridge, shell_quote};
+use crate::{SandboxAttachment, SandboxResult};
 
 pub const DEFAULT_VERCEL_API_URL: &str = "https://vercel.com/api";
 
@@ -172,23 +172,10 @@ impl VercelSandboxBackend {
             .await
             .context("decoding Vercel create-sandbox response")
     }
-}
-
-#[async_trait]
-impl ManagedSandboxBackend for VercelSandboxBackend {
-    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
-        crate::SandboxBackendCapabilities::default()
-    }
-
-    fn is_local(&self) -> bool {
-        false
-    }
-
-    fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
-        &[]
-    }
-
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire_sandbox(
+        &self,
+        request: SandboxRequest,
+    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         ensure!(
             request.spec.tcp_ports.iter().all(|port| *port != 0),
             "sandbox TCP ports must be nonzero"
@@ -243,6 +230,30 @@ impl ManagedSandboxBackend for VercelSandboxBackend {
             backend: self.handle_backend(),
         }))
     }
+}
+
+#[async_trait]
+impl ManagedSandboxBackend for VercelSandboxBackend {
+    fn capabilities(&self) -> crate::SandboxBackendCapabilities {
+        crate::SandboxBackendCapabilities::default()
+    }
+
+    fn is_local(&self) -> bool {
+        false
+    }
+
+    fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
+        &[]
+    }
+
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.acquire_sandbox(request)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
 
     async fn attach(
         &self,
@@ -256,16 +267,22 @@ impl ManagedSandboxBackend for VercelSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("Vercel sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "Vercel sandbox backend does not support suspension".into(),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("restoring a Vercel sandbox from a snapshot is not implemented yet");
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "restoring a Vercel sandbox from a snapshot is not implemented yet".into(),
+        }
+        .into())
     }
 }
 
@@ -324,8 +341,11 @@ impl ManagedSandboxHandle for VercelSandboxHandle {
         bail!("Vercel sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!("Vercel sandbox snapshots are not implemented yet");
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "Vercel sandbox snapshots are not implemented yet".into(),
+        }
+        .into())
     }
 }
 

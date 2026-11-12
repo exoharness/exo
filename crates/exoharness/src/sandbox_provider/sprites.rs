@@ -26,12 +26,12 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use url::Url;
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload, WARM_SANDBOX_KEY_LABEL,
     WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
+use crate::{SandboxAttachment, SandboxResult};
 
 pub const DEFAULT_SPRITES_API_URL: &str = "https://api.sprites.dev";
 
@@ -181,12 +181,12 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("sprites")?;
-        if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
-            bail!("Sprites does not support policy.networking.disabled");
-        }
-        reject_host_mounts(&request)?;
+        reject_unsupported_request(&request)?;
         let sprite_name = sprite_name_for_request(&request);
         self.ensure_sprite(&sprite_name, &request).await?;
         Ok(Arc::new(SpritesSandboxHandle {
@@ -209,20 +209,32 @@ impl ManagedSandboxBackend for SpritesSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("Sprites sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "Sprites sandbox backend does not support suspension".into(),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.restore_snapshot(request, payload)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+impl SpritesSandboxBackend {
+    async fn restore_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("sprites")?;
-        if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
-            bail!("Sprites does not support policy.networking.disabled");
-        }
-        reject_host_mounts(&request)?;
+        reject_unsupported_request(&request)?;
         if payload.format != SnapshotFormat::SpritesRef {
             bail!(
                 "Sprites sandbox backend can only restore from {}, got {}",
@@ -326,12 +338,10 @@ impl ManagedSandboxHandle for SpritesSandboxHandle {
         bail!("Sprites sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "sprites does not support the requested snapshot kind"
-        );
-        save_checkpoint_via_backend(&self.backend, &self.sprite_name).await
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        save_checkpoint_via_backend(&self.backend, &self.sprite_name, kind)
+            .await
+            .map_err(crate::SandboxError::from)
     }
 }
 
@@ -666,7 +676,12 @@ fn parse_exec_response(body: &str) -> Result<(i32, String, String)> {
 async fn save_checkpoint_via_backend(
     backend: &SpritesBackendHandle,
     sprite_name: &str,
+    kind: crate::SnapshotKind,
 ) -> Result<SnapshotPayload> {
+    ensure!(
+        kind == crate::SnapshotKind::Filesystem,
+        "sprites does not support the requested snapshot kind"
+    );
     let body = serde_json::json!({ "comment": "exo snapshot" });
     let response = backend
         .client
@@ -776,7 +791,11 @@ fn sprite_name_for_request(request: &SandboxRequest) -> String {
     format!("exo-{:016x}", hasher.finish())
 }
 
-fn reject_host_mounts(request: &SandboxRequest) -> Result<()> {
+fn reject_unsupported_request(request: &SandboxRequest) -> Result<()> {
+    if request.spec.policy.networking == crate::SandboxNetworkPolicy::Disabled {
+        bail!("Sprites does not support policy.networking.disabled");
+    }
+
     if request.spec.mounts.is_empty() {
         return Ok(());
     }

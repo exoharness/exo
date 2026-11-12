@@ -23,12 +23,12 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     DEFAULT_SANDBOX_IMAGE, ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand,
     SandboxCommandOutput, SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat,
     SnapshotPayload, WARM_SANDBOX_KEY_LABEL, WARM_SANDBOX_SPEC_HASH_LABEL, sandbox_spec_hash,
 };
+use crate::{SandboxAttachment, SandboxResult};
 
 pub const DEFAULT_E2B_API_URL: &str = "https://api.e2b.app";
 pub const DEFAULT_E2B_ENVD_PORT: u16 = 49_983;
@@ -237,7 +237,10 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         &CONSUMABLE_SNAPSHOT_FORMATS
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         request.spec.policy.validate_basic("e2b")?;
         reject_host_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
@@ -289,11 +292,26 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("E2B sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "E2B sandbox backend does not support suspension".into(),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
+        &self,
+        request: SandboxRequest,
+        payload: SnapshotPayload,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.restore_snapshot(request, payload)
+            .await
+            .map_err(crate::SandboxError::from)
+    }
+}
+
+impl E2bSandboxBackend {
+    async fn restore_snapshot(
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
@@ -405,13 +423,11 @@ impl ManagedSandboxHandle for E2bSandboxHandle {
         bail!("E2B sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Full,
-            "e2b does not support the requested snapshot kind"
-        );
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         let base_template = resolve_template_id(&self.request.spec, &self.backend.template_id);
-        save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template).await
+        save_snapshot_via_backend(&self.backend, &self.sandbox_id, base_template, kind)
+            .await
+            .map_err(crate::SandboxError::from)
     }
 }
 
@@ -1057,7 +1073,12 @@ async fn save_snapshot_via_backend(
     backend: &E2bBackendHandle,
     sandbox_id: &str,
     base_template: String,
+    kind: crate::SnapshotKind,
 ) -> Result<SnapshotPayload> {
+    ensure!(
+        kind == crate::SnapshotKind::Full,
+        "e2b does not support the requested snapshot kind"
+    );
     let snapshot_name = format!("exo-snap-{}", Uuid::new_v4().simple());
     let body = E2bSnapshotCreateRequest {
         name: Some(snapshot_name),

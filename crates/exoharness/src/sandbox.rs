@@ -1,4 +1,4 @@
-use crate::{DurableFileSystem, ResourceScope, SandboxAttachment, SandboxId};
+use crate::{DurableFileSystem, ResourceScope, SandboxAttachment, SandboxId, SandboxResult};
 pub use crate::{EgressPolicy, SandboxNetworkPolicy};
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -285,10 +285,16 @@ pub trait ManagedSandboxHandle: Send + Sync {
 
     /// Capture the requested state and leave the source usable. Reject unsupported
     /// kinds or writable mounts before capture; never silently omit filesystem state.
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload>;
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload>;
 
-    async fn snapshot_template(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!("sandbox handle does not support template capture")
+    async fn snapshot_template(
+        &self,
+        _kind: crate::SnapshotKind,
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "sandbox handle does not support template capture".into(),
+        }
+        .into())
     }
 
     async fn delete_snapshot(&self, _payload: SnapshotPayload) -> Result<()> {
@@ -435,7 +441,10 @@ pub trait ManagedSandboxBackend: Send + Sync {
 
     /// Enforce `request.spec.policy` before returning a usable handle. Attach,
     /// restore, and fork must provide the same guarantee or reject the policy.
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>>;
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>>;
 
     /// Connect to a published port. Backends whose acquisition changes lifecycle
     /// ownership should inspect the existing sandbox without restarting it.
@@ -516,7 +525,7 @@ pub trait ManagedSandboxBackend: Send + Sync {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>>;
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>>;
 
     /// Capture the requested state and release execution resources. Restore it
     /// with acquire_from_snapshot; unsupported kinds must leave the source intact.
@@ -526,7 +535,7 @@ pub trait ManagedSandboxBackend: Send + Sync {
         &self,
         request: SandboxRequest,
         kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload>;
+    ) -> SandboxResult<SnapshotPayload>;
 
     /// Permanently destroy the sandbox addressed by `request` and any retained
     /// backend state. Unlike stopping a handle, termination must be idempotent.

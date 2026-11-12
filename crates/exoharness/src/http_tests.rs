@@ -13,8 +13,8 @@ use crate::{
     ExoHarness, HttpExoHarness, ManagedSandboxBackend, ManagedSandboxHandle, RestoreSandboxRequest,
     RunInSandboxRequest, SandboxAttachment, SandboxCommand, SandboxCommandOutput,
     SandboxProcessEvent, SandboxProcessEventQuery, SandboxProcessParts, SandboxProcessStatus,
-    SandboxProcessStdin, SandboxProvider, SandboxRequest, SnapshotFormat, SnapshotPayload,
-    StartSandboxProcessRequest, StartSandboxRequest, WaitSandboxProcessRequest,
+    SandboxProcessStdin, SandboxProvider, SandboxRequest, SandboxResult, SnapshotFormat,
+    SnapshotPayload, StartSandboxProcessRequest, StartSandboxRequest, WaitSandboxProcessRequest,
     WriteSandboxProcessInputRequest, serve_exoharness_http_listener,
 };
 
@@ -550,7 +550,7 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
     async fn acquire(
         &self,
         _request: SandboxRequest,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         Ok(Arc::new(SnapshotTestSandboxHandle))
     }
 
@@ -566,15 +566,15 @@ impl ManagedSandboxBackend for SnapshotTestSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> crate::Result<SnapshotPayload> {
-        bail!("snapshot test backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("snapshot test backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> crate::Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         assert_eq!(payload.bytes, Bytes::from_static(b"snapshot"));
         Ok(Arc::new(SnapshotTestSandboxHandle))
     }
@@ -604,7 +604,7 @@ impl ManagedSandboxHandle for SnapshotTestSandboxHandle {
         bail!("snapshot test handle does not support detachment")
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> crate::Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         assert_eq!(kind, crate::SnapshotKind::Full);
         Ok(SnapshotPayload {
             format: SnapshotFormat::DaytonaRef,

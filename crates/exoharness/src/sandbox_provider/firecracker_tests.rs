@@ -170,7 +170,11 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
         },
         egress_proxy,
     };
-    assert!(prepare_request(request(limited.clone(), None)).is_err());
+    let error = prepare_request(request(limited.clone(), None)).unwrap_err();
+    assert!(matches!(
+        error.failure(),
+        Some(crate::SandboxFailure::InvalidRequest { .. })
+    ));
     assert!(prepare_request(request(SandboxNetworkPolicy::Disabled, Some(proxy))).is_err());
     for policy in [limited, SandboxNetworkPolicy::Unrestricted] {
         let rules = network_firewall_rules(&config, &network, &policy.into(), Some(proxy)).unwrap();
@@ -310,11 +314,37 @@ fn resource_slot_claims_are_atomic_and_owner_checked() {
 }
 
 #[test]
+fn invalid_snapshot_payloads_preserve_failure_categories() {
+    let error = |format| {
+        FirecrackerSnapshotManifest::from_payload(SnapshotPayload {
+            format,
+            bytes: Bytes::from_static(b"invalid snapshot"),
+        })
+        .unwrap_err()
+    };
+    assert!(matches!(
+        error(SnapshotFormat::FirecrackerHostRef).failure(),
+        Some(crate::SandboxFailure::SnapshotUnavailable { .. })
+    ));
+    assert!(matches!(
+        error(SnapshotFormat::from_static("unknown-format")).failure(),
+        Some(crate::SandboxFailure::InvalidRequest { .. })
+    ));
+}
+
+#[test]
 fn machine_capacity_allows_reuse_but_rejects_an_additional_vm() {
     let max_machines = NonZeroUsize::new(2).unwrap();
     ensure_machine_capacity(max_machines, 1, false).unwrap();
     ensure_machine_capacity(max_machines, 2, true).unwrap();
-    assert!(ensure_machine_capacity(max_machines, 2, false).is_err());
+    let error = ensure_machine_capacity(max_machines, 2, false).unwrap_err();
+    assert!(matches!(
+        error.failure(),
+        Some(crate::SandboxFailure::VmCapacityExhausted {
+            limit: 2,
+            occupied: 2
+        })
+    ));
 }
 
 #[test]
@@ -879,6 +909,108 @@ fn persistent_snapshot_expiry_reclaims_files() {
 }
 
 #[test]
+fn snapshot_budget_config_preserves_default_and_serializes_overrides() {
+    let json = r#"{
+        "firecracker_bin": "/usr/local/bin/firecracker",
+        "jailer_bin": "/usr/local/bin/jailer",
+        "kernel": "/kernel",
+        "initramfs": "/initramfs",
+        "state_root": "/state",
+        "image_size_gib": 8,
+        "workspace_size_gib": 20,
+        "jailer_uid_base": 100000,
+        "dns_server": "1.1.1.1",
+        "allowed_egress_cidrs": [],
+        "allowed_local_images": [],
+        "allowed_registries": [],
+        "network_bytes_per_second": 104857600
+    }"#;
+    let mut config: FirecrackerConfig = serde_json::from_str(json).unwrap();
+    assert_eq!(config.snapshot_budget_bytes, 64 * 1024 * 1024 * 1024);
+    assert_eq!(
+        config.snapshot_budget_bytes,
+        FirecrackerConfig::default().snapshot_budget_bytes
+    );
+    config.snapshot_budget_bytes = 128 * 1024 * 1024 * 1024;
+    let round_trip: FirecrackerConfig =
+        serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+    assert_eq!(round_trip, config);
+}
+
+#[test]
+fn snapshot_budget_is_shared_and_uses_the_configured_limit() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut config = FirecrackerConfig {
+        state_root: directory.path().to_path_buf(),
+        ..Default::default()
+    };
+    let mut allocated = 0;
+    for path in [
+        config.state_root.join("snapshots/template/memory"),
+        config
+            .state_root
+            .join("filesystem-snapshots/sandbox/capture/overlay.ext4"),
+        jail_dir(&config, "fc-0000000000000000-00000000").join("snapshot-memory"),
+    ] {
+        fs::create_dir_all(path.parent().unwrap())?;
+        let mut file = File::create(path)?;
+        file.write_all(&[1; 4096])?;
+        file.sync_all()?;
+        allocated += file.metadata()?.blocks() * 512;
+    }
+    assert!(allocated > 0);
+    assert_eq!(retained_snapshot_bytes(&config)?, allocated);
+    config.snapshot_budget_bytes = allocated - 1;
+    let error = enforce_snapshot_budget(&config).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Firecracker snapshot storage budget exhausted; delete unused snapshots"
+    );
+    let error = error
+        .context("capturing a snapshot")
+        .context("outer operation");
+    match error {
+        crate::SandboxError::Failure {
+            failure:
+                crate::SandboxFailure::SnapshotBudgetExhausted {
+                    limit_bytes,
+                    accounted_bytes,
+                },
+            ..
+        } => {
+            assert_eq!(limit_bytes, allocated - 1);
+            assert_eq!(accounted_bytes, allocated);
+        }
+        other => panic!("expected snapshot capacity error, got {other:?}"),
+    }
+    config.snapshot_budget_bytes = allocated;
+    enforce_snapshot_budget(&config)?;
+    Ok(())
+}
+
+#[test]
+fn snapshot_budget_preserves_accounting_io_errors() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: directory.path().into(),
+        snapshot_budget_bytes: 0,
+        ..Default::default()
+    };
+    fs::write(
+        config.state_root.join("filesystem-snapshots"),
+        b"not a directory",
+    )?;
+    let error = enforce_snapshot_budget(&config).unwrap_err();
+    match error {
+        crate::SandboxError::Internal(error) => {
+            assert!(error.downcast_ref::<std::io::Error>().is_some())
+        }
+        other => panic!("expected internal accounting error, got {other:?}"),
+    }
+    Ok(())
+}
+
+#[test]
 fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     let directory = tempfile::tempdir().unwrap();
     fs::create_dir(directory.path().join("snapshots")).unwrap();
@@ -905,7 +1037,9 @@ fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     let second = config.state_root.join("snapshots").join("second");
     fs::create_dir(&second).unwrap();
     let mut second_memory = File::create(second.join("memory")).unwrap();
-    second_memory.set_len(MAX_SNAPSHOT_BYTES).unwrap();
+    second_memory
+        .set_len(DEFAULT_SNAPSHOT_BUDGET_BYTES)
+        .unwrap();
     second_memory.write_all(&[2; 4096]).unwrap();
     second_memory.sync_all().unwrap();
     assert!(enforce_snapshot_budget(&config).is_ok());
@@ -927,7 +1061,7 @@ fn snapshot_budget_counts_allocated_blocks_once_per_inode() {
     assert!(enforce_snapshot_budget(&config).is_ok());
 }
 
-fn test_shared(
+pub(super) fn test_shared(
     config: FirecrackerConfig,
     warm_machines: HashMap<SandboxId, WarmMachineEntry>,
 ) -> Result<Arc<Shared>> {
@@ -1070,8 +1204,11 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
         .err()
         .context("host bind mounts must not restore")?;
     assert_eq!(
-        error.to_string(),
-        "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+        error.failure(),
+        Some(&crate::SandboxFailure::InvalidRequest {
+            message: "Firecracker does not support host bind mounts; declare a filesystem resource instead"
+                .into(),
+        })
     );
     Ok(())
 }
