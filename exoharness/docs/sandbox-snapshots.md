@@ -383,6 +383,29 @@ The imported base is pinned in the destination image cache. Restored sandboxes
 keep using this cache path after the capture is deleted.
 Exo does not upload to S3 or publish/fence the service's durable checkpoint.
 
+Native integrations can import authenticated, fully materialized files with
+`import_verified_filesystem_snapshot`, avoiding redundant base hashing. The
+caller must verify the base and every disk against trusted metadata and keep
+files stable until import completes. Ordinary and lazy imports verify the base
+before publishing it into the shared cache.
+
+For on-demand storage, `import_lazy_filesystem_snapshot` creates a partial
+reference. Register its block devices and backing files with
+`register_filesystem_disks` before restore. Exo pins the device owners to the
+restored VM and checks device generations and backing-file identities before
+reuse or capture. Dropping the registration guard prevents future restores;
+the running VM keeps its device owners until termination. A controller exiting
+stops its external-disk VMs; recover them from a filesystem checkpoint.
+External backing files are not published as ordinary local volumes; changing
+VM specifications requires filesystem suspend and restore.
+
+Capture calls each disk's hook while the guest is paused. Incomplete captures
+use `firecracker-lazy-filesystem-ref-v1` and require registered disks to boot.
+`FirecrackerFilesystemCapture::complete` reports whether every range was
+materialized. Preserve missing ranges from the authenticated parent; sparse
+holes do not prove zero data. RAM capture and forks reject external disks.
+`link_cached_filesystem_base` pins an immutable cached base into private staging.
+
 RAM templates, filesystem captures, and retained snapshot memory share a budget
 under each `state_root`, configured with `FirecrackerConfig::snapshot_budget_bytes`
 (default: 64 GiB). The CLI accepts `--firecracker-snapshot-budget-bytes` or

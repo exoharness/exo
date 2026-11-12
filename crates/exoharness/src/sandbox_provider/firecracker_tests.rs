@@ -377,6 +377,7 @@ fn capacity_scan_counts_processes_instead_of_manifests() {
         spec_hash: "live".to_string(),
         runtime: test_runtime(),
         memory_grant_mib: None,
+        external_disks: false,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -424,6 +425,7 @@ fn manifest_publish_does_not_replace_an_existing_machine() {
         spec_hash: "first".to_string(),
         runtime: test_runtime(),
         memory_grant_mib: None,
+        external_disks: false,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -456,6 +458,7 @@ fn persisted_lease_expires_machine_after_idle_ttl() {
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
         memory_grant_mib: None,
+        external_disks: false,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -548,6 +551,7 @@ fn snapshot_gc_reaps_only_unreferenced_fork_templates() {
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
             memory_grant_mib: None,
+            external_disks: false,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -615,6 +619,7 @@ fn snapshot_gc_does_not_delete_fork_between_capture_and_manifest_publish() {
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
             memory_grant_mib: None,
+            external_disks: false,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -663,6 +668,7 @@ fn fork_snapshots_are_unique_per_target() {
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
         memory_grant_mib: None,
+        external_disks: false,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -695,6 +701,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
         memory_grant_mib: None,
+        external_disks: false,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 7,
         network_enabled: true,
@@ -724,6 +731,55 @@ fn explicit_snapshots_are_unique_and_reusable() {
     assert_eq!(decoded.format_version, SNAPSHOT_FORMAT_VERSION);
     assert_eq!(decoded.source_network_slot, 7);
     validate_snapshot_key(&decoded.template_key).unwrap();
+}
+
+#[test]
+fn ram_capture_rejects_external_disks_before_touching_the_source() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: root.path().into(),
+        ..Default::default()
+    };
+    let source = MachineRecord {
+        machine_id: "fc-0123456789abcdef-01234567".into(),
+        spec_hash: "spec".into(),
+        runtime: test_runtime(),
+        memory_grant_mib: None,
+        external_disks: true,
+        resolved_image: "image".into(),
+        slot: 1,
+        network_enabled: false,
+        workspace_id: None,
+        resource_paths: vec![],
+        idle_ttl_seconds: Some(60),
+        snapshot_template: None,
+        snapshot_network_slot: None,
+    };
+    let jail = jail_root(&config, &source.machine_id);
+    fs::create_dir_all(&jail)?;
+    fs::write(jail.join("overlay.ublk"), b"external disk marker")?;
+    let error = capture_snapshot_template(
+        &config,
+        &source,
+        &"a".repeat(64),
+        SnapshotTemplateLifecycle::Snapshot,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+    );
+    assert_eq!(
+        fs::read(jail.join("overlay.ublk"))?,
+        b"external disk marker"
+    );
+    assert!(
+        !jail_dir(&config, &source.machine_id)
+            .join("snapshot-pending")
+            .exists()
+    );
+    assert!(!config.state_root.join("snapshots").exists());
+    Ok(())
 }
 
 #[tokio::test]
@@ -1046,6 +1102,8 @@ pub(super) fn test_shared(
         capacity_gate: Mutex::new(()),
         starting_machines: Arc::new(StdMutex::new(HashSet::new())),
         base_image_digests: StdMutex::new(HashMap::new()),
+        filesystem_disks: StdMutex::new(HashMap::new()),
+        active_filesystem_disks: StdMutex::new(HashMap::new()),
     }))
 }
 
@@ -1265,6 +1323,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
         spec_hash: "test".into(),
         runtime: test_runtime(),
         memory_grant_mib: None,
+        external_disks: false,
         resolved_image: "/images/test.ext4".into(),
         slot: 1,
         network_enabled: false,
@@ -1355,6 +1414,7 @@ impl DurableStopFixture {
             spec_hash: sandbox_spec_hash(&request.spec),
             runtime: test_runtime(),
             memory_grant_mib: None,
+            external_disks: false,
             resolved_image: request.spec.image.clone(),
             slot: 1,
             network_enabled: false,
@@ -1673,6 +1733,7 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
         spec_hash: "resources".into(),
         runtime: test_runtime(),
         memory_grant_mib: None,
+        external_disks: false,
         resolved_image: "/base.ext4".into(),
         slot: 1,
         network_enabled: false,
