@@ -222,12 +222,12 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         proxy: T,
         build: B,
         terminate: impl Future<Output = Result<()>>,
-    ) -> Result<Arc<H>>
+    ) -> crate::SandboxResult<Arc<H>>
     where
         T: FnOnce(State, CancellationToken) -> TF,
         TF: Future<Output = Result<P>>,
         B: FnOnce(Option<Arc<SandboxEgress<P>>>) -> BF,
-        BF: Future<Output = Result<H>>,
+        BF: Future<Output = crate::SandboxResult<H>>,
     {
         // Serialize this sandbox's acquire/terminate operations; other sandboxes
         // can acquire independently.
@@ -246,14 +246,18 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                 && egress.is_open()
                 && handle.is_running().await? == Some(true)
             {
-                ensure!(
-                    mode == AcquisitionMode::Acquire,
-                    "snapshot restore target already has an allocation"
-                );
-                ensure!(
-                    unchanged,
-                    "stop the protected sandbox before changing its configuration"
-                );
+                if mode != AcquisitionMode::Acquire {
+                    return Err(anyhow::anyhow!(
+                        "snapshot restore target already has an allocation"
+                    )
+                    .into());
+                }
+                if !unchanged {
+                    return Err(anyhow::anyhow!(
+                        "stop the protected sandbox before changing its configuration"
+                    )
+                    .into());
+                }
                 return Ok(handle);
             }
             self.remove(&request.sandbox_id).await?;
@@ -263,10 +267,11 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
             return Ok(Arc::new(build(None).await?));
         }
         self.ensure_open()?;
-        ensure!(
-            request.lifecycle.idle_ttl.is_some(),
-            "proxy egress requires a managed sandbox lifecycle"
-        );
+        if request.lifecycle.idle_ttl.is_none() {
+            return Err(
+                anyhow::anyhow!("proxy egress requires a managed sandbox lifecycle").into(),
+            );
+        }
         let identity = EgressIdentity {
             sandbox_id: request.sandbox_id.clone(),
             scope: request.scope,
@@ -354,8 +359,8 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
     pub(crate) async fn suspend<T>(
         &self,
         id: &str,
-        suspend: impl Future<Output = Result<T>>,
-    ) -> Result<T> {
+        suspend: impl Future<Output = crate::SandboxResult<T>>,
+    ) -> crate::SandboxResult<T> {
         let _guard = self.lock(id).await;
         let result = suspend.await?;
         if let Err(error) = self.remove(id).await {
@@ -383,12 +388,12 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         transport: T,
         build: B,
         terminate: impl Future<Output = Result<()>>,
-    ) -> Result<Arc<H>>
+    ) -> crate::SandboxResult<Arc<H>>
     where
         T: FnOnce(crate::SandboxNetworkPolicy) -> TF,
         TF: Future<Output = Result<Arc<dyn EgressTransport>>>,
         B: FnOnce(Option<Arc<SandboxEgress>>) -> BF,
-        BF: Future<Output = Result<H>>,
+        BF: Future<Output = crate::SandboxResult<H>>,
     {
         let policy = request.spec.policy.networking.clone();
         self.acquire_with_proxy(
@@ -567,7 +572,9 @@ mod tests {
                     None,
                     |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
                     |_| async {
-                        ensure!(!fail_build, "target already allocated");
+                        if fail_build {
+                            return Err(anyhow::anyhow!("target already allocated").into());
+                        }
                         runtime.shutdown();
                         Ok(Handle(Some(true)))
                     },
@@ -615,7 +622,7 @@ mod tests {
             .await?;
         let failure = runtime
             .suspend("one", async {
-                Err::<(), _>(anyhow::anyhow!("capture failed"))
+                Err::<(), crate::SandboxError>(anyhow::anyhow!("capture failed").into())
             })
             .await;
         assert!(failure.is_err());
@@ -624,6 +631,47 @@ mod tests {
         transport.fail_shutdown.store(true, Ordering::SeqCst);
         assert_eq!(runtime.suspend("one", async { Ok(42) }).await?, 42);
         assert!(transport.shutdown_completed.load(Ordering::SeqCst));
+        assert!(runtime.sandboxes().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn acquisition_preserves_typed_capacity_errors() -> Result<()> {
+        let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+        let transport = Arc::new(Transport::default());
+        let terminated = AtomicBool::new(false);
+        let error = runtime
+            .acquire(
+                AcquisitionMode::Acquire,
+                request("capacity"),
+                None,
+                |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                |_| async {
+                    Err(crate::SandboxFailure::VmCapacityExhausted {
+                        limit: 2,
+                        occupied: 2,
+                    }
+                    .into())
+                },
+                async {
+                    terminated.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+            .await
+            .err()
+            .expect("capacity rejection");
+        assert!(matches!(
+            error,
+            crate::SandboxError::Failure {
+                failure: crate::SandboxFailure::VmCapacityExhausted {
+                    limit: 2,
+                    occupied: 2
+                },
+                ..
+            }
+        ));
+        assert!(terminated.load(Ordering::SeqCst));
         assert!(runtime.sandboxes().is_empty());
         Ok(())
     }
@@ -642,7 +690,7 @@ mod tests {
                     |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
                     |_| async {
                         running.store(true, Ordering::SeqCst);
-                        anyhow::bail!("TLS trust preparation failed")
+                        Err(anyhow::anyhow!("TLS trust preparation failed").into())
                     },
                     async {
                         assert!(transport.shutdown_completed.load(Ordering::SeqCst));
@@ -692,7 +740,7 @@ mod tests {
             |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
             |_| async {
                 started.send(()).unwrap();
-                released.await?;
+                released.await.map_err(anyhow::Error::from)?;
                 Ok(Handle(Some(true)))
             },
             async {
@@ -757,7 +805,7 @@ mod tests {
             |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
             |_| async {
                 started.send(()).unwrap();
-                released.await?;
+                released.await.map_err(anyhow::Error::from)?;
                 Ok(Handle(Some(true)))
             },
             async { panic!("successful acquisition must not terminate the sandbox") },

@@ -981,11 +981,20 @@ fn snapshot_budget_is_shared_and_uses_the_configured_limit() -> Result<()> {
     let error = error
         .context("capturing a snapshot")
         .context("outer operation");
-    let exhausted = error
-        .downcast_ref::<crate::SnapshotBudgetExhausted>()
-        .context("expected typed snapshot budget error through context")?;
-    assert_eq!(exhausted.limit_bytes, allocated - 1);
-    assert_eq!(exhausted.accounted_bytes, allocated);
+    match error {
+        crate::SandboxError::Failure {
+            failure:
+                crate::SandboxFailure::SnapshotBudgetExhausted {
+                    limit_bytes,
+                    accounted_bytes,
+                },
+            ..
+        } => {
+            assert_eq!(limit_bytes, allocated - 1);
+            assert_eq!(accounted_bytes, allocated);
+        }
+        other => panic!("expected snapshot capacity error, got {other:?}"),
+    }
     config.snapshot_budget_bytes = allocated;
     enforce_snapshot_budget(&config)?;
     Ok(())
@@ -1004,12 +1013,12 @@ fn snapshot_budget_preserves_accounting_io_errors() -> Result<()> {
         b"not a directory",
     )?;
     let error = enforce_snapshot_budget(&config).unwrap_err();
-    assert!(error.downcast_ref::<std::io::Error>().is_some());
-    assert!(
-        error
-            .downcast_ref::<crate::SnapshotBudgetExhausted>()
-            .is_none()
-    );
+    match error {
+        crate::SandboxError::Internal(error) => {
+            assert!(error.downcast_ref::<std::io::Error>().is_some())
+        }
+        other => panic!("expected internal accounting error, got {other:?}"),
+    }
     Ok(())
 }
 

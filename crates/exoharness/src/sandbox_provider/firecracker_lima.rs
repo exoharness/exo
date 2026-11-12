@@ -128,7 +128,7 @@ impl LimaFirecrackerSandboxBackend {
         request: SandboxRequest,
         snapshot: Option<SnapshotPayload>,
         egress: Option<Arc<SandboxEgress>>,
-    ) -> Result<LimaFirecrackerSandboxHandle> {
+    ) -> crate::SandboxResult<LimaFirecrackerSandboxHandle> {
         let restoring = snapshot.is_some();
         let mut handle = self
             .acquire_request(
@@ -149,13 +149,15 @@ impl LimaFirecrackerSandboxBackend {
             .await;
             if let Err(error) = initialized {
                 if !restoring {
-                    return Err(error);
+                    return Err(error.into());
                 }
                 return match self.terminate_request(request).await {
-                    Ok(()) => Err(error),
-                    Err(cleanup) => Err(error.context(format!(
-                        "sandbox initialization cleanup failed: {cleanup:#}"
-                    ))),
+                    Ok(()) => Err(error.into()),
+                    Err(cleanup) => Err(error
+                        .context(format!(
+                            "sandbox initialization cleanup failed: {cleanup:#}"
+                        ))
+                        .into()),
                 };
             }
             handle.egress = Some(egress);
@@ -167,7 +169,7 @@ impl LimaFirecrackerSandboxBackend {
         &self,
         request: FirecrackerRequest,
         snapshot: Option<SnapshotPayload>,
-    ) -> Result<LimaFirecrackerSandboxHandle> {
+    ) -> crate::SandboxResult<LimaFirecrackerSandboxHandle> {
         // A one-shot Firecracker handle destroys its VM after the command. Do
         // not eagerly acquire it here and then acquire a second VM when the
         // command crosses the bridge.
@@ -204,9 +206,12 @@ impl LimaFirecrackerSandboxBackend {
             source_ipv4,
         } = response
         else {
-            bail!("Firecracker Lima bridge returned the wrong response to acquire");
+            return Err(anyhow::anyhow!(
+                "Firecracker Lima bridge returned the wrong response to acquire"
+            )
+            .into());
         };
-        self.bound_handle(request, id, provider_state, effective_image, source_ipv4)
+        Ok(self.bound_handle(request, id, provider_state, effective_image, source_ipv4)?)
     }
 
     pub async fn new(config: FirecrackerConfig, lima: FirecrackerLimaConfig) -> Result<Self> {
@@ -240,7 +245,7 @@ impl LimaFirecrackerSandboxBackend {
     async fn request(
         &self,
         request: FirecrackerBridgeRequest,
-    ) -> Result<FirecrackerBridgeResponse> {
+    ) -> crate::SandboxResult<FirecrackerBridgeResponse> {
         self.bridge.request(request).await
     }
 
@@ -364,7 +369,6 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
             )
             .await
             .map(|handle| handle as Arc<dyn crate::ManagedSandboxHandle>)
-            .map_err(crate::SandboxError::from)
     }
 
     async fn attach(
@@ -404,11 +408,10 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
                 };
                 Ok(SnapshotPayload {
                     format,
-                    bytes: BASE64.decode(payload)?.into(),
+                    bytes: BASE64.decode(payload).map_err(anyhow::Error::from)?.into(),
                 })
             })
             .await
-            .map_err(crate::SandboxError::from)
     }
 
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
@@ -493,7 +496,6 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
             )
             .await
             .map(|handle| handle as Arc<dyn crate::ManagedSandboxHandle>)
-            .map_err(crate::SandboxError::from)
     }
 }
 
@@ -874,7 +876,7 @@ impl LimaBridgeManager {
     async fn request(
         &self,
         request: FirecrackerBridgeRequest,
-    ) -> Result<FirecrackerBridgeResponse> {
+    ) -> crate::SandboxResult<FirecrackerBridgeResponse> {
         self.with_connection(|connection| Box::pin(connection.request(request)))
             .await
     }
@@ -892,10 +894,10 @@ impl LimaBridgeManager {
             .await
     }
 
-    async fn with_connection<T: Send>(
+    async fn with_connection<T: Send, E: From<anyhow::Error> + Send>(
         &self,
-        operation: impl for<'a> FnOnce(&'a LimaBridgeConnection) -> BoxFuture<'a, Result<T>>,
-    ) -> Result<T> {
+        operation: impl for<'a> FnOnce(&'a LimaBridgeConnection) -> BoxFuture<'a, Result<T, E>>,
+    ) -> Result<T, E> {
         let connection = self.connection().await?;
         let result = operation(&connection).await;
         if result.is_err() && connection.is_closed() {
@@ -1050,7 +1052,7 @@ impl LimaBridgeConnection {
     async fn request(
         &self,
         request: FirecrackerBridgeRequest,
-    ) -> Result<FirecrackerBridgeResponse> {
+    ) -> crate::SandboxResult<FirecrackerBridgeResponse> {
         let id = self.next_id();
         let (sender, receiver) = oneshot::channel();
         self.state.insert_request(id, sender)?;
@@ -1062,12 +1064,11 @@ impl LimaBridgeConnection {
             .await
         {
             self.state.remove_request(id);
-            return Err(error);
+            return Err(error.into());
         }
         receiver
             .await
             .map_err(|_| anyhow!("Firecracker Lima bridge dropped request {id}"))?
-            .map_err(anyhow::Error::from)
     }
 
     async fn open_stream(
@@ -1211,9 +1212,12 @@ impl LimaBridgeClientState {
                 result,
                 failure,
             } => {
-                let result = result.map_err(|message| crate::SandboxError {
-                    failure,
-                    source: anyhow!(message),
+                let result = result.map_err(|message| match failure {
+                    Some(failure) => crate::SandboxError::Failure {
+                        failure,
+                        source: anyhow!(message),
+                    },
+                    None => crate::SandboxError::Internal(anyhow!(message)),
                 });
                 let sender = self
                     .requests

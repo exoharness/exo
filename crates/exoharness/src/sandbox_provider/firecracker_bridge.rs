@@ -3,7 +3,7 @@ use std::io::ErrorKind;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -260,7 +260,7 @@ impl BridgeBackendCache {
         &self,
         config: FirecrackerConfig,
         request: FirecrackerRequest,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         let backend = self.backend(config).await?;
         self.acquire_on(&backend, request).await
     }
@@ -269,7 +269,7 @@ impl BridgeBackendCache {
         &self,
         backend: &FirecrackerSandboxBackend,
         request: FirecrackerRequest,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         let endpoints = request.egress_proxy;
         let handle = backend.acquire_request(request).await?;
         self.track_egress(backend, handle.as_ref(), endpoints)
@@ -340,9 +340,7 @@ pub async fn run_firecracker_bridge() -> Result<Option<i32>> {
                 let writer = Arc::clone(&writer);
                 let backends = Arc::clone(&backends);
                 tokio::spawn(async move {
-                    let result = handle_request(*request, &backends)
-                        .await
-                        .map_err(crate::SandboxError::from);
+                    let result = handle_request(*request, &backends).await;
                     let failure = result
                         .as_ref()
                         .err()
@@ -411,15 +409,14 @@ async fn send_stream_input(streams: &BridgeStreams, id: u64, input: BridgeStream
 async fn handle_request(
     request: FirecrackerBridgeRequest,
     backends: &BridgeBackendCache,
-) -> Result<FirecrackerBridgeResponse> {
+) -> crate::SandboxResult<FirecrackerBridgeResponse> {
     match request {
         FirecrackerBridgeRequest::EgressCreate { networking, listen } => {
             let mut listeners = backends.egress.lock().await;
             listeners.retain(|_, listener| !listener.is_closed());
-            ensure!(
-                listeners.len() < MAX_EGRESS_LISTENERS,
-                "too many egress listeners"
-            );
+            if listeners.len() >= MAX_EGRESS_LISTENERS {
+                return Err(anyhow::anyhow!("too many egress listeners").into());
+            }
             let listener: Arc<dyn crate::egress::EgressTransport> =
                 Arc::new(super::firecracker::native_egress_transport(&networking, listen).await?);
             let endpoints = listener.endpoints();
@@ -447,7 +444,9 @@ async fn handle_request(
             }
             Ok(FirecrackerBridgeResponse::Unit)
         }
-        FirecrackerBridgeRequest::EgressAccept { .. } => bail!("egress accept requires a stream"),
+        FirecrackerBridgeRequest::EgressAccept { .. } => {
+            return Err(anyhow::anyhow!("egress accept requires a stream").into());
+        }
 
         FirecrackerBridgeRequest::MaterializeResources { config, request } => {
             let mounts = backends
@@ -574,13 +573,13 @@ async fn handle_request(
                 Err(error) => {
                     if filesystem {
                         return match backend.terminate(cleanup_request).await {
-                            Ok(()) => Err(error),
-                            Err(cleanup) => Err(error.context(format!(
-                                "filesystem restore cleanup failed: {cleanup:#}"
-                            ))),
+                            Ok(()) => Err(error.into()),
+                            Err(cleanup) => Err(error
+                                .context(format!("filesystem restore cleanup failed: {cleanup:#}"))
+                                .into()),
                         };
                     }
-                    return Err(error);
+                    return Err(error.into());
                 }
             };
             Ok(FirecrackerBridgeResponse::Handle {
@@ -630,7 +629,7 @@ async fn handle_request(
                 .await?
                 .delete_snapshot(SnapshotPayload {
                     format,
-                    bytes: BASE64.decode(payload)?.into(),
+                    bytes: BASE64.decode(payload).map_err(anyhow::Error::from)?.into(),
                 })
                 .await?;
             Ok(FirecrackerBridgeResponse::Unit)
@@ -645,7 +644,9 @@ async fn handle_request(
         }
         FirecrackerBridgeRequest::StartProcess { .. }
         | FirecrackerBridgeRequest::ConnectTcp { .. } => {
-            bail!("streaming Firecracker request reached the RPC handler")
+            return Err(
+                anyhow::anyhow!("streaming Firecracker request reached the RPC handler").into(),
+            );
         }
     }
 }

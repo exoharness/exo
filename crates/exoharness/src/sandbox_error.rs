@@ -39,76 +39,94 @@ pub enum SandboxRetryAdvice {
     Unknown,
 }
 
-#[derive(Debug)]
-pub struct SandboxError {
-    pub(crate) failure: Option<SandboxFailure>,
-    pub(crate) source: anyhow::Error,
-}
-
-impl std::fmt::Display for SandboxError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.source, formatter)
-    }
-}
-
-impl std::error::Error for SandboxError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source.source()
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum SandboxError {
+    #[error("{source:#}")]
+    Failure {
+        failure: SandboxFailure,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
 }
 
 pub type SandboxResult<T> = std::result::Result<T, SandboxError>;
 
 impl SandboxError {
     pub fn failure(&self) -> Option<&SandboxFailure> {
-        self.failure.as_ref()
+        match self {
+            Self::Failure { failure, .. } => Some(failure),
+            Self::Internal(_) => None,
+        }
+    }
+
+    #[cfg(any(test, all(not(target_arch = "wasm32"), feature = "firecracker")))]
+    pub(crate) fn context(self, context: impl std::fmt::Display + Send + Sync + 'static) -> Self {
+        match self {
+            Self::Failure { failure, source } => Self::Failure {
+                failure,
+                source: source.context(context),
+            },
+            Self::Internal(source) => Self::Internal(source.context(context)),
+        }
     }
 
     /// Applies to acquisition failures. A capture failure must leave its source intact.
     /// The caller chooses eligible backends and backoff; cleanup failure forbids failover.
     pub fn acquisition_retry(&self) -> SandboxRetryAdvice {
-        match self.failure() {
-            Some(
-                SandboxFailure::VmCapacityExhausted { .. }
-                | SandboxFailure::SnapshotBudgetExhausted { .. }
-                | SandboxFailure::DiskSpaceExhausted { .. },
-            ) => SandboxRetryAdvice::DifferentBackendAfterCleanup,
-            Some(SandboxFailure::SnapshotUnavailable { .. }) => SandboxRetryAdvice::RecoverSnapshot,
-            Some(SandboxFailure::InvalidRequest { .. }) => SandboxRetryAdvice::Never,
-            None => SandboxRetryAdvice::Unknown,
+        match self {
+            Self::Failure {
+                failure:
+                    SandboxFailure::VmCapacityExhausted { .. }
+                    | SandboxFailure::SnapshotBudgetExhausted { .. }
+                    | SandboxFailure::DiskSpaceExhausted { .. },
+                ..
+            } => SandboxRetryAdvice::DifferentBackendAfterCleanup,
+            Self::Failure {
+                failure: SandboxFailure::SnapshotUnavailable { .. },
+                ..
+            } => SandboxRetryAdvice::RecoverSnapshot,
+            Self::Failure {
+                failure: SandboxFailure::InvalidRequest { .. },
+                ..
+            } => SandboxRetryAdvice::Never,
+            Self::Internal(_) => SandboxRetryAdvice::Unknown,
         }
     }
 }
 
 impl From<SandboxFailure> for SandboxError {
     fn from(failure: SandboxFailure) -> Self {
-        Self {
+        Self::Failure {
             source: anyhow::Error::new(failure.clone()),
-            failure: Some(failure),
+            failure,
         }
     }
 }
 
-impl From<anyhow::Error> for SandboxError {
-    fn from(error: anyhow::Error) -> Self {
-        let failure = error
-            .downcast_ref::<Self>()
-            .and_then(Self::failure)
-            .or_else(|| error.downcast_ref::<SandboxFailure>())
-            .cloned();
-        #[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
-        let failure = failure.or_else(|| {
-            error
-                .downcast_ref::<crate::SnapshotBudgetExhausted>()
-                .map(|error| SandboxFailure::SnapshotBudgetExhausted {
-                    limit_bytes: error.limit_bytes,
-                    accounted_bytes: error.accounted_bytes,
-                })
-        });
-        Self {
-            failure,
-            source: error,
+#[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
+impl From<crate::SnapshotBudgetExhausted> for SandboxError {
+    fn from(error: crate::SnapshotBudgetExhausted) -> Self {
+        Self::Failure {
+            failure: SandboxFailure::SnapshotBudgetExhausted {
+                limit_bytes: error.limit_bytes,
+                accounted_bytes: error.accounted_bytes,
+            },
+            source: error.into(),
         }
+    }
+}
+
+impl From<std::io::Error> for SandboxError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<serde_json::Error> for SandboxError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Internal(error.into())
     }
 }
 
@@ -122,14 +140,14 @@ mod tests {
             limit: 4,
             occupied: 4,
         };
-        let error = SandboxError::from(anyhow::Error::new(failure.clone()).context("acquiring VM"));
+        let error = SandboxError::from(failure.clone()).context("acquiring VM");
         assert_eq!(error.failure(), Some(&failure));
         assert!(format!("{error:#}").contains("acquiring VM"));
         assert_eq!(
             error.acquisition_retry(),
             SandboxRetryAdvice::DifferentBackendAfterCleanup
         );
-        let round_trip = SandboxError::from(anyhow::Error::new(error).context("backend operation"));
+        let round_trip = error.context("backend operation");
         assert_eq!(round_trip.failure(), Some(&failure));
         let diagnostic = format!("{round_trip:#}");
         assert!(diagnostic.contains("acquiring VM"));
@@ -139,22 +157,18 @@ mod tests {
     #[test]
     #[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
     fn existing_snapshot_budget_errors_retain_accounting_through_context() {
-        let error = anyhow::Error::new(crate::SnapshotBudgetExhausted {
+        let error = SandboxError::from(crate::SnapshotBudgetExhausted {
             limit_bytes: 100,
             accounted_bytes: 101,
         })
         .context("source resume also failed: connection closed");
-        let error = SandboxError::from(error);
         let failure = SandboxFailure::SnapshotBudgetExhausted {
             limit_bytes: 100,
             accounted_bytes: 101,
         };
         assert_eq!(error.failure(), Some(&failure));
         assert!(format!("{error:#}").contains("source resume also failed: connection closed"));
-        let error = SandboxError::from(
-            anyhow::Error::new(error)
-                .context("deleting failed filesystem capture: permission denied"),
-        );
+        let error = error.context("deleting failed filesystem capture: permission denied");
         assert_eq!(error.failure(), Some(&failure));
         let diagnostic = format!("{error:#}");
         assert!(diagnostic.contains("source resume also failed: connection closed"));

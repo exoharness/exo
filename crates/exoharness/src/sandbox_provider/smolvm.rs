@@ -709,17 +709,19 @@ impl SmolvmSandboxBackend {
                             )?;
                             Ok::<_, anyhow::Error>((request, mounts))
                         })
-                        .await??;
+                        .await
+                        .map_err(anyhow::Error::from)??;
                         request = restored_request;
                         restored_mounts = Some(mounts);
                     }
-                    self.ensure_machine_started(
-                        &machine,
-                        request,
-                        MachineSource::Pack(&pack_path),
-                        egress,
-                    )
-                    .await
+                    Ok(self
+                        .ensure_machine_started(
+                            &machine,
+                            request,
+                            MachineSource::Pack(&pack_path),
+                            egress,
+                        )
+                        .await?)
                 },
                 self.delete_machine_if_present(&machine),
             )
@@ -1045,13 +1047,14 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 |egress| async {
                     let image = self.prepare_image(&request.spec.image).await?;
                     reject_unsupported_spec(&request.spec, &image)?;
-                    self.ensure_machine_started(
-                        &machine,
-                        request.clone(),
-                        MachineSource::Image(&image),
-                        egress,
-                    )
-                    .await
+                    Ok(self
+                        .ensure_machine_started(
+                            &machine,
+                            request.clone(),
+                            MachineSource::Image(&image),
+                            egress,
+                        )
+                        .await?)
                 },
                 self.delete_machine_if_present(&machine),
             )

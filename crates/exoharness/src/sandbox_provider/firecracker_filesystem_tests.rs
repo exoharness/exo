@@ -171,11 +171,21 @@ async fn filesystem_import_budget_rejection_cleans_up_and_allows_retry() -> Resu
         .await
         .unwrap_err()
         .context("importing filesystem snapshot");
-    let exhausted = error
-        .downcast_ref::<crate::SnapshotBudgetExhausted>()
-        .context("expected typed snapshot budget error")?;
-    assert_eq!(exhausted.limit_bytes, 1);
-    assert!(exhausted.accounted_bytes > exhausted.limit_bytes);
+    let accounted_bytes = match error {
+        crate::SandboxError::Failure {
+            failure:
+                crate::SandboxFailure::SnapshotBudgetExhausted {
+                    limit_bytes,
+                    accounted_bytes,
+                },
+            ..
+        } => {
+            assert_eq!(limit_bytes, 1);
+            assert!(accounted_bytes > limit_bytes);
+            accounted_bytes
+        }
+        other => panic!("expected snapshot capacity error, got {other:?}"),
+    };
     // An empty namespace proves neither a published capture nor staging files remain.
     assert_eq!(fs::read_dir(&captures)?.count(), 0);
     assert_eq!(retained_snapshot_bytes(&config)?, 0);
@@ -183,7 +193,7 @@ async fn filesystem_import_budget_rejection_cleans_up_and_allows_retry() -> Resu
     Arc::get_mut(&mut backend.shared)
         .context("import retained the backend state")?
         .config
-        .snapshot_budget_bytes = exhausted.accounted_bytes;
+        .snapshot_budget_bytes = accounted_bytes;
     let imported = backend
         .import_filesystem_snapshot(payload, files.base_image.clone(), files.disks.clone())
         .await?;
@@ -199,7 +209,7 @@ async fn filesystem_import_budget_rejection_cleans_up_and_allows_retry() -> Resu
     for (imported, source) in imported_files.disks.iter().zip(&files.disks) {
         assert_eq!(fs::read(imported)?, fs::read(source)?);
     }
-    assert_eq!(retained_snapshot_bytes(&config)?, exhausted.accounted_bytes);
+    assert_eq!(retained_snapshot_bytes(&config)?, accounted_bytes);
     drop(imported_files);
     backend.delete_snapshot(imported).await?;
     assert_eq!(fs::read_dir(captures)?.count(), 0);
