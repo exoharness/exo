@@ -276,6 +276,30 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(Some(websocket_over(stream, port, path).await?))
     }
 
+    /// The largest resource shape this running sandbox can reach without restart.
+    /// None means live expansion is unsupported or was not enabled at boot.
+    fn live_resource_ceiling(&self) -> Option<crate::SandboxResourceShape> {
+        None
+    }
+
+    /// The committed resource grant, if the backend supports querying it.
+    /// This waits for pending growth and includes grants retained after a failed
+    /// expansion; it does not report the ceiling or actual resident memory.
+    async fn live_resource_grant(&self) -> Result<Option<crate::SandboxResourceShape>> {
+        Ok(None)
+    }
+
+    /// Grow within the boot ceiling after the caller has reserved host capacity.
+    /// Growth may continue after caller cancellation and retain a larger grant
+    /// after an error. Keep the reservation until live_resource_grant reconciles
+    /// it, or the sandbox is terminated. Retrying the same shape is safe.
+    async fn expand_resources(
+        &self,
+        _resources: crate::SandboxResourceShape,
+    ) -> Result<crate::SandboxResourceShape> {
+        bail!("sandbox handle does not support live resource expansion")
+    }
+
     async fn stop(&self) -> Result<()>;
 
     /// Relinquish lifecycle ownership without stopping the sandbox and return

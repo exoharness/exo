@@ -164,6 +164,27 @@ use forks, the guest kernel must additionally be 5.18 or newer with
 `CONFIG_HW_RANDOM_VIRTIO=y` lets the guest draw extra entropy from the
 attached virtio-rng device.
 
+Live memory growth is opt-in through `FirecrackerConfig.memory_ceiling_mib` on
+native Linux, with matching Firecracker/jailer 1.17 or newer and
+`CONFIG_VIRTIO_BALLOON=y`. The even-MiB ceiling uses transparent huge pages and
+must not exceed four times the initial grant. The VM boots at the ceiling;
+acquisition waits for initial balloon inflation. OOM deflation is disabled.
+
+Reserve host capacity before `expand_resources`. Growth raises cgroup limits
+before deflation and waits for balloon convergence. CPU changes, shrinking,
+and over-ceiling requests are rejected. Keep the reservation after an error
+or disconnect until `live_resource_grant` reconciles it, or terminate the VM;
+retrying the same grant is safe. Captures, restores, and RAM forks retain the
+grant separately from the original request's identity.
+
+A larger ceiling costs boot time and guest page metadata even before growth.
+Choose it close to the initial grant. On ARM64 nested KVM, a 512 MiB grant
+acquired in 2.7 s with 460 MiB available without a ceiling, versus 7.9 s and
+143 MiB under an 8 GiB ceiling, and 23.6 s with no available memory under
+16 GiB. Those latter shapes are now rejected. These measurements depend on
+the host and guest kernel; validate production host pressure separately.
+The macOS bridge does not forward live growth; invoke native Linux inside Lima.
+
 Exo enables dirty-page tracking and captures sparse memory snapshots instead
 of writing the entire configured RAM size. Each capture merges changes into a
 private reflink of the machine's latest captured memory, or its original restore

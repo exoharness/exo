@@ -91,6 +91,8 @@ impl FilesystemLayout {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FilesystemManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory_mib: Option<std::num::NonZeroU32>,
     template: bool,
     key: String,
     sandbox_id: SandboxId,
@@ -414,7 +416,7 @@ impl FirecrackerSandboxBackend {
         let reservation = self.shared.reserve_machine_capacity(&id).await?;
         let record = self
             .shared
-            .new_machine_record(&resolved, &id, &spec_hash, None)
+            .new_machine_record(&resolved, &id, &spec_hash, None, manifest.memory_mib)
             .await?;
         let config = self.shared.config.clone();
         let request_for_disks = resolved.clone();
@@ -553,6 +555,11 @@ pub(super) async fn snapshot_filesystem(
         let source_for_capture = source.clone();
         let payload = tokio::task::spawn_blocking(move || {
             let manifest = FilesystemManifest {
+                memory_mib: if source_for_capture.runtime.memory_ceiling_mib.is_some() {
+                    std::num::NonZeroU32::new(balloon::grant(&source_for_capture)?)
+                } else {
+                    None
+                },
                 template,
                 key: new_capture_key(),
                 sandbox_id: request.sandbox_id,
