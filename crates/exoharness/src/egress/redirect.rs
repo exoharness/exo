@@ -89,10 +89,7 @@ impl State {
         {
             return Err(anyhow!("redirect response is too large").into());
         }
-        let (parts, body) = proxy_response(response)?.into_parts();
-        Ok(Response::from_parts(
-            parts,
-            Limited::new(body, MAX_REDIRECT_BODY_BYTES).boxed(),
-        ))
+        Ok(proxy_response(response)?
+            .map(|body| Limited::new(body, MAX_REDIRECT_BODY_BYTES).boxed()))
     }
 }

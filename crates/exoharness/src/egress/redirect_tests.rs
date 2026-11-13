@@ -1,29 +1,15 @@
 use super::*;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub(super) struct DownloadRequest {
-    method: String,
-    host: String,
-    path: String,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
-}
 
 pub(super) async fn respond(request: Request<Incoming>) -> Response<BoxBody<Bytes, Infallible>> {
     let path = request.uri().path();
     if path.starts_with("/redirect/") || path == "/download/chain" {
-        let target = request
-            .uri()
-            .query()
-            .and_then(|query| {
-                url::form_urlencoded::parse(query.as_bytes())
-                    .find(|(name, _)| name == "target")
-                    .map(|(_, value)| value.into_owned())
-            })
-            .unwrap_or_else(|| {
-                "https://public.test/download/echo?signature=upstream-issued".into()
-            });
+        let target =
+            url::form_urlencoded::parse(request.uri().query().unwrap_or_default().as_bytes())
+                .find(|(name, _)| name == "target")
+                .map(|(_, value)| value.into_owned())
+                .unwrap_or_else(|| {
+                    "https://public.test/download/echo?signature=upstream-issued".into()
+                });
         return Response::builder()
             .status(StatusCode::FOUND)
             .header("location", target)
@@ -55,20 +41,18 @@ pub(super) async fn respond(request: Request<Incoming>) -> Response<BoxBody<Byte
         };
         return Response::new(body);
     }
-    let (parts, body) = request.into_parts();
-    let observed = DownloadRequest {
-        method: parts.method.to_string(),
-        host: parts.headers[HOST].to_str().unwrap().into(),
-        path: parts.uri.to_string(),
-        headers: parts
-            .headers
-            .iter()
-            .filter(|(name, _)| !matches!(name.as_str(), "host" | "accept" | "accept-encoding"))
-            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().into()))
-            .collect(),
-        body: body.collect().await.unwrap().to_bytes().to_vec(),
-    };
-    Response::new(Full::new(Bytes::from(serde_json::to_vec(&observed).unwrap())).boxed())
+    assert_eq!(request.method(), Method::GET);
+    assert_eq!(request.headers()[HOST], "public.test");
+    assert!(
+        request
+            .headers()
+            .keys()
+            .all(|name| matches!(name.as_str(), "host" | "accept" | "accept-encoding"))
+    );
+    let path = request.uri().to_string();
+    let body = request.into_body().collect().await.unwrap().to_bytes();
+    assert!(body.is_empty());
+    Response::new(Full::new(Bytes::from(path)).boxed())
 }
 
 struct DownloadPolicy {
@@ -108,6 +92,7 @@ impl EgressRedirectPolicy for DownloadPolicy {
 }
 
 struct RedirectProxy {
+    address: SocketAddr,
     client: reqwest::Client,
     placeholder: String,
     policy: Arc<DownloadPolicy>,
@@ -156,12 +141,19 @@ impl RedirectProxy {
             .timeout(Duration::from_secs(120))
             .build()?;
         Ok(Self {
+            address,
             client,
             placeholder,
             policy: redirect_policy,
             cancel,
             task,
         })
+    }
+
+    fn download(&self, target: &str) -> reqwest::RequestBuilder {
+        self.client
+            .get("https://api.test/redirect/authorized")
+            .query(&[("target", target)])
     }
 
     async fn shutdown(self) -> Result<()> {
@@ -186,26 +178,17 @@ async fn approved_redirect_streams_the_exact_url_without_original_headers_or_bod
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
-    let observed: DownloadRequest = serde_json::from_slice(&response.bytes().await?)?;
     assert_eq!(
-        observed,
-        DownloadRequest {
-            method: "GET".into(),
-            host: "public.test".into(),
-            path: "/download/echo?signature=upstream-issued".into(),
-            headers: HashMap::new(),
-            body: Vec::new(),
-        }
+        response.text().await?,
+        "/download/echo?signature=upstream-issued"
     );
     assert_eq!(proxy.policy.calls.load(Ordering::SeqCst), 1);
-    assert!(
-        proxy
-            .client
-            .get("https://public.test/download/echo")
-            .send()
-            .await
-            .is_err()
-    );
+    let (_, response) = send_proxy_request(
+        proxy.address,
+        &proxy_connect_request("password").replace("api.test", "public.test"),
+    )
+    .await?;
+    assert!(response.starts_with("HTTP/1.1 502"), "{response}");
     proxy.shutdown().await
 }
 
@@ -252,12 +235,7 @@ async fn redirect_safety_checks_apply_even_when_the_policy_approves_any_target()
         "https://localhost/download/echo",
         "https://public.test/download/chain",
     ] {
-        let response = proxy
-            .client
-            .get("https://api.test/redirect/authorized")
-            .query(&[("target", target)])
-            .send()
-            .await?;
+        let response = proxy.download(target).send().await?;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{target}");
     }
     proxy.shutdown().await
@@ -268,16 +246,12 @@ async fn redirect_downloads_enforce_declared_and_streamed_size_limits() -> Resul
     let upstream = Upstream::start().await?;
     let proxy = RedirectProxy::start(&upstream, true, false).await?;
     let response = proxy
-        .client
-        .get("https://api.test/redirect/authorized")
-        .query(&[("target", "https://public.test/download/oversized")])
+        .download("https://public.test/download/oversized")
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let response = proxy
-        .client
-        .get("https://api.test/redirect/authorized")
-        .query(&[("target", "https://public.test/download/chunked")])
+        .download("https://public.test/download/chunked")
         .send()
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
@@ -290,9 +264,7 @@ async fn redirect_download_timeout_includes_the_streamed_body() -> Result<()> {
     let upstream = Upstream::start().await?;
     let proxy = RedirectProxy::start(&upstream, true, false).await?;
     let mut response = proxy
-        .client
-        .get("https://api.test/redirect/authorized")
-        .query(&[("target", "https://public.test/download/slow")])
+        .download("https://public.test/download/slow")
         .send()
         .await?;
     assert_eq!(
