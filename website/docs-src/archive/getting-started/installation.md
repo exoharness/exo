@@ -19,7 +19,7 @@ instructions for anything missing:
 - **git**
 - **Node.js 22+ and pnpm**
 - **Rust** (via [rustup](https://rustup.rs/))
-- **Docker** — running, for the agent's sandbox
+- **Local hypervisor** — KVM on Linux or Apple Silicon on macOS, for the agent's SmolVM sandbox
 
 You'll also need an **OpenAI API key**.
 
@@ -39,7 +39,7 @@ everything:
 3. Asks for your name and your agent's name, and writes a local profile at
    `.exo/exo-profile.md` (git-ignored — machine-specific instructions
    live here).
-4. Starts the canonical agent: a sandbox (Ubuntu 24.04 in Docker), the task
+4. Starts the canonical agent: a sandbox (Ubuntu 24.04 in SmolVM), the task
    scheduler, and the ExoChat adapter.
 
 When it finishes, two things happen:
