@@ -33,15 +33,30 @@ impl ProxySession {
         tls: TlsAcceptor,
         placeholders: &HashMap<String, String>,
     ) -> Result<Self> {
+        Self::new_with_redirect_policy(identity, policy, resolver, tls, placeholders, None)
+    }
+
+    /// Installs a trusted redirect policy without allowing direct sandbox access
+    /// to its download hosts. `None` preserves upstream redirects unchanged.
+    pub fn new_with_redirect_policy(
+        identity: EgressIdentity,
+        policy: EgressPolicy,
+        resolver: Option<Arc<dyn EgressCredentialResolver>>,
+        tls: TlsAcceptor,
+        placeholders: &HashMap<String, String>,
+        redirect_policy: Option<Arc<dyn EgressRedirectPolicy>>,
+    ) -> Result<Self> {
+        let mut state = State::new_with_placeholders(
+            identity,
+            policy,
+            resolver,
+            Arc::new(PublicUpstreamResolver),
+            Some(placeholders),
+            None,
+        )?;
+        state.redirect_policy = redirect_policy;
         Ok(Self {
-            state: Arc::new(State::new_with_placeholders(
-                identity,
-                policy,
-                resolver,
-                Arc::new(PublicUpstreamResolver),
-                Some(placeholders),
-                None,
-            )?),
+            state: Arc::new(state),
             tls,
         })
     }

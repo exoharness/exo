@@ -13,6 +13,8 @@ use tokio::sync::RwLock;
 
 #[path = "git_tests.rs"]
 mod git;
+#[path = "redirect_tests.rs"]
+mod redirects;
 
 const GIT_REFS_PATH: &str = "/authorized-repo.git/info/refs?service=git-upload-pack";
 const GIT_RECEIVE_REFS_PATH: &str = "/authorized-repo.git/info/refs?service=git-receive-pack";
@@ -162,6 +164,9 @@ impl Upstream {
                             let service = service_fn(move |request: Request<Incoming>| async move {
                                 if let Some(root) = repository_root {
                                     return Ok::<_, Infallible>(git::respond(root, request).await.unwrap());
+                                }
+                                if request.uri().path().starts_with("/redirect/") || request.uri().path().starts_with("/download/") {
+                                    return Ok::<_, Infallible>(redirects::respond(request).await);
                                 }
                                 if matches!(request.uri().path(), "/refresh" | "/reject" | "/forbidden") {
                                     let path = request.uri().path().to_owned();

@@ -38,6 +38,8 @@ mod external;
 pub use external::ExternalProxyConfig;
 mod explicit;
 pub use explicit::{ExplicitProxy, ProxyAuthorizer, ProxySession, serve_connect_proxy};
+mod redirect;
+pub use redirect::EgressRedirectPolicy;
 mod transport;
 pub use crate::egress_credentials::vault;
 #[cfg(feature = "firecracker")]
@@ -124,6 +126,7 @@ pub(crate) struct State {
     bindings: Vec<Binding>,
     identity: EgressIdentity,
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
+    redirect_policy: Option<Arc<dyn EgressRedirectPolicy>>,
     upstream: Arc<dyn UpstreamResolver>,
 }
 
@@ -292,6 +295,7 @@ impl State {
             bindings,
             identity,
             resolver,
+            redirect_policy: None,
             upstream,
         })
     }
@@ -393,10 +397,10 @@ impl State {
                     &TimedResolver(resolver.as_ref()),
                 )
                 .await?;
-                response = relay(method, headers, url, body, &client).await?;
+                response = relay(method, headers, url.clone(), body, &client).await?;
             }
         }
-        Ok(proxy_response(response)?)
+        self.follow_redirect(&destination, &url, response).await
     }
 
     fn destination(
