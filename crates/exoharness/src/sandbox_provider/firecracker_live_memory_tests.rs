@@ -363,8 +363,8 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
         assert_eq!(
             statistics(&config, &restored_record)?,
             Statistics {
-                target_pages: 0,
-                actual_pages: 0
+                target_pages: 256,
+                actual_pages: 256
             }
         );
         assert_eq!(shell(&restored, "cat /tmp/ram-state").await?, "retained");
