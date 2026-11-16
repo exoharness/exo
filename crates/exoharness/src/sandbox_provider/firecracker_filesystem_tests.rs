@@ -5,7 +5,7 @@ use super::super::tests::{native_request, shell};
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
-        memory_mib: None,
+        memory_grant_mib: None,
         template: false,
         key: "a".repeat(64),
         sandbox_id: "filesystem-test".into(),

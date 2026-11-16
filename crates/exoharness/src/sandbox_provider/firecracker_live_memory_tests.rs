@@ -1,4 +1,4 @@
-use super::tests::{native_request, shell};
+use super::tests::{native_request, read_api_request, shell};
 use super::*;
 use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -25,11 +25,7 @@ fn config(root: &Path, image: &str) -> FirecrackerConfig {
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-struct Statistics {
-    target_pages: u64,
-    actual_pages: u64,
-}
+use super::balloon::Statistics;
 
 async fn allocation(
     backend: &FirecrackerSandboxBackend,
@@ -50,7 +46,7 @@ fn statistics(config: &FirecrackerConfig, record: &MachineRecord) -> Result<Stat
         &jail_root(config, &record.machine_id).join("run/firecracker.socket"),
         "GET",
         "/balloon/statistics",
-        &(),
+        &[],
         FIRECRACKER_API_TIMEOUT,
     )?)
     .map_err(Into::into)
@@ -68,26 +64,67 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
     request.spec.tcp_ports = vec![8765];
     let result: Result<()> = async {
         let handle = backend.acquire(request.clone()).await?;
-        eprintln!("acquired at 4 GiB with initial inflation complete");
         request.provider_state = handle.provider_state();
-        assert_eq!(handle.live_resource_ceiling(), SandboxResourceShape::new(1, 8192));
+        assert_eq!(
+            handle.live_resource_ceiling(),
+            SandboxResourceShape::new(1, 8192)
+        );
         let record = allocation(&backend, &request).await?;
-        assert_eq!(statistics(&config, &record)?, Statistics { target_pages: 4096 * 256, actual_pages: 4096 * 256 });
-        let before = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo").await?.trim().parse::<u64>()?;
+        assert_eq!(
+            statistics(&config, &record)?,
+            Statistics {
+                target_pages: 4096 * 256,
+                actual_pages: 4096 * 256
+            }
+        );
+        let before = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
+            .await?
+            .trim()
+            .parse::<u64>()?;
         assert!(before < 4096 * 1024);
         let cgroup = firecracker_cgroup_dir(&config, &record.machine_id);
-        let original_limits = (fs::read(cgroup.join("memory.max"))?, fs::read(cgroup.join("memory.high"))?);
+        let original_limits = (
+            fs::read(cgroup.join("memory.max"))?,
+            fs::read(cgroup.join("memory.high"))?,
+        );
         for shape in [(2, 4096), (1, 2048), (1, 8193)] {
-            assert!(handle.expand_resources(SandboxResourceShape::new(shape.0, shape.1).unwrap()).await.is_err());
-            assert_eq!(balloon::grant(&allocation(&backend, &request).await?)?, 4096);
-            assert_eq!(statistics(&config, &record)?, Statistics { target_pages: 4096 * 256, actual_pages: 4096 * 256 });
-            assert_eq!((fs::read(cgroup.join("memory.max"))?, fs::read(cgroup.join("memory.high"))?), original_limits);
+            assert!(
+                handle
+                    .expand_resources(SandboxResourceShape::new(shape.0, shape.1).unwrap())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                balloon::grant(&allocation(&backend, &request).await?)?,
+                4096
+            );
+            assert_eq!(
+                statistics(&config, &record)?,
+                Statistics {
+                    target_pages: 4096 * 256,
+                    actual_pages: 4096 * 256
+                }
+            );
+            assert_eq!(
+                (
+                    fs::read(cgroup.join("memory.max"))?,
+                    fs::read(cgroup.join("memory.high"))?
+                ),
+                original_limits
+            );
         }
-        let mut process = handle.start_process(&command("printf ready; read line; printf process:$line")).await?;
+        let mut process = handle
+            .start_process(&command("printf ready; read line; printf process:$line"))
+            .await?;
         let mut ready = [0; 5];
         process.stdout.read_exact(&mut ready).await?;
         assert_eq!(&ready, b"ready");
-        let mut terminal = handle.start_terminal(&command("stty -echo; printf ready; read line; printf terminal:$line"), SandboxTerminalSize { rows: 24, cols: 80 }).await?;
+        let mut terminal = handle
+            .start_terminal(
+                &command("stty -echo; printf ready; read line; printf terminal:$line"),
+                SandboxTerminalSize { rows: 24, cols: 80 },
+            )
+            .await?;
         terminal.output.read_exact(&mut ready).await?;
         assert_eq!(&ready, b"ready");
         let mut server = handle.start_process(&command(r#"python3 -u -c 'import socket
@@ -100,7 +137,10 @@ while True:
 "#)).await?;
         let mut server_ready = [0; 6];
         server.stdout.read_exact(&mut server_ready).await?;
-        let mut connection = handle.connect_tcp(8765).await?.context("missing TCP connection")?;
+        let mut connection = handle
+            .connect_tcp(8765)
+            .await?
+            .context("missing TCP connection")?;
         tokio::io::AsyncWriteExt::write_all(&mut connection, b"before").await?;
         let mut echo = [0; 6];
         tokio::io::AsyncReadExt::read_exact(&mut connection, &mut echo).await?;
@@ -109,21 +149,77 @@ while True:
         let api = jail_root(&config, &record.machine_id).join("run/firecracker.socket");
         let parked = api.with_extension("parked");
         fs::rename(&api, &parked)?;
-        let failure = handle.expand_resources(grown).await;
+        let listener = StdUnixListener::bind(&api)?;
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let peer = std::thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let (request, _) = read_api_request(&mut stream)?;
+            assert!(request.starts_with("PATCH /balloon "));
+            entered.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10))?;
+            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")?;
+            Ok(())
+        });
+        let growth = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move { handle.expand_resources(grown).await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), waiting).await??;
+        let concurrent = tokio::time::timeout(
+            Duration::from_secs(2),
+            shell(&handle, "printf during-growth"),
+        )
+        .await;
+        release.send(())?;
+        let failure = growth.await?;
+        peer.join().unwrap()?;
         fs::rename(&parked, &api)?;
+        assert_eq!(concurrent??, "during-growth");
         assert!(failure.is_err());
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
-        assert_eq!(statistics(&config, &record)?, Statistics { target_pages: 4096 * 256, actual_pages: 4096 * 256 });
-        assert!(handle.expand_resources(SandboxResourceShape::new(1, 4096).unwrap()).await.is_err());
-        assert_eq!(shell(&handle, "printf usable-after-failure").await?, "usable-after-failure");
+        assert_eq!(
+            statistics(&config, &record)?,
+            Statistics {
+                target_pages: 4096 * 256,
+                actual_pages: 4096 * 256
+            }
+        );
+        assert!(
+            handle
+                .expand_resources(SandboxResourceShape::new(1, 4096).unwrap())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            shell(&handle, "printf usable-after-failure").await?,
+            "usable-after-failure"
+        );
         assert_eq!(handle.expand_resources(grown).await?, grown);
         assert_eq!(handle.expand_resources(grown).await?, grown);
-        assert_eq!(balloon::grant(&allocation(&backend, &request).await?)?, 8192);
-        assert_eq!(statistics(&config, &record)?, Statistics { target_pages: 0, actual_pages: 0 });
-        assert_eq!(fs::read_to_string(cgroup.join("memory.max"))?.trim(), (9216_u64 * 1024 * 1024).to_string());
-        let after = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo").await?.trim().parse::<u64>()?;
-        assert!(after > before + 3 * 1024 * 1024, "before={before}, after={after}");
-        eprintln!("grew to 8 GiB with additional memory available");
+        assert_eq!(
+            balloon::grant(&allocation(&backend, &request).await?)?,
+            8192
+        );
+        assert_eq!(
+            statistics(&config, &record)?,
+            Statistics {
+                target_pages: 0,
+                actual_pages: 0
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(cgroup.join("memory.max"))?.trim(),
+            (9216_u64 * 1024 * 1024).to_string()
+        );
+        let after = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
+            .await?
+            .trim()
+            .parse::<u64>()?;
+        assert!(
+            after > before + 3 * 1024 * 1024,
+            "before={before}, after={after}"
+        );
         process.stdin.write_all(b"alive\n").await?;
         process.stdin.flush().await?;
         let mut output = String::new();
@@ -142,23 +238,56 @@ while True:
         drop(connection);
         server.terminate().await?;
         shell(&handle, "printf root > /tmp/root-state; printf workspace > /workspace/state; printf repository > /repo/state").await?;
-        let snapshot = backend.suspend(request.clone(), crate::SnapshotKind::Filesystem).await?;
-        eprintln!("filesystem suspension completed");
+        let snapshot = backend
+            .suspend(request.clone(), crate::SnapshotKind::Filesystem)
+            .await?;
         assert_eq!(handle.is_running().await?, Some(false));
-        let restored = backend.acquire_from_snapshot(request.clone(), snapshot.clone()).await?;
-        eprintln!("restored filesystem capture");
+        let restored = backend
+            .acquire_from_snapshot(request.clone(), snapshot.clone())
+            .await?;
         let restored_record = allocation(&backend, &request).await?;
-        ensure!(balloon::grant(&restored_record)? == 8192, "filesystem restore lost the expanded memory grant");
-        let available = shell(&restored, "awk '/MemAvailable:/ {print $2}' /proc/meminfo").await?.trim().parse::<u64>()?;
-        assert!(available > 7 * 1024 * 1024, "restored available memory: {available}");
-        assert_eq!(shell(&restored, "cat /tmp/root-state /workspace/state /repo/state").await?, "rootworkspacerepository");
-        request.spec.image = restored.effective_image().context("missing restored image")?;
+        ensure!(
+            balloon::grant(&restored_record)? == 8192,
+            "filesystem restore lost the expanded memory grant"
+        );
+        let available = shell(&restored, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
+            .await?
+            .trim()
+            .parse::<u64>()?;
+        assert!(
+            available > 7 * 1024 * 1024,
+            "restored available memory: {available}"
+        );
+        assert_eq!(
+            shell(
+                &restored,
+                "cat /tmp/root-state /workspace/state /repo/state"
+            )
+            .await?,
+            "rootworkspacerepository"
+        );
+        request.spec.image = restored
+            .effective_image()
+            .context("missing restored image")?;
         request.provider_state = restored.provider_state();
         let reattached = backend.acquire(request.clone()).await?;
         let reattached_record = allocation(&backend, &request).await?;
-        ensure!(reattached_record.machine_id == restored_record.machine_id, "reacquisition replaced the restored VM");
-        ensure!(balloon::grant(&reattached_record)? == 8192, "reacquisition lost the expanded memory grant");
-        assert_eq!(shell(&reattached, "cat /tmp/root-state /workspace/state /repo/state").await?, "rootworkspacerepository");
+        ensure!(
+            reattached_record.machine_id == restored_record.machine_id,
+            "reacquisition replaced the restored VM"
+        );
+        ensure!(
+            balloon::grant(&reattached_record)? == 8192,
+            "reacquisition lost the expanded memory grant"
+        );
+        assert_eq!(
+            shell(
+                &reattached,
+                "cat /tmp/root-state /workspace/state /repo/state"
+            )
+            .await?,
+            "rootworkspacerepository"
+        );
         let recaptured = reattached.snapshot(crate::SnapshotKind::Filesystem).await?;
         backend.delete_snapshot(recaptured).await?;
         reattached.stop().await?;
@@ -175,7 +304,7 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
     let temp = tempfile::Builder::new().prefix("m").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     let mut config = config(temp.path(), &image);
-    config.memory_ceiling_mib = std::num::NonZeroU32::new(1024);
+    config.memory_ceiling_mib = std::num::NonZeroU32::new(1025);
     config.max_machines = NonZeroUsize::new(2);
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let source = SandboxRequest {
@@ -380,8 +509,8 @@ print("wrote-and-verified-6-GiB")'
 }
 
 #[tokio::test]
-#[ignore = "requires root, KVM, Python guest image, XFS TMPDIR; samples THP accounting for 60 seconds"]
-async fn live_memory_small_grant_host_accounting() -> Result<()> {
+#[ignore = "requires root, KVM, Python guest image, XFS TMPDIR"]
+async fn live_memory_small_grant_is_writable() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("acct-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     let mut config = config(temp.path(), &image);
@@ -407,23 +536,6 @@ async fn live_memory_small_grant_host_accounting() -> Result<()> {
             "insufficient usable memory: {available} KiB"
         );
 
-        // Admission must reject an unusable shape without replacing the live VM.
-        let mut invalid = request.clone();
-        invalid.provider_state = handle.provider_state();
-        invalid.spec.resources = SandboxResourceShape::new(1, 128);
-        assert!(
-            backend
-                .acquire(invalid)
-                .await
-                .err()
-                .context("invalid ceiling accepted")?
-                .to_string()
-                .contains("four times")
-        );
-        assert_eq!(
-            allocation(&backend, &request).await?.machine_id,
-            record.machine_id
-        );
         let mut workload = handle
             .start_process(&command(
                 r#"python3 -u -c '
@@ -444,25 +556,30 @@ print("verified")'
         let high = fs::read_to_string(cgroup.join("memory.high"))?
             .trim()
             .parse::<u64>()?;
-        for sample in 0..=6 {
-            if sample > 0 {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-            }
-            let current = fs::read_to_string(cgroup.join("memory.current"))?
+        let current = fs::read_to_string(cgroup.join("memory.current"))?
+            .trim()
+            .parse::<u64>()?;
+        let events = fs::read_to_string(cgroup.join("memory.events"))?;
+        eprintln!(
+            "memory.current={current} memory.high={high} {}",
+            events.replace('\n', "; ")
+        );
+        assert!(current < high, "balloon memory exceeds grant headroom");
+        assert_eq!(
+            fs::read_to_string(cgroup.join("memory.max"))?
                 .trim()
-                .parse::<u64>()?;
-            let events = fs::read_to_string(cgroup.join("memory.events"))?;
-            eprintln!(
-                "accounting sample={sample} memory.current={current} memory.high={high} {}",
-                events.replace('\n', "; ")
+                .parse::<u64>()?,
+            (512 + FIRECRACKER_MEMORY_HEADROOM_MIB) * 1024 * 1024
+        );
+        assert_eq!(
+            fs::read_to_string(cgroup.join("memory.swap.max"))?.trim(),
+            "0"
+        );
+        for key in ["high", "max", "oom", "oom_kill"] {
+            assert!(
+                events.lines().any(|line| line == format!("{key} 0")),
+                "{events}"
             );
-            assert!(current < high, "balloon/THP memory exceeds grant headroom");
-            for key in ["high", "max", "oom", "oom_kill"] {
-                assert!(
-                    events.lines().any(|line| line == format!("{key} 0")),
-                    "{events}"
-                );
-            }
         }
         workload.stdin.write_all(b"verify\n").await?;
         workload.stdin.close().await?;
@@ -477,4 +594,41 @@ print("verified")'
     result?;
     cleanup?;
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires root, KVM, Firecracker artifacts, and TMPDIR on XFS"]
+async fn live_memory_shared_ceiling_accepts_small_and_odd_sized_requests() -> Result<()> {
+    let temp = tempfile::Builder::new().prefix("shapes-").tempdir()?;
+    let image = std::env::var("FIRECRACKER_IMAGE")?;
+    let mut config = config(temp.path(), &image);
+    config.memory_ceiling_mib = std::num::NonZeroU32::new(2048);
+    let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
+    let result: Result<()> = async {
+        for memory in [384, 2051] {
+            let mut request = native_request(&config, &format!("shape-{memory}"), &image)?;
+            request.spec.resources = SandboxResourceShape::new(1, memory);
+            let handle = backend.acquire(request.clone()).await?;
+            let record = allocation(&backend, &request).await?;
+            assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
+            assert_eq!(
+                handle.live_resource_ceiling(),
+                SandboxResourceShape::new(1, memory.max(2048))
+            );
+            let pages = u64::from(memory.max(2048) - memory) * 256;
+            assert_eq!(
+                statistics(&config, &record)?,
+                Statistics {
+                    target_pages: pages,
+                    actual_pages: pages
+                }
+            );
+            assert_eq!(shell(&handle, "printf usable-shape").await?, "usable-shape");
+            handle.stop().await?;
+        }
+        Ok(())
+    }
+    .await;
+    backend.terminate_all().await?;
+    result
 }

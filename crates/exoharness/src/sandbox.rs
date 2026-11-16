@@ -289,7 +289,8 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
-    /// Grow within the boot ceiling after the caller has reserved host capacity.
+    /// Grow within the boot ceiling after reserving backend host overhead as
+    /// well as the guest grant (Firecracker requires an additional 1024 MiB).
     /// Growth may continue after caller cancellation and retain a larger grant
     /// after an error. Keep the reservation until live_resource_grant reconciles
     /// it, or the sandbox is terminated. Retrying the same shape is safe.

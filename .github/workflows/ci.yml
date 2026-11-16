@@ -234,7 +234,7 @@ jobs:
           else
             "$test_binary" --ignored --nocapture
           fi
-      - name: Run Firecracker clock regression
+      - name: Run Firecracker balloon and clock regression
         if: matrix.sandbox-backend == 'firecracker'
         run: |
           cargo test --locked --package exoharness --features firecracker \

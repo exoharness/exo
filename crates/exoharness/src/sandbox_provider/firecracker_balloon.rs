@@ -1,6 +1,10 @@
 use super::*;
 
-const BALLOON_TIMEOUT: Duration = Duration::from_secs(30);
+// Allow 30 seconds of fixed overhead plus one second per 128 MiB of boot RAM.
+// Initialization and deflation both fit this budget, including large ceilings.
+fn convergence_timeout(memory_mib: u32) -> Duration {
+    Duration::from_secs(30 + u64::from(memory_mib).div_ceil(128))
+}
 const BALLOON_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Serialize)]
@@ -15,25 +19,17 @@ struct BalloonTarget {
     amount_mib: u32,
 }
 
-#[derive(Deserialize)]
-struct BalloonStatistics {
-    target_pages: u64,
-    actual_pages: u64,
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+pub(super) struct Statistics {
+    pub(super) target_pages: u64,
+    pub(super) actual_pages: u64,
 }
 
 pub(super) fn grant(record: &MachineRecord) -> Result<u32> {
     let grant = record
         .memory_grant_mib
         .map_or(record.runtime.memory_mib, std::num::NonZeroU32::get);
-    ensure!(
-        grant >= record.runtime.memory_mib
-            && grant
-                <= record
-                    .runtime
-                    .memory_ceiling_mib
-                    .unwrap_or(record.runtime.memory_mib),
-        "invalid Firecracker memory grant"
-    );
+    record.runtime.validate_memory_grant(grant)?;
     Ok(grant)
 }
 
@@ -45,30 +41,32 @@ pub(super) fn configuration(record: &MachineRecord) -> Result<Option<Configurati
             Ok(Configuration {
                 amount_mib: ceiling - grant(record)?,
                 deflate_on_oom: false,
-                stats_polling_interval_s: 1,
+                stats_polling_interval_s: 3600,
             })
         })
         .transpose()
 }
 
-fn wait_for_target(socket: &Path, amount_mib: u32) -> Result<()> {
+fn wait_for_target(socket: &Path, amount_mib: u32, timeout: Duration) -> Result<()> {
     let pages = u64::from(amount_mib) * 256;
-    let deadline = Instant::now() + BALLOON_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         let response = firecracker_api_response(
             socket,
             "GET",
             "/balloon/statistics",
-            &(),
+            &[],
             FIRECRACKER_API_TIMEOUT,
         )?;
-        let stats: BalloonStatistics = serde_json::from_slice(&response)?;
+        let stats: Statistics = serde_json::from_slice(&response)?;
         if stats.target_pages == pages && stats.actual_pages == pages {
             return Ok(());
         }
         ensure!(
             Instant::now() < deadline,
-            "Firecracker balloon did not reach its target; verify CONFIG_VIRTIO_BALLOON kernel support"
+            "Firecracker balloon timed out after {timeout:?}: target {pages} pages, observed target {} and actual {} pages; guest may be slow or unable to reclaim memory",
+            stats.target_pages,
+            stats.actual_pages
         );
         std::thread::sleep(BALLOON_POLL_INTERVAL);
     }
@@ -82,7 +80,7 @@ pub(super) fn initialize(config: &FirecrackerConfig, record: &MachineRecord) -> 
     let target = ceiling - grant(record)?;
     let socket = jail_root(config, &record.machine_id).join("run/firecracker.socket");
     firecracker_api_patch(&socket, "/balloon", &BalloonTarget { amount_mib: target })?;
-    wait_for_target(&socket, target)
+    wait_for_target(&socket, target, convergence_timeout(ceiling))
 }
 
 pub(super) fn expand(
@@ -126,7 +124,7 @@ fn apply_grant(
     // pages. A failed cgroup write must leave the previous grant retryable.
     fs::write(
         cgroup.join("memory.max"),
-        ((u64::from(memory) + 1024) * 1024 * 1024).to_string(),
+        ((u64::from(memory) + FIRECRACKER_MEMORY_HEADROOM_MIB) * 1024 * 1024).to_string(),
     )?;
     fs::write(
         cgroup.join("memory.high"),
@@ -167,6 +165,34 @@ mod tests {
     }
 
     #[test]
+    fn timeout_reports_observed_balloon_pages() -> Result<()> {
+        let root = tempfile::tempdir_in("/tmp")?;
+        let socket = root.path().join("api");
+        let listener = StdUnixListener::bind(&socket)?;
+        let peer = std::thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let (request, body) = super::super::tests::read_api_request(&mut stream)?;
+            assert!(request.starts_with("GET /balloon/statistics "));
+            assert!(body.is_empty());
+            let body = r#"{"target_pages":256,"actual_pages":7}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )?;
+            Ok(())
+        });
+        let error = wait_for_target(&socket, 1, Duration::ZERO).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("target 256 pages, observed target 256 and actual 7 pages")
+        );
+        peer.join().unwrap()?;
+        Ok(())
+    }
+
+    #[test]
     fn failed_host_limit_does_not_publish_a_grant() -> Result<()> {
         let root = tempfile::tempdir()?;
         let config = FirecrackerConfig {
@@ -174,7 +200,9 @@ mod tests {
             ..Default::default()
         };
         let record = record();
-        fs::create_dir_all(jail_dir(&config, &record.machine_id))?;
+        fs::create_dir_all(config.state_root.join("manifests"))?;
+        write_manifest(&config.state_root, &record)?;
+        let before = fs::read(manifest_path(&config.state_root, &record.machine_id))?;
         let error = apply_grant(
             &config,
             &record,
@@ -183,7 +211,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.downcast_ref::<std::io::Error>().is_some());
-        assert_eq!(grant(&record)?, 4096);
+        let after = fs::read(manifest_path(&config.state_root, &record.machine_id))?;
+        assert_eq!(after, before);
+        let persisted: MachineRecord = serde_json::from_slice(&after)?;
+        assert_eq!(grant(&persisted)?, 4096);
         Ok(())
     }
 
@@ -221,30 +252,12 @@ mod tests {
             .enumerate()
             {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut reader = StdBufReader::new(stream.try_clone().unwrap());
-                let mut request = String::new();
-                reader.read_line(&mut request).unwrap();
+                let (request, body) = super::super::tests::read_api_request(&mut stream).unwrap();
                 assert!(request.starts_with(if index < 2 {
                     "PATCH /balloon "
                 } else {
                     "GET /balloon/statistics "
                 }));
-                let mut length = 0;
-                loop {
-                    let mut header = String::new();
-                    reader.read_line(&mut header).unwrap();
-                    if header == "\r\n" {
-                        break;
-                    }
-                    if let Some(value) = header.strip_prefix("Content-Length: ") {
-                        length = value.trim().parse::<usize>().unwrap();
-                    }
-                }
-                let mut body = vec![0; length];
-                reader.read_exact(&mut body).unwrap();
                 if index < 2 {
                     assert_eq!(
                         serde_json::from_slice::<BalloonTarget>(&body)
@@ -281,6 +294,13 @@ mod tests {
             &fs::read(manifest_path(&config.state_root, &record.machine_id)).unwrap(),
         )
         .unwrap();
+        assert_eq!(
+            fs::metadata(manifest_path(&config.state_root, &record.machine_id))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
         assert_eq!(record.runtime.memory_mib, 4096);
         assert_eq!(grant(&record).unwrap(), 8192);
         assert_eq!(

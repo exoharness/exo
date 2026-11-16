@@ -2,6 +2,30 @@ use super::*;
 use crate::egress::{EgressTransport, LocalEgressTransport};
 use tokio::net::UnixListener;
 
+pub(super) fn read_api_request(stream: &mut StdUnixStream) -> Result<(String, Vec<u8>)> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = StdBufReader::new(stream);
+    let mut request = String::new();
+    reader.read_line(&mut request)?;
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        ensure!(
+            reader.read_line(&mut header)? > 0,
+            "missing API request headers"
+        );
+        if header == "\r\n" {
+            break;
+        }
+        if let Some(value) = header.strip_prefix("Content-Length: ") {
+            length = value.trim().parse::<usize>()?;
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    Ok((request, body))
+}
+
 fn test_host_runtime() -> FirecrackerHostFingerprint {
     FirecrackerHostFingerprint {
         memory_ceiling_mib: None,
@@ -742,7 +766,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
 
     let manifest = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
-        memory_mib: None,
+        memory_grant_mib: None,
         template: false,
         template_key: first,
         spec_hash: source.spec_hash,
@@ -1272,7 +1296,7 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
     };
     let payload = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
-        memory_mib: None,
+        memory_grant_mib: None,
         template: true,
         template_key: "a".repeat(64),
         spec_hash: template_spec_hash(&request.spec),
@@ -1880,7 +1904,7 @@ async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()
         spec: SandboxSpec {
             tcp_ports: vec![],
             image: image.clone(),
-            resources: SandboxResourceShape::new(2, 1024),
+            resources: None,
             mounts: mounts
                 .into_iter()
                 .map(|mount| crate::SandboxMount {
@@ -2093,24 +2117,6 @@ pub(super) async fn shell(handle: &Arc<dyn ManagedSandboxHandle>, script: &str) 
     Ok(output.stdout)
 }
 
-#[test]
-fn odd_memory_ceiling_rejects_before_host_setup() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let config = FirecrackerConfig {
-        state_root: root.path().join("not-created"),
-        memory_ceiling_mib: std::num::NonZeroU32::new(8193),
-        ..Default::default()
-    };
-    assert!(
-        validate_host_blocking(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("multiple of 2 MiB")
-    );
-    assert!(!config.state_root.exists());
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
@@ -2182,38 +2188,24 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
         }
         Ok::<_, anyhow::Error>(())
     });
-    let api = UnixListener::bind(jail_root(&shared.config, &id).join("run/firecracker.socket"))?;
+    let api = StdUnixListener::bind(jail_root(&shared.config, &id).join("run/firecracker.socket"))?;
     let (waiting, inflation_waiting) = tokio::sync::oneshot::channel();
     let (release, inflated) = tokio::sync::oneshot::channel();
-    let api_peer = tokio::spawn(async move {
+    let api_peer = std::thread::spawn(move || {
         let mut waiting = Some(waiting);
         let mut inflated = Some(inflated);
         for index in 0..4 {
-            let (stream, _) = api.accept().await?;
-            let mut reader = AsyncBufReader::new(stream);
-            let mut request = String::new();
-            reader.read_line(&mut request).await?;
+            let (mut stream, _) = api.accept()?;
+            let (request, _) = read_api_request(&mut stream)?;
             let statistics = index % 2 == 1;
             assert!(request.starts_with(if statistics {
                 "GET /balloon/statistics "
             } else {
                 "PATCH /balloon "
             }));
-            let mut length = 0;
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).await?;
-                if header == "\r\n" {
-                    break;
-                }
-                if let Some(value) = header.strip_prefix("Content-Length: ") {
-                    length = value.trim().parse::<usize>()?;
-                }
-            }
-            reader.read_exact(&mut vec![0; length]).await?;
             if index == 1 {
                 waiting.take().unwrap().send(()).unwrap();
-                inflated.take().unwrap().await?;
+                inflated.take().unwrap().blocking_recv()?;
             }
             let body = if statistics {
                 serde_json::json!({"target_pages": 512 * 256, "actual_pages": 512 * 256})
@@ -2226,7 +2218,7 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
                 body.len(),
                 body
             );
-            reader.get_mut().write_all(response.as_bytes()).await?;
+            stream.write_all(response.as_bytes())?;
         }
         Ok::<_, anyhow::Error>(())
     });
@@ -2255,6 +2247,44 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
         SandboxResourceShape::new(1, 512)
     );
     guest_peer.await??;
-    api_peer.await??;
+    api_peer.join().unwrap()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lease_renewal_does_not_wait_for_growth_or_recreate_deleted_leases() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::create_dir(directory.path().join("leases"))?;
+    let id = "fc-0123456789abcdef-01234567";
+    let shared = test_shared(
+        FirecrackerConfig {
+            state_root: directory.path().into(),
+            ..Default::default()
+        },
+        HashMap::from([(
+            "lease".into(),
+            WarmMachineEntry {
+                machine_id: id.into(),
+                spec_hash: "spec".into(),
+                egress_proxy: None,
+                idle_ttl: Some(Duration::from_secs(60)),
+                last_used_at: Instant::now(),
+            },
+        )]),
+    )?;
+    touch_machine_lease(directory.path(), id)?;
+    let path = lease_path(directory.path(), id);
+    let old = SystemTime::now() - Duration::from_secs(60);
+    File::open(&path)?.set_modified(old)?;
+    let _growth = shared.lifecycle_locks.lock_machine(id).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        touch_machine(&shared, &shared.warm_machines, "lease", id),
+    )
+    .await??;
+    assert!(fs::metadata(&path)?.modified()? > old);
+    fs::remove_file(&path)?;
+    touch_machine(&shared, &shared.warm_machines, "lease", id).await?;
+    assert!(!path.exists());
     Ok(())
 }
