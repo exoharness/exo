@@ -1282,7 +1282,8 @@ impl FirecrackerSandboxBackend {
                 )
                 .await
         })
-        .await?
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     // The caller holds the target machine family's lifecycle lock. Fork holds
@@ -1473,7 +1474,8 @@ impl FirecrackerSandboxBackend {
                 .acquire_resolved_locked(request, spec_hash, machine_id, one_shot, None, false)
                 .await
         })
-        .await?
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     // The caller holds this machine family's lifecycle lock. The capacity
