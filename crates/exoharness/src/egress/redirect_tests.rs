@@ -273,11 +273,11 @@ async fn redirect_download_timeout_includes_the_streamed_body() -> Result<()> {
     );
     tokio::time::pause();
     tokio::time::advance(IO_TIMEOUT + Duration::from_secs(1)).await;
+    tokio::time::resume();
     assert!(
         tokio::time::timeout(Duration::from_secs(1), response.bytes())
             .await?
             .is_err()
     );
-    tokio::time::resume();
     proxy.shutdown().await
 }
