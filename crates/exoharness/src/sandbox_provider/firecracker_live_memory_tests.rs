@@ -41,15 +41,20 @@ async fn allocation(
         .context("missing allocation")
 }
 
-fn statistics(config: &FirecrackerConfig, record: &MachineRecord) -> Result<Statistics> {
-    serde_json::from_slice(&firecracker_api_response(
+fn assert_balloon(config: &FirecrackerConfig, record: &MachineRecord, mib: u32) -> Result<()> {
+    let stats: Statistics = serde_json::from_slice(&firecracker_api_response(
         &jail_root(config, &record.machine_id).join("run/firecracker.socket"),
         "GET",
         "/balloon/statistics",
         &[],
         FIRECRACKER_API_TIMEOUT,
-    )?)
-    .map_err(Into::into)
+    )?)?;
+    let pages = u64::from(mib) * 256;
+    ensure!(
+        stats.target_pages == pages && stats.actual_pages == pages,
+        "expected {mib} MiB balloon: {stats:?}"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -70,13 +75,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
             SandboxResourceShape::new(1, 8192)
         );
         let record = allocation(&backend, &request).await?;
-        assert_eq!(
-            statistics(&config, &record)?,
-            Statistics {
-                target_pages: 4096 * 256,
-                actual_pages: 4096 * 256
-            }
-        );
+        assert_balloon(&config, &record, 4096)?;
         let before = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
             .trim()
@@ -98,13 +97,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
                 balloon::grant(&allocation(&backend, &request).await?)?,
                 4096
             );
-            assert_eq!(
-                statistics(&config, &record)?,
-                Statistics {
-                    target_pages: 4096 * 256,
-                    actual_pages: 4096 * 256
-                }
-            );
+            assert_balloon(&config, &record, 4096)?;
             assert_eq!(
                 (
                     fs::read(cgroup.join("memory.max"))?,
@@ -178,13 +171,7 @@ while True:
         assert_eq!(concurrent??, "during-growth");
         assert!(failure.is_err());
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
-        assert_eq!(
-            statistics(&config, &record)?,
-            Statistics {
-                target_pages: 4096 * 256,
-                actual_pages: 4096 * 256
-            }
-        );
+        assert_balloon(&config, &record, 4096)?;
         assert!(
             handle
                 .expand_resources(SandboxResourceShape::new(1, 4096).unwrap())
@@ -201,13 +188,7 @@ while True:
             balloon::grant(&allocation(&backend, &request).await?)?,
             8192
         );
-        assert_eq!(
-            statistics(&config, &record)?,
-            Statistics {
-                target_pages: 0,
-                actual_pages: 0
-            }
-        );
+        assert_balloon(&config, &record, 0)?;
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.max"))?.trim(),
             (9216_u64 * 1024 * 1024).to_string()
@@ -360,13 +341,7 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
             balloon::grant(&restored_record)? == 1024,
             "RAM restore lost the memory grant"
         );
-        assert_eq!(
-            statistics(&config, &restored_record)?,
-            Statistics {
-                target_pages: 256,
-                actual_pages: 256
-            }
-        );
+        assert_balloon(&config, &restored_record, 1)?;
         assert_eq!(shell(&restored, "cat /tmp/ram-state").await?, "retained");
         restored.stop().await?;
         backend.delete_snapshot(snapshot).await?;
@@ -397,13 +372,7 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
         assert!(futures::poll!(&mut expansion).is_pending());
         drop(expansion);
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
-        assert_eq!(
-            statistics(&config, &record)?,
-            Statistics {
-                target_pages: 2048 * 256,
-                actual_pages: 2048 * 256
-            }
-        );
+        assert_balloon(&config, &record, 2048)?;
 
         // Cancellation while waiting for ownership must not dispatch growth.
         let guard = backend
@@ -427,13 +396,7 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
             balloon::grant(&allocation(&backend, &request).await?)?,
             8192
         );
-        assert_eq!(
-            statistics(&config, &record)?,
-            Statistics {
-                target_pages: 0,
-                actual_pages: 0
-            }
-        );
+        assert_balloon(&config, &record, 0)?;
         assert_eq!(shell(&handle, "printf usable").await?, "usable");
         backend.delete_snapshot(capture).await?;
         let (growth, stop) = tokio::join!(
@@ -615,14 +578,7 @@ async fn live_memory_shared_ceiling_accepts_small_and_odd_sized_requests() -> Re
                 handle.live_resource_ceiling(),
                 SandboxResourceShape::new(1, memory.max(2048))
             );
-            let pages = u64::from(memory.max(2048) - memory) * 256;
-            assert_eq!(
-                statistics(&config, &record)?,
-                Statistics {
-                    target_pages: pages,
-                    actual_pages: pages
-                }
-            );
+            assert_balloon(&config, &record, memory.max(2048) - memory)?;
             assert_eq!(shell(&handle, "printf usable-shape").await?, "usable-shape");
             handle.stop().await?;
         }

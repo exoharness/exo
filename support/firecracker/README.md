@@ -192,18 +192,6 @@ The convergence budget is 30 seconds plus one second per 128 MiB of boot RAM;
 timeouts report the requested and observed page counts. Device page counts are
 read on demand; guest statistics are polled only once an hour.
 
-Two interleaved ARM64 nested-KVM trials on Firecracker 1.18.0 / kernel 6.18.56
-used a 512 MiB grant, 2 GiB capacity, and a writable 192 MiB workload:
-
-| Host backing | Startup seconds | Whole regression seconds | Sampled host MiB |
-| --- | --- | --- | --- |
-| THP | 2.45, 2.55 | 5.24, 5.03 | 363, 367 |
-| Normal pages | 8.71, 9.88 | 31.07, 33.05 | 297, 299 |
-
-THP is retained for this measured startup/workload benefit despite dirty-page
-tracking. These short trials do not establish production x86 performance or
-long-term THP accounting behavior.
-
 This is a native Linux Rust API. The CLI and macOS bridge do not expose live
 resource updates; invoke the native backend inside Lima for local validation.
 

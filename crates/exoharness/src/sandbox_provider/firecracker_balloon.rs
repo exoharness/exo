@@ -1,10 +1,5 @@
 use super::*;
 
-// Allow 30 seconds of fixed overhead plus one second per 128 MiB of boot RAM.
-// Initialization and deflation both fit this budget, including large ceilings.
-fn convergence_timeout(memory_mib: u32) -> Duration {
-    Duration::from_secs(30 + u64::from(memory_mib).div_ceil(128))
-}
 const BALLOON_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 #[derive(Serialize)]
@@ -19,7 +14,7 @@ struct BalloonTarget {
     amount_mib: u32,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
 pub(super) struct Statistics {
     pub(super) target_pages: u64,
     pub(super) actual_pages: u64,
@@ -80,7 +75,11 @@ pub(super) fn initialize(config: &FirecrackerConfig, record: &MachineRecord) -> 
     let target = ceiling - grant(record)?;
     let socket = jail_root(config, &record.machine_id).join("run/firecracker.socket");
     firecracker_api_patch(&socket, "/balloon", &BalloonTarget { amount_mib: target })?;
-    wait_for_target(&socket, target, convergence_timeout(ceiling))
+    wait_for_target(
+        &socket,
+        target,
+        Duration::from_secs(30 + u64::from(ceiling).div_ceil(128)),
+    )
 }
 
 pub(super) fn expand(
@@ -120,8 +119,7 @@ fn apply_grant(
     resources: SandboxResourceShape,
 ) -> Result<SandboxResourceShape> {
     let memory = resources.memory_mib.get();
-    // Reserve host capacity before publishing the new grant or releasing guest
-    // pages. A failed cgroup write must leave the previous grant retryable.
+    // Prepare host limits before committing the larger grant.
     fs::write(
         cgroup.join("memory.max"),
         ((u64::from(memory) + FIRECRACKER_MEMORY_HEADROOM_MIB) * 1024 * 1024).to_string(),
