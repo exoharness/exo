@@ -653,7 +653,7 @@ impl ChatRepl {
                 Default::default(),
             ))
             .await?;
-        self.observe_turn(turn, stream, started).await
+        self.observe_turn(turn, stream, started, progress).await
     }
 
     async fn reconnect(&mut self) -> Result<()> {
@@ -663,7 +663,9 @@ impl ChatRepl {
             .await?
         {
             println!("Reconnecting to turn {}", turn.id);
-            let result = self.observe_turn(turn, stream, Instant::now()).await;
+            let result = self
+                .observe_turn(turn, stream, Instant::now(), TurnProgress::new())
+                .await;
             self.finish_observing(result).await?;
         }
         Ok(())
@@ -674,8 +676,8 @@ impl ChatRepl {
         turn: exoharness::TurnRecord,
         mut stream: executor::ExecutionStreamHandle,
         started: Instant,
+        mut progress: TurnProgress,
     ) -> Result<()> {
-        let mut progress = TurnProgress::new();
         self.session_id = Some(turn.session_id);
         self.active_turn = Some(HarnessTurnKey::new(
             self.agent.record().id,

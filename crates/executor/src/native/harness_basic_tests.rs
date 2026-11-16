@@ -85,10 +85,7 @@ impl AccessPolicy for RecoveryPolicy {
 struct CallerRecordingExecutor(Arc<Mutex<Vec<Option<String>>>>);
 
 #[derive(Default)]
-struct CountingToolRuntime {
-    calls: AtomicUsize,
-    policy_checked: tokio::sync::Notify,
-}
+struct CountingToolRuntime(AtomicUsize, tokio::sync::Notify);
 
 #[async_trait]
 impl ToolRuntime for CountingToolRuntime {
@@ -97,7 +94,7 @@ impl ToolRuntime for CountingToolRuntime {
         policies: &exo_managed_agents::permissions::PermissionPolicies,
         name: &str,
     ) -> exo_managed_agents::permissions::PermissionPolicy {
-        self.policy_checked.notify_one();
+        self.1.notify_one();
         if name == "write_file" {
             exo_managed_agents::permissions::PermissionPolicy::AlwaysAsk {}
         } else {
@@ -114,7 +111,7 @@ impl ToolRuntime for CountingToolRuntime {
         _: &crate::ConversationConfig,
         _: &ToolRequest,
     ) -> Result<ToolResult> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.0.fetch_add(1, Ordering::SeqCst);
         Ok(serde_json::json!({"ok": true}))
     }
 }
@@ -905,8 +902,8 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     wait_for_active_turn(&runtime, agent_id, thread.as_ref(), turn_id).await?;
     // Active registration precedes recovery's saved-tool validation. Answer
     // only after execution reaches authorization for the pending tool.
-    tokio::time::timeout(Duration::from_secs(3), tools.policy_checked.notified()).await?;
-    assert_eq!(tools.calls.load(Ordering::SeqCst), 0);
+    tokio::time::timeout(Duration::from_secs(3), tools.1.notified()).await?;
+    assert_eq!(tools.0.load(Ordering::SeqCst), 0);
     assert!(model.requests().is_empty());
     runtime
         .approval_response(
@@ -940,7 +937,7 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
         }
     })
     .await??;
-    assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(tools.0.load(Ordering::SeqCst), 1);
     assert!(model.requests().is_empty());
     assert_eq!(events.iter().filter(|event| matches!(&event.data,
         EventData::Custom { event_type, .. } if event_type == crate::permissions::APPROVAL_REQUESTED
@@ -1060,7 +1057,7 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
         }
     })
     .await??;
-    assert_eq!(first_tools.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(first_tools.0.load(Ordering::SeqCst), 1);
     assert!(events.iter().any(|event| matches!(&event.data,
         EventData::ToolResult { tool_call_id, .. } if tool_call_id == "read-call"
     )));
@@ -1133,7 +1130,7 @@ async fn completed_tool_result_survives_restart_before_next_tool_approval() -> R
         }
     })
     .await??;
-    assert_eq!(second_tools.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(second_tools.0.load(Ordering::SeqCst), 1);
     assert_eq!(model.requests().len(), 1);
     assert_eq!(
         events
