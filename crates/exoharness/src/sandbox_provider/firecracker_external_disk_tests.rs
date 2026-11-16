@@ -124,6 +124,11 @@ async fn native_external_disks_capture_and_recover() -> Result<()> {
             disks.iter().map(|disk| disk.backing.clone()).collect()).await?;
         let registration = backend.register_filesystem_disks(request.sandbox_id.clone(), partial.clone(),
             disks.iter().cloned().map(|disk| disk as Arc<dyn FirecrackerFilesystemDisk>).collect())?;
+        let mut mismatched = FilesystemManifest::from_payload(&partial)?;
+        mismatched.key = new_capture_key();
+        let error = backend.acquire_from_snapshot(request.clone(), mismatched.payload()?).await
+            .err().context("mismatched external disks accepted")?;
+        assert!(error.to_string().contains("another filesystem snapshot"));
         let handle = backend.acquire_from_snapshot(request.clone(), partial).await?;
         let record = backend.shared.warm_machines.lock().await[&request.sandbox_id].machine_id.clone();
         let names = FilesystemLayout::from_spec(&request.spec).disk_names();

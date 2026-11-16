@@ -125,23 +125,6 @@ impl Shared {
     }
 }
 
-fn validate_attached_disks(
-    manifest: &FilesystemManifest,
-    attached: Option<&AttachedDisks>,
-) -> Result<()> {
-    ensure!(
-        !manifest.partial || attached.is_some(),
-        "partial filesystem snapshot requires external disks"
-    );
-    if let Some(attached) = attached {
-        ensure!(
-            attached.key == manifest.key,
-            "external disks belong to another filesystem snapshot"
-        );
-    }
-    Ok(())
-}
-
 /// Controls registration for future restores. Running VMs retain their own
 /// disk owners until termination, even after this guard is dropped.
 #[must_use]
@@ -702,7 +685,19 @@ impl FirecrackerSandboxBackend {
             .expect("filesystem disks poisoned")
             .get(&request.sandbox_id)
             .cloned();
-        validate_attached_disks(&manifest, attached.as_ref())?;
+        if manifest.partial && attached.is_none() {
+            return Err(
+                anyhow::anyhow!("partial filesystem snapshot requires external disks").into(),
+            );
+        }
+        if attached
+            .as_ref()
+            .is_some_and(|disks| disks.key != manifest.key)
+        {
+            return Err(
+                anyhow::anyhow!("external disks belong to another filesystem snapshot").into(),
+            );
+        }
         let template = manifest.template;
         if !((template
             && manifest.layout.workdir == request.spec.default_workdir
