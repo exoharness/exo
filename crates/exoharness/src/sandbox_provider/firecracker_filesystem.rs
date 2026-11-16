@@ -431,10 +431,11 @@ fn capture_disks(
                     .with_context(|| format!("capturing required filesystem disk {name}"))?;
             }
             let captured = fs::symlink_metadata(&destination)?;
-            ensure!(
-                captured.is_file() && captured.len() == fs::metadata(root.join(name))?.len(),
-                "filesystem capture disk size mismatch: {name}"
-            );
+            if !captured.is_file() || captured.len() != fs::metadata(root.join(name))?.len() {
+                return Err(
+                    anyhow::anyhow!("filesystem capture disk size mismatch: {name}").into(),
+                );
+            }
             manifest.disk_sizes.push(captured.len());
         }
         if suspend {
@@ -543,7 +544,7 @@ impl FirecrackerSandboxBackend {
         payload: SnapshotPayload,
         base_image: PathBuf,
         disks: Vec<PathBuf>,
-    ) -> Result<SnapshotPayload> {
+    ) -> crate::SandboxResult<SnapshotPayload> {
         self.import_filesystem_snapshot_inner(payload, base_image, disks, ImportMode::Lazy)
             .await
     }

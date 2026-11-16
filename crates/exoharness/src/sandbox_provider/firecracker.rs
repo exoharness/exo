@@ -1303,10 +1303,12 @@ impl FirecrackerSandboxBackend {
             .load_machine_record(source_machine_id)
             .await?
             .context("Firecracker snapshot source manifest is missing")?;
-        ensure!(
-            !source.external_disks,
-            "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
-        );
+        if source.external_disks {
+            return Err(anyhow::anyhow!(
+                "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+            )
+            .into());
+        }
         if source.spec_hash != source_spec_hash
             || sandbox_spec_hash(&request.spec) != source_spec_hash
         {
@@ -5700,10 +5702,12 @@ fn capture_snapshot_template(
     template_key: &str,
     lifecycle: SnapshotTemplateLifecycle,
 ) -> crate::SandboxResult<File> {
-    ensure!(
-        !source.external_disks,
-        "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
-    );
+    if source.external_disks {
+        return Err(anyhow::anyhow!(
+            "Firecracker RAM snapshots do not support external disks; use filesystem snapshots"
+        )
+        .into());
+    }
     let capture_pending = jail_dir(config, &source.machine_id).join("snapshot-pending");
     let memory_base = jail_dir(config, &source.machine_id).join("snapshot-memory");
     if capture_pending.try_exists()? {
