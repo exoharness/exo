@@ -19,7 +19,7 @@ async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Resul
         workspace_size_gib: 1,
         network_device_policy: FirecrackerNetworkDevicePolicy::AllSandboxes,
         allow_guest_root: false,
-        memory_ceiling_mib: std::num::NonZeroU32::new(1024),
+        live_resource_growth: true,
         allowed_registries: vec!["docker.io".into()],
         ..Default::default()
     })

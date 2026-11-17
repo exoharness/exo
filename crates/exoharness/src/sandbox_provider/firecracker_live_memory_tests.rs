@@ -19,7 +19,7 @@ fn config(root: &Path, image: &str) -> FirecrackerConfig {
         image_size_gib: 1,
         workspace_size_gib: 1,
         network_device_policy: FirecrackerNetworkDevicePolicy::AllSandboxes,
-        memory_ceiling_mib: std::num::NonZeroU32::new(8192),
+        live_resource_growth: true,
         max_machines: NonZeroUsize::new(1),
         ..Default::default()
     }
@@ -70,12 +70,10 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
     let result: Result<()> = async {
         let handle = backend.acquire(request.clone()).await?;
         request.provider_state = handle.provider_state();
-        assert_eq!(
-            handle.live_resource_ceiling(),
-            SandboxResourceShape::new(1, 8192)
-        );
+        let capacity = handle.live_resource_ceiling().context("missing growth capacity")?;
+        ensure!(capacity.memory_mib.get() >= 8192, "test needs at least 8 GiB capacity");
         let record = allocation(&backend, &request).await?;
-        assert_balloon(&config, &record, 4096)?;
+        assert_balloon(&config, &record, 0)?;
         let before = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
             .trim()
@@ -86,7 +84,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
             fs::read(cgroup.join("memory.max"))?,
             fs::read(cgroup.join("memory.high"))?,
         );
-        for shape in [(2, 4096), (1, 2048), (1, 8193)] {
+        for shape in [(2, 4096), (1, 2048), (1, capacity.memory_mib.get() + 1)] {
             assert!(
                 handle
                     .expand_resources(SandboxResourceShape::new(shape.0, shape.1).unwrap())
@@ -97,7 +95,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
                 balloon::grant(&allocation(&backend, &request).await?)?,
                 4096
             );
-            assert_balloon(&config, &record, 4096)?;
+            assert_balloon(&config, &record, 0)?;
             assert_eq!(
                 (
                     fs::read(cgroup.join("memory.max"))?,
@@ -148,7 +146,7 @@ while True:
         let peer = std::thread::spawn(move || -> Result<()> {
             let (mut stream, _) = listener.accept()?;
             let (request, _) = read_api_request(&mut stream)?;
-            assert!(request.starts_with("PATCH /balloon "));
+            assert!(request.starts_with("PATCH /hotplug/memory "));
             entered.send(()).unwrap();
             released.recv_timeout(Duration::from_secs(10))?;
             stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")?;
@@ -171,7 +169,7 @@ while True:
         assert_eq!(concurrent??, "during-growth");
         assert!(failure.is_err());
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
-        assert_balloon(&config, &record, 4096)?;
+        assert_balloon(&config, &record, 0)?;
         assert!(
             handle
                 .expand_resources(SandboxResourceShape::new(1, 4096).unwrap())
@@ -285,7 +283,6 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
     let temp = tempfile::Builder::new().prefix("m").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     let mut config = config(temp.path(), &image);
-    config.memory_ceiling_mib = std::num::NonZeroU32::new(1025);
     config.max_machines = NonZeroUsize::new(2);
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let source = SandboxRequest {
@@ -310,13 +307,13 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
     let result: Result<()> = async {
         let handle = backend.acquire(source.clone()).await?;
         handle
-            .expand_resources(SandboxResourceShape::new(1, 1024).unwrap())
+            .expand_resources(SandboxResourceShape::new(1, 1025).unwrap())
             .await?;
         shell(&handle, "printf retained > /tmp/ram-state").await?;
         let fork = backend.fork_sandbox(source.clone(), target.clone()).await?;
         let fork_record = allocation(&backend, &target).await?;
         ensure!(
-            balloon::grant(&fork_record)? == 1024,
+            balloon::grant(&fork_record)? == 1025,
             "fork lost the memory grant"
         );
         ensure!(
@@ -338,7 +335,7 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
             .await?;
         let restored_record = allocation(&backend, &target).await?;
         ensure!(
-            balloon::grant(&restored_record)? == 1024,
+            balloon::grant(&restored_record)? == 1025,
             "RAM restore lost the memory grant"
         );
         assert_balloon(&config, &restored_record, 1)?;
@@ -372,7 +369,7 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
         assert!(futures::poll!(&mut expansion).is_pending());
         drop(expansion);
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
-        assert_balloon(&config, &record, 2048)?;
+        assert_balloon(&config, &record, 0)?;
 
         // Cancellation while waiting for ownership must not dispatch growth.
         let guard = backend
@@ -438,11 +435,32 @@ async fn live_memory_growth_makes_six_gib_writable() -> Result<()> {
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     let mut config = config(temp.path(), &image);
     config.network_device_policy = FirecrackerNetworkDevicePolicy::EnabledSandboxes;
-    let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
+    let mut backend = FirecrackerSandboxBackend::new(config.clone()).await?;
+    // A node-sized, unplugged range must not consume the small initial grant.
+    Arc::get_mut(&mut backend.shared)
+        .context("backend unexpectedly shared")?
+        .host_fingerprint
+        .memory_ceiling_mib = std::num::NonZeroU32::new(262144);
     let mut request = native_request(&config, "allocation", &image)?;
-    request.spec.resources = SandboxResourceShape::new(1, 4096);
+    request.spec.resources = SandboxResourceShape::new(1, 2048);
     let result: Result<()> = async {
         let handle = backend.acquire(request).await?;
+        assert_eq!(
+            handle.live_resource_grant().await?,
+            SandboxResourceShape::new(1, 2048)
+        );
+        assert_eq!(
+            handle.live_resource_ceiling(),
+            SandboxResourceShape::new(1, 262144)
+        );
+        let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
+            .await?
+            .trim()
+            .parse::<u64>()?;
+        ensure!(
+            available > 1024 * 1024,
+            "large capacity consumed the initial grant: {available} KiB"
+        );
         handle
             .expand_resources(SandboxResourceShape::new(1, 8192).unwrap())
             .await?;
@@ -477,23 +495,17 @@ async fn live_memory_small_grant_is_writable() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("acct-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     let mut config = config(temp.path(), &image);
-    config.memory_ceiling_mib = std::num::NonZeroU32::new(2048);
     config.network_device_policy = FirecrackerNetworkDevicePolicy::EnabledSandboxes;
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let mut request = native_request(&config, "accounting", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 512);
     let result: Result<()> = async {
-        let started = Instant::now();
         let handle = backend.acquire(request.clone()).await?;
         let record = allocation(&backend, &request).await?;
         let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
             .trim()
             .parse::<u64>()?;
-        eprintln!(
-            "512 MiB grant / 2 GiB ceiling: acquire_ms={} available_kib={available}",
-            started.elapsed().as_millis()
-        );
         assert!(
             available >= 256 * 1024,
             "insufficient usable memory: {available} KiB"
@@ -523,16 +535,18 @@ print("verified")'
             .trim()
             .parse::<u64>()?;
         let events = fs::read_to_string(cgroup.join("memory.events"))?;
-        eprintln!(
-            "memory.current={current} memory.high={high} {}",
-            events.replace('\n', "; ")
-        );
         assert!(current < high, "balloon memory exceeds grant headroom");
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.max"))?
                 .trim()
                 .parse::<u64>()?,
-            (512 + FIRECRACKER_MEMORY_HEADROOM_MIB) * 1024 * 1024
+            u64::from(
+                backend
+                    .host_resource_reservation(request.spec.resources.unwrap())?
+                    .memory_mib
+                    .get()
+            ) * 1024
+                * 1024
         );
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.swap.max"))?.trim(),
@@ -564,8 +578,7 @@ print("verified")'
 async fn live_memory_shared_ceiling_accepts_small_and_odd_sized_requests() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("shapes-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
-    let mut config = config(temp.path(), &image);
-    config.memory_ceiling_mib = std::num::NonZeroU32::new(2048);
+    let config = config(temp.path(), &image);
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let result: Result<()> = async {
         for memory in [384, 2051] {
@@ -576,9 +589,17 @@ async fn live_memory_shared_ceiling_accepts_small_and_odd_sized_requests() -> Re
             assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
             assert_eq!(
                 handle.live_resource_ceiling(),
-                SandboxResourceShape::new(1, memory.max(2048))
+                SandboxResourceShape::new(
+                    1,
+                    backend
+                        .shared
+                        .host_fingerprint
+                        .memory_ceiling_mib
+                        .unwrap()
+                        .get()
+                )
             );
-            assert_balloon(&config, &record, memory.max(2048) - memory)?;
+            assert_balloon(&config, &record, memory % 2)?;
             assert_eq!(shell(&handle, "printf usable-shape").await?, "usable-shape");
             handle.stop().await?;
         }

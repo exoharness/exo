@@ -29,6 +29,7 @@ pub(super) fn read_api_request(stream: &mut StdUnixStream) -> Result<(String, Ve
 fn test_host_runtime() -> FirecrackerHostFingerprint {
     FirecrackerHostFingerprint {
         memory_ceiling_mib: None,
+        memory_slot_size_mib: None,
         architecture: "x86_64".to_string(),
         protocol_version: PROTOCOL_VERSION,
         firecracker_version: "v1.16.1".to_string(),

@@ -418,6 +418,15 @@ pub struct ResolvedSandboxImage {
 
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
+    /// Host capacity to reserve for a requested guest grant, including provider
+    /// overhead. Query this before acquisition or increasing a live grant.
+    fn host_resource_reservation(
+        &self,
+        resources: crate::SandboxResourceShape,
+    ) -> Result<crate::SandboxResourceShape> {
+        Ok(resources)
+    }
+
     #[cfg(feature = "basic-backend")]
     fn with_external_proxy(
         &self,

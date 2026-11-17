@@ -165,32 +165,34 @@ use forks, the guest kernel must additionally be 5.18 or newer with
 `CONFIG_HW_RANDOM_VIRTIO=y` lets the guest draw extra entropy from the
 attached virtio-rng device.
 
-Live memory growth is opt-in through `FirecrackerConfig.memory_ceiling_mib`
-with matching Firecracker/jailer 1.17 or newer and `CONFIG_VIRTIO_BALLOON=y`.
-A request above the configured ceiling boots at its requested size. There is no
-fixed ratio or even-MiB restriction. Even-MiB boot capacities use transparent
-huge pages; odd-MiB capacities use normal pages.
-The VM boots at that capacity; acquisition waits for initial balloon inflation.
-OOM deflation is disabled. Large ceilings add boot time and guest page metadata,
-so a small grant may have little usable application memory.
+Live growth is opt-in through `FirecrackerConfig.live_resource_growth`.
+The request remains the initial grant; memory capacity is detected from host RAM
+and cgroup limits, less 1024 MiB of VMM headroom. A VM boots at its requested
+memory size, rounded up by at most 1 MiB, with the remaining range unplugged.
+Growth uses `virtio-mem`; a small balloon preserves exact odd-MiB grants.
+Matching Firecracker/jailer 1.17 or newer and guest `CONFIG_VIRTIO_MEM=y`,
+`CONFIG_MHP_MEMMAP_ON_MEMORY=y`, and `CONFIG_VIRTIO_BALLOON=y` are required.
+New memory is automatically onlined with its metadata in the added memory,
+so a large growth range does not consume the initial grant at boot.
+Boot RAM uses transparent huge pages when growth is enabled.
 
-The balloon requires a cooperative guest and is not a host security boundary;
-its page counts are guest-reported. This remains true with `allow_guest_root`
-disabled. The kernel-enforced cgroup hard limit is the guest grant plus
-`FIRECRACKER_MEMORY_HEADROOM_MIB` (1024 MiB), with reclaim throttling above the
-grant plus 256 MiB and swap disabled. **Reserve the grant plus 1024 MiB per VM**
-on the host, including before growth: an untrusted guest can consume the entire
-headroom. The grant describes guest capacity, not a host reservation.
-See Firecracker's [balloon security guidance](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/ballooning.md#security-disclaimer).
+Call `host_resource_reservation` on the backend before acquisition or growth.
+It returns the full host reservation: guest grant plus 1024 MiB. The cgroup
+hard limit enforces that reservation, reclaim starts at grant plus 256 MiB,
+and swap and automatic OOM balloon deflation are disabled. A guest can consume
+the whole headroom; the balloon's page counts are guest-reported.
+See Firecracker's [hotplug](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/memory-hotplug.md)
+and [balloon security guidance](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/ballooning.md#security-disclaimer).
 
-Growth raises host limits before deflation and waits for balloon convergence.
-CPU changes, shrinking, and over-capacity requests are rejected. Keep the
+Growth persists the grant and raises host limits before adding guest memory.
+CPU changes, shrinking, and over-capacity requests are rejected. Retain the
 reservation after an error or disconnect until `live_resource_grant` reconciles
-it, or terminate the VM; retrying the same target is safe. Captures, restores,
-and RAM forks retain the grant separately from the request's identity.
-The convergence budget is 30 seconds plus one second per 128 MiB of boot RAM;
-timeouts report the requested and observed page counts. Device page counts are
-read on demand; guest statistics are polled only once an hour.
+it or terminate the VM; retrying the same target is safe. Filesystem and RAM
+captures retain the grant separately from request identity.
+One convergence deadline covers hotplug and balloon adjustment: 30 seconds plus
+one second per 128 MiB of the target grant. Each API wait is capped at the lesser
+of five seconds and the remaining budget; convergence is polled every 100 ms.
+Device page counts are read on demand; guest statistics are polled once an hour.
 
 This is a native Linux Rust API. The CLI and macOS bridge do not expose live
 resource updates; invoke the native backend inside Lima for local validation.
