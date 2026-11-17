@@ -5147,25 +5147,31 @@ impl FirecrackerApiStream {
                     continue;
                 }
                 Err(rustix::io::Errno::INPROGRESS | rustix::io::Errno::ALREADY) => {
-                    let timeout = rustix::event::Timespec::try_from(stream.remaining()?).map_err(
-                        |error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error),
-                    )?;
-                    let mut sockets = [rustix::event::PollFd::new(
-                        &stream.stream,
-                        rustix::event::PollFlags::OUT,
-                    )];
-                    if rustix::event::poll(&mut sockets, Some(&timeout))? == 0 {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "Firecracker API connect timed out",
-                        ));
-                    }
+                    stream.wait(rustix::event::PollFlags::OUT)?;
                     rustix::net::sockopt::socket_error(&stream.stream)??;
                 }
                 Err(error) => return Err(error.into()),
             }
-            stream.stream.set_nonblocking(false)?;
             return Ok(stream);
+        }
+    }
+
+    fn wait(&self, events: rustix::event::PollFlags) -> std::io::Result<()> {
+        loop {
+            let timeout = rustix::event::Timespec::try_from(self.remaining()?)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+            let mut sockets = [rustix::event::PollFd::new(&self.stream, events)];
+            match rustix::event::poll(&mut sockets, Some(&timeout)) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Firecracker API wait timed out",
+                    ));
+                }
+                Ok(_) => return Ok(()),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -5184,15 +5190,31 @@ impl FirecrackerApiStream {
 
 impl Read for FirecrackerApiStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        self.stream.read(buffer)
+        loop {
+            self.remaining()?;
+            match self.stream.read(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.wait(rustix::event::PollFlags::IN)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
     }
 }
 
 impl Write for FirecrackerApiStream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        self.stream.write(buffer)
+        loop {
+            self.remaining()?;
+            match self.stream.write(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.wait(rustix::event::PollFlags::OUT)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
