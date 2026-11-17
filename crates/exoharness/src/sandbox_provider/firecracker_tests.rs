@@ -1159,6 +1159,14 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
             .await
             .is_err()
     );
+    let mut oversized = request.clone();
+    oversized.spec.resources = SandboxResourceShape::new(1, 8193);
+    assert!(
+        shared
+            .new_machine_record(&oversized, "fc-oversized", "spec", None, None)
+            .await
+            .is_err()
+    );
     assert_eq!(fs::read_dir(directory.path().join("manifests"))?.count(), 0);
     assert_eq!(fs::read_dir(directory.path().join("slots"))?.count(), 0);
     let record = shared

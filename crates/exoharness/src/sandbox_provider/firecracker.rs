@@ -393,6 +393,16 @@ struct FirecrackerHostFingerprint {
 }
 
 impl FirecrackerHostFingerprint {
+    fn validate_resources(&self, resources: SandboxResourceShape) -> Result<()> {
+        if let Some(memory) = self.memory_ceiling_mib {
+            ensure!(
+                resources.memory_mib <= memory,
+                "requested memory exceeds node capacity {memory} MiB"
+            );
+        }
+        Ok(())
+    }
+
     fn for_resources(&self, resources: SandboxResourceShape) -> FirecrackerRuntimeFingerprint {
         FirecrackerRuntimeFingerprint {
             architecture: self.architecture.clone(),
@@ -405,9 +415,7 @@ impl FirecrackerHostFingerprint {
             vcpu_count: resources.vcpu_count.get(),
             memory_mib: resources.memory_mib.get(),
             memory_slot_size_mib: self.memory_slot_size_mib,
-            memory_ceiling_mib: self
-                .memory_ceiling_mib
-                .map(|ceiling| ceiling.get().max(resources.memory_mib.get())),
+            memory_ceiling_mib: self.memory_ceiling_mib.map(std::num::NonZeroU32::get),
             network_device_policy: self.network_device_policy.clone(),
             template_resource_slots: self.template_resource_slots,
             allow_guest_root: self.allow_guest_root,
@@ -1188,6 +1196,12 @@ impl FirecrackerSandboxBackend {
     ) -> crate::SandboxResult<FirecrackerRequest> {
         let mut request = prepare_request(request)?;
         validate_resource_shape(request.spec.resources.unwrap_or_default())?;
+        self.shared
+            .host_fingerprint
+            .validate_resources(request.spec.resources.unwrap_or_default())
+            .map_err(|error| crate::SandboxFailure::InvalidRequest {
+                message: error.to_string(),
+            })?;
         let image = resolve_image(
             &self.shared.config.state_root,
             &request.spec.image,
@@ -2537,6 +2551,7 @@ impl Shared {
             .collect();
         let idle_ttl_seconds = request.lifecycle.idle_ttl.map(|ttl| ttl.as_secs());
         let resources = request.spec.resources.unwrap_or_default();
+        self.host_fingerprint.validate_resources(resources)?;
         let runtime = self.host_fingerprint.for_resources(resources);
         let memory_grant_mib = memory_grant_mib.map(|grant| grant.max(resources.memory_mib));
         if let Some(grant) = memory_grant_mib {
