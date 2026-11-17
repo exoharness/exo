@@ -2195,24 +2195,24 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
     let api_peer = std::thread::spawn(move || {
         let mut waiting = Some(waiting);
         let mut inflated = Some(inflated);
-        for index in 0..4 {
+        for index in 0..8 {
             let (mut stream, _) = api.accept()?;
             let (request, _) = read_api_request(&mut stream)?;
-            let statistics = index % 2 == 1;
-            assert!(request.starts_with(if statistics {
-                "GET /balloon/statistics "
-            } else {
-                "PATCH /balloon "
-            }));
-            if index == 1 {
+            let path = match index % 4 {
+                0 => "PATCH /hotplug/memory ",
+                1 => "GET /hotplug/memory ",
+                2 => "PATCH /balloon ",
+                _ => "GET /balloon/statistics ",
+            };
+            assert!(request.starts_with(path), "{request}");
+            if index == 3 {
                 waiting.take().unwrap().send(()).unwrap();
                 inflated.take().unwrap().blocking_recv()?;
             }
-            let body = if statistics {
-                serde_json::json!({"target_pages": 512 * 256, "actual_pages": 512 * 256})
-                    .to_string()
-            } else {
-                String::new()
+            let body = match index % 4 {
+                1 => r#"{"requested_size_mib":0,"plugged_size_mib":0}"#,
+                3 => r#"{"target_pages":0,"actual_pages":0}"#,
+                _ => "",
             };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
