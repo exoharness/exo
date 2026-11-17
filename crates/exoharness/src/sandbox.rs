@@ -422,9 +422,9 @@ pub trait ManagedSandboxBackend: Send + Sync {
     /// overhead. Query this before acquisition or increasing a live grant.
     fn host_resource_reservation(
         &self,
-        resources: crate::SandboxResourceShape,
+        _resources: crate::SandboxResourceShape,
     ) -> Result<crate::SandboxResourceShape> {
-        Ok(resources)
+        bail!("sandbox backend does not report host resource reservations")
     }
 
     #[cfg(feature = "basic-backend")]

@@ -2975,7 +2975,7 @@ fn firecracker_host_fingerprint(
         .map(|capacity| {
             // Leave slots for boot RAM and architectural devices; the remaining
             // region uses the smallest power-of-two slots supported by this host.
-            let slots = balloon::kvm_capability(10)?
+            let slots = balloon::kvm_capability(balloon::KVM_CAP_NR_MEMSLOTS)?
                 .checked_sub(8)
                 .filter(|slots| *slots > 0)
                 .context("KVM has too few memory slots")?;
@@ -5111,6 +5111,95 @@ fn firecracker_api_request<T: Serialize>(
     firecracker_api_response(socket, method, path, &serde_json::to_vec(body)?, timeout).map(|_| ())
 }
 
+struct FirecrackerApiStream {
+    stream: StdUnixStream,
+    deadline: Instant,
+}
+
+impl FirecrackerApiStream {
+    fn connect(path: &Path, timeout: Duration) -> std::io::Result<Self> {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+        let deadline = Instant::now() + timeout;
+        let address = SocketAddrUnix::new(path)?;
+        loop {
+            #[cfg(target_os = "linux")]
+            let fd = rustix::net::socket_with(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+                None,
+            )?;
+            #[cfg(not(target_os = "linux"))]
+            let fd = {
+                let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+                rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+                fd
+            };
+            let stream = Self {
+                stream: StdUnixStream::from(fd),
+                deadline,
+            };
+            stream.stream.set_nonblocking(true)?;
+            match rustix::net::connect(&stream.stream, &address) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::AGAIN) => {
+                    std::thread::sleep(stream.remaining()?.min(Duration::from_millis(1)));
+                    continue;
+                }
+                Err(rustix::io::Errno::INPROGRESS | rustix::io::Errno::ALREADY) => {
+                    let timeout = rustix::event::Timespec::try_from(stream.remaining()?).map_err(
+                        |error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error),
+                    )?;
+                    let mut sockets = [rustix::event::PollFd::new(
+                        &stream.stream,
+                        rustix::event::PollFlags::OUT,
+                    )];
+                    if rustix::event::poll(&mut sockets, Some(&timeout))? == 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Firecracker API connect timed out",
+                        ));
+                    }
+                    rustix::net::sockopt::socket_error(&stream.stream)??;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            stream.stream.set_nonblocking(false)?;
+            return Ok(stream);
+        }
+    }
+
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Firecracker API deadline expired",
+                )
+            })
+    }
+}
+
+impl Read for FirecrackerApiStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        self.stream.read(buffer)
+    }
+}
+
+impl Write for FirecrackerApiStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        self.stream.write(buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
 #[tracing::instrument(name = "firecracker.api", skip_all, fields(method, path))]
 fn firecracker_api_response(
     socket: &Path,
@@ -5119,10 +5208,8 @@ fn firecracker_api_response(
     body: &[u8],
     timeout: Duration,
 ) -> Result<Vec<u8>> {
-    let mut stream = StdUnixStream::connect(socket)
+    let mut stream = FirecrackerApiStream::connect(socket, timeout)
         .with_context(|| format!("connecting to Firecracker API {}", socket.display()))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",

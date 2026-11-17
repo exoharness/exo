@@ -1,5 +1,7 @@
 use super::*;
 
+pub(super) const KVM_CAP_NR_MEMSLOTS: libc::c_int = 10;
+
 const BALLOON_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Serialize)]
@@ -41,7 +43,8 @@ pub(super) fn kvm_capability(capability: libc::c_int) -> Result<u32> {
     use std::os::fd::AsRawFd;
     let kvm = File::open("/dev/kvm")?;
     // SAFETY: KVM_CHECK_EXTENSION reads an integer capability, not a pointer.
-    let value = unsafe { libc::ioctl(kvm.as_raw_fd(), 0xAE03, capability) };
+    const KVM_CHECK_EXTENSION: libc::c_ulong = 0xAE03;
+    let value = unsafe { libc::ioctl(kvm.as_raw_fd(), KVM_CHECK_EXTENSION, capability) };
     ensure!(value > 0, "KVM capability {capability} is unavailable");
     Ok(u32::try_from(value)?)
 }
@@ -243,6 +246,10 @@ fn apply_grant(
 ) -> Result<SandboxResourceShape> {
     let memory = resources.memory_mib.get();
     let deadline = deadline(memory);
+    let mut record = record.clone();
+    record.memory_grant_mib = Some(resources.memory_mib);
+    // Journal the reservation before changing any host or guest limit.
+    replace_manifest(&config.state_root, &record)?;
     fs::write(
         cgroup.join("memory.max"),
         (u64::from(firecracker_host_reservation(resources)?.memory_mib.get()) * 1024 * 1024)
@@ -252,9 +259,6 @@ fn apply_grant(
         cgroup.join("memory.high"),
         ((u64::from(memory) + 256) * 1024 * 1024).to_string(),
     )?;
-    let mut record = record.clone();
-    record.memory_grant_mib = Some(resources.memory_mib);
-    replace_manifest(&config.state_root, &record)?;
     initialize_until(config, &record, deadline)?;
     Ok(resources)
 }
@@ -343,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_host_limit_does_not_publish_a_grant() -> Result<()> {
+    fn failed_host_limit_retains_the_reservation_for_retry() -> Result<()> {
         let root = tempfile::tempdir()?;
         let config = FirecrackerConfig {
             state_root: root.path().into(),
@@ -362,9 +366,9 @@ mod tests {
         .unwrap_err();
         assert!(error.downcast_ref::<std::io::Error>().is_some());
         let after = fs::read(manifest_path(&config.state_root, &record.machine_id))?;
-        assert_eq!(after, before);
+        assert_ne!(after, before);
         let persisted: MachineRecord = serde_json::from_slice(&after)?;
-        assert_eq!(grant(&persisted)?, 4096);
+        assert_eq!(grant(&persisted)?, 8192);
         Ok(())
     }
 

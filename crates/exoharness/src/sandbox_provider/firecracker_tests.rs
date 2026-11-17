@@ -2289,3 +2289,83 @@ async fn lease_renewal_does_not_wait_for_growth_or_recreate_deleted_leases() -> 
     assert!(!path.exists());
     Ok(())
 }
+
+#[test]
+fn api_deadline_covers_partial_response_progress() -> Result<()> {
+    let root = tempfile::tempdir_in("/tmp")?;
+    let path = root.path().join("api");
+    let listener = StdUnixListener::bind(&path)?;
+    let peer = std::thread::spawn(move || -> Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        read_api_request(&mut stream)?;
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n")?;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(50));
+            if let Err(error) = stream.write_all(b"x") {
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ));
+                break;
+            }
+        }
+        Ok(())
+    });
+    let started = Instant::now();
+    assert!(
+        firecracker_api_response(
+            &path,
+            "GET",
+            "/balloon/statistics",
+            &[],
+            Duration::from_millis(250)
+        )
+        .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_millis(900));
+    peer.join().unwrap()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn api_deadline_bounds_a_full_unix_socket_backlog() -> Result<()> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    let root = tempfile::tempdir_in("/tmp")?;
+    let path = root.path().join("api");
+    let fd = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )?;
+    rustix::net::bind(&fd, &SocketAddrUnix::new(&path)?)?;
+    rustix::net::listen(&fd, 0)?;
+    let listener = StdUnixListener::from(fd);
+    let queued = StdUnixStream::connect(&path)?;
+    let peer = std::thread::spawn(move || -> Result<()> {
+        std::thread::sleep(Duration::from_millis(1500));
+        let (stream, _) = listener.accept()?;
+        drop(stream);
+        Ok(())
+    });
+    let started = Instant::now();
+    assert!(
+        firecracker_api_response(
+            &path,
+            "GET",
+            "/balloon/statistics",
+            &[],
+            Duration::from_millis(250)
+        )
+        .is_err()
+    );
+    let elapsed = started.elapsed();
+    drop(queued);
+    peer.join().unwrap()?;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "connect ignored the API deadline: {elapsed:?}"
+    );
+    Ok(())
+}
