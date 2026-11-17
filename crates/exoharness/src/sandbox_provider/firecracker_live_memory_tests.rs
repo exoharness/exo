@@ -96,10 +96,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
                     .await
                     .is_err()
             );
-            assert_eq!(
-                balloon::grant(&allocation(&backend, &request).await?)?,
-                4096
-            );
+            assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
             assert_balloon(&config, &record, 0)?;
             assert_eq!(
                 (
@@ -191,10 +188,7 @@ while True:
         );
         assert_eq!(handle.expand_resources(grown).await?, grown);
         assert_eq!(handle.expand_resources(grown).await?, grown);
-        assert_eq!(
-            balloon::grant(&allocation(&backend, &request).await?)?,
-            8192
-        );
+        assert_eq!(handle.live_resource_grant().await?, Some(grown));
         assert_balloon(&config, &record, 0)?;
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.max"))?.trim(),
@@ -234,10 +228,7 @@ while True:
             .acquire_from_snapshot(request.clone(), snapshot.clone())
             .await?;
         let restored_record = allocation(&backend, &request).await?;
-        ensure!(
-            balloon::grant(&restored_record)? == 8192,
-            "filesystem restore lost the expanded memory grant"
-        );
+        assert_eq!(restored.live_resource_grant().await?, Some(grown));
         let available = shell(&restored, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
             .trim()
@@ -264,10 +255,7 @@ while True:
             reattached_record.machine_id == restored_record.machine_id,
             "reacquisition replaced the restored VM"
         );
-        ensure!(
-            balloon::grant(&reattached_record)? == 8192,
-            "reacquisition lost the expanded memory grant"
-        );
+        assert_eq!(reattached.live_resource_grant().await?, Some(grown));
         assert_eq!(
             shell(
                 &reattached,
@@ -382,10 +370,6 @@ with open("/dev/shm/ram-state", "r+b") as f:
             SandboxResourceShape::new(1, 1025)
         );
         ensure!(
-            balloon::grant(&fork_record)? == 1025,
-            "fork lost the memory grant"
-        );
-        ensure!(
             fork_record.runtime.memory_mib == 512,
             "fork changed the sandbox identity"
         );
@@ -422,10 +406,6 @@ with open("/dev/shm/ram-state", "r+b") as f:
         assert_eq!(
             restored.live_resource_grant().await?,
             SandboxResourceShape::new(1, 1025)
-        );
-        ensure!(
-            balloon::grant(&restored_record)? == 1025,
-            "RAM restore lost the memory grant"
         );
         assert_balloon(&config, &restored_record, 1)?;
         assert_eq!(shell(&restored, check).await?, changed);

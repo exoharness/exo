@@ -224,7 +224,7 @@ pub struct FirecrackerConfig {
     /// Host memory overhead as a percentage of guest RAM. Defaults to 10%.
     #[serde(default = "default_memory_overhead_percent")]
     pub memory_overhead_percent: u8,
-    /// Opt in to live growth up to the host's CPU and memory capacity.
+    /// Opt in to live growth up to the host's memory capacity.
     /// The requested shape remains the initial grant. Reserve backend host
     /// overhead as well as the grant before requesting growth.
     #[serde(default)]
@@ -365,7 +365,7 @@ impl FirecrackerRuntimeFingerprint {
             "invalid Firecracker hotplug slot size"
         );
         let boot = u64::from(self.memory_mib).div_ceil(2) * 2;
-        let ceiling = u64::from(self.memory_ceiling_mib.unwrap_or(self.memory_mib));
+        let ceiling = u64::from(capacity);
         let mapped =
             boot + ceiling.saturating_sub(boot).div_ceil(u64::from(slot)) * u64::from(slot);
         ensure!(

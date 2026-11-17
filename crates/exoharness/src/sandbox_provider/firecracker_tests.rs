@@ -2,6 +2,9 @@ use super::*;
 use crate::egress::{EgressTransport, LocalEgressTransport};
 use tokio::net::UnixListener;
 
+#[cfg(target_os = "linux")]
+pub(super) use super::filesystem::tests::{native_request, shell};
+
 pub(super) fn read_api_request(stream: &mut StdUnixStream) -> Result<(String, Vec<u8>)> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut reader = StdBufReader::new(stream);
@@ -2044,88 +2047,6 @@ fn resource_backing_disks_are_private_to_the_thread() -> Result<()> {
     std::os::unix::fs::symlink(temp.path().join("outside"), &disk)?;
     assert!(resource_disk(&config, scope, &directory).is_err());
     Ok(())
-}
-
-#[cfg(target_os = "linux")]
-pub(super) fn native_request(
-    config: &FirecrackerConfig,
-    id: &str,
-    image: &str,
-) -> Result<SandboxRequest> {
-    let agent_id = crate::Uuid7::now();
-    let thread_id = crate::Uuid7::now();
-    let directory = config
-        .state_root
-        .join("resources/threads")
-        .join(agent_id.to_string())
-        .join(thread_id.to_string())
-        .join("repo");
-    fs::create_dir_all(&directory)?;
-    let volume = directory.join("volume.ext4");
-    File::create(&volume)?.set_len(1024 * 1024 * 1024)?;
-    run_checked("mkfs.ext4", &["-q", "-F", &volume.to_string_lossy()])?;
-    for field in ["uid", "gid"] {
-        run_checked(
-            "debugfs",
-            &[
-                "-w",
-                "-R",
-                &format!("set_inode_field / {field} 10001"),
-                &volume.to_string_lossy(),
-            ],
-        )?;
-    }
-    Ok(SandboxRequest {
-        sandbox_id: id.into(),
-        scope: crate::ResourceScope::Thread {
-            agent_id,
-            thread_id,
-        },
-        spec: SandboxSpec {
-            image: image.into(),
-            resources: Some(
-                SandboxResourceShape::new(1, 1024).context("invalid test resource shape")?,
-            ),
-            default_workdir: "/workspace".into(),
-            mounts: vec![crate::SandboxMount {
-                host_path: directory,
-                guest_path: "/repo".into(),
-                access: crate::SandboxMountAccess::ReadWrite,
-                internal: true,
-            }],
-            durable_file_systems: vec![crate::DurableFileSystem {
-                name: "workspace".into(),
-                mount_path: "/workspace".into(),
-                mode: FileSystemMountMode::ReadWrite,
-            }],
-            policy: SandboxNetworkPolicy::Disabled.into(),
-            tcp_ports: vec![],
-        },
-        lifecycle: crate::SandboxLifecycleConfig {
-            idle_ttl: Some(Duration::from_secs(600)),
-        },
-        provider_state: None,
-    })
-}
-
-#[cfg(target_os = "linux")]
-pub(super) async fn shell(handle: &Arc<dyn ManagedSandboxHandle>, script: &str) -> Result<String> {
-    let output = handle
-        .exec(&SandboxCommand {
-            argv: vec!["/bin/sh".into(), "-ec".into(), script.into()],
-            env: HashMap::new(),
-            display_argv: None,
-            cwd: Some("/".into()),
-            timeout: Some(Duration::from_secs(10)),
-        })
-        .await?;
-    ensure!(
-        output.ok,
-        "guest command failed: {}{}",
-        output.stdout,
-        output.stderr
-    );
-    Ok(output.stdout)
 }
 
 #[cfg(target_os = "linux")]

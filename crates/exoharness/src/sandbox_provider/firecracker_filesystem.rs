@@ -842,4 +842,4 @@ fn install_disks(
 
 #[cfg(test)]
 #[path = "firecracker_filesystem_tests.rs"]
-mod tests;
+pub(super) mod tests;
