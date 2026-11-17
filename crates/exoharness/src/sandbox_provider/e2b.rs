@@ -160,7 +160,7 @@ impl E2bSandboxBackend {
             auto_pause,
             secure: self.secure,
             allow_internet_access: !matches!(
-                request.spec.policy.networking,
+                request.policy.networking,
                 SandboxNetworkPolicy::Disabled
             ),
             metadata,
@@ -241,7 +241,7 @@ impl ManagedSandboxBackend for E2bSandboxBackend {
         &self,
         request: SandboxRequest,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("e2b")?;
+        request.policy.validate_basic("e2b")?;
         reject_host_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let key_label = request.sandbox_id.clone();
@@ -316,7 +316,7 @@ impl E2bSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("e2b")?;
+        request.policy.validate_basic("e2b")?;
         reject_host_mounts(&request)?;
         if payload.format != SnapshotFormat::E2bRef {
             bail!(

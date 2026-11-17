@@ -24,7 +24,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{self, ServerConfig, pki_types::PrivatePkcs8KeyDer};
@@ -105,7 +105,8 @@ pub struct EgressProxy {
 
 pub(crate) struct ProxyConnection {
     ca_pem: String,
-    environment: HashMap<String, String>,
+    environment: Mutex<HashMap<String, String>>,
+    updates: mpsc::Sender<(State, oneshot::Sender<Result<()>>)>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -185,8 +186,12 @@ impl EgressProxy {
         &self.connection.ca_pem
     }
 
-    pub fn environment(&self) -> &HashMap<String, String> {
-        &self.connection.environment
+    pub fn environment(&self) -> HashMap<String, String> {
+        self.connection
+            .environment
+            .lock()
+            .expect("egress environment poisoned")
+            .clone()
     }
 
     pub fn close(&self) {
@@ -250,10 +255,6 @@ impl State {
         ensure!(
             !identity.sandbox_id.is_empty(),
             "egress identity is required"
-        );
-        ensure!(
-            policy.networking_enabled(),
-            "credential proxy requires networking"
         );
         let network = crate::egress_credentials::NetworkPolicy::new(&policy)?;
         // Allowed hosts also determine TLS interception; unrestricted traffic
@@ -557,34 +558,54 @@ pub(crate) fn public_ipv4(ip: IpAddr) -> bool {
 // Proxy authentication is scoped to its proxy (sections 11.7.1/11.7.2); framing
 // and trailers are handled by the HTTP stacks on either side of this proxy.
 fn tls_configuration(hosts: Vec<String>) -> Result<(String, TlsAcceptor)> {
-    let mut ca = CertificateParams::new(Vec::<String>::new())?;
-    ca.distinguished_name
-        .push(DnType::CommonName, "Exo sandbox egress CA");
-    ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    ca.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::DigitalSignature,
-        KeyUsagePurpose::CrlSign,
-    ];
-    let key = KeyPair::generate()?;
-    let certificate = ca.self_signed(&key)?;
-    let issuer = Issuer::new(ca, key);
-    let leaf_key = KeyPair::generate()?;
-    let mut leaf = CertificateParams::new(hosts)?;
-    leaf.distinguished_name
-        .push(DnType::CommonName, "Exo sandbox egress");
-    leaf.use_authority_key_identifier_extension = true;
-    let leaf = leaf.signed_by(&leaf_key, &issuer)?;
-    let mut tls =
-        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![leaf.der().clone()],
-                PrivatePkcs8KeyDer::from(leaf_key.serialize_der()).into(),
-            )?;
-    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok((certificate.pem(), TlsAcceptor::from(Arc::new(tls))))
+    let authority = TlsAuthority::new()?;
+    let tls = authority.acceptor(hosts)?;
+    Ok((authority.ca_pem, tls))
+}
+
+struct TlsAuthority {
+    ca_pem: String,
+    issuer: Issuer<'static, KeyPair>,
+}
+
+impl TlsAuthority {
+    fn new() -> Result<Self> {
+        let mut ca = CertificateParams::new(Vec::<String>::new())?;
+        ca.distinguished_name
+            .push(DnType::CommonName, "Exo sandbox egress CA");
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let key = KeyPair::generate()?;
+        let certificate = ca.self_signed(&key)?;
+        let issuer = Issuer::new(ca, key);
+        Ok(Self {
+            ca_pem: certificate.pem(),
+            issuer,
+        })
+    }
+
+    fn acceptor(&self, hosts: Vec<String>) -> Result<TlsAcceptor> {
+        let leaf_key = KeyPair::generate()?;
+        let mut leaf = CertificateParams::new(hosts)?;
+        leaf.distinguished_name
+            .push(DnType::CommonName, "Exo sandbox egress");
+        leaf.use_authority_key_identifier_extension = true;
+        let leaf = leaf.signed_by(&leaf_key, &self.issuer)?;
+        let mut tls =
+            ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()?
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![leaf.der().clone()],
+                    PrivatePkcs8KeyDer::from(leaf_key.serialize_der()).into(),
+                )?;
+        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        Ok(TlsAcceptor::from(Arc::new(tls)))
+    }
 }
 
 async fn http_connection<T>(stream: T, state: Arc<State>, sni: Option<String>) -> Result<()>
@@ -746,24 +767,63 @@ impl ProxyConnection {
             .iter()
             .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
             .collect();
-        let (ca_pem, tls) = match &state.external {
-            Some(external) => (external.ca_pem.clone(), None),
-            None => {
-                let (ca_pem, tls) = tls_configuration(state.hosts.iter().cloned().collect())?;
-                (ca_pem, Some(tls))
-            }
+        let authority = state
+            .external
+            .is_none()
+            .then(TlsAuthority::new)
+            .transpose()?;
+        let ca_pem = match (&state.external, &authority) {
+            (Some(external), _) => external.ca_pem.clone(),
+            (_, Some(authority)) => authority.ca_pem.clone(),
+            _ => unreachable!(),
         };
+        let tls = authority
+            .as_ref()
+            .map(|authority| authority.acceptor(state.hosts.iter().cloned().collect()))
+            .transpose()?;
+        let (updates, receiver) = mpsc::channel(1);
         let shutdown = cancel.clone();
         let task = tokio::spawn(async move {
-            serve(accept, tls, Arc::new(state), shutdown).await;
+            serve(accept, tls, authority, Arc::new(state), receiver, shutdown).await;
             close();
         });
         Ok(Self {
             ca_pem,
-            environment,
+            environment: Mutex::new(environment),
+            updates,
             cancel,
             task,
         })
+    }
+
+    async fn update(&self, state: State) -> Result<()> {
+        if let Some(external) = &state.external {
+            ensure!(
+                external.ca_pem == self.ca_pem,
+                "an allocation must keep its trusted proxy CA"
+            );
+        }
+        let environment = state
+            .bindings
+            .iter()
+            .map(|binding| {
+                (
+                    binding.config.environment_variable.clone(),
+                    binding.placeholder.clone(),
+                )
+            })
+            .collect();
+        let (response, result) = oneshot::channel();
+        self.updates
+            .send((state, response))
+            .await
+            .context("egress proxy is closed")?;
+        result.await.context("egress update did not complete")??;
+        *self
+            .environment
+            .lock()
+            .expect("egress environment poisoned") = environment;
+        Ok(())
     }
 
     fn close(&self) {
@@ -780,8 +840,10 @@ impl Drop for ProxyConnection {
 
 async fn serve<A, F, C>(
     accept: A,
-    tls: Option<TlsAcceptor>,
-    state: Arc<State>,
+    mut tls: Option<TlsAcceptor>,
+    authority: Option<TlsAuthority>,
+    mut state: Arc<State>,
+    mut updates: mpsc::Receiver<(State, oneshot::Sender<Result<()>>)>,
     cancel: CancellationToken,
 ) where
     A: Fn(Arc<State>) -> F,
@@ -796,6 +858,21 @@ async fn serve<A, F, C>(
             Some(result) = tasks.join_next(), if !tasks.is_empty() => {
                 if !matches!(result, Ok(Ok(()))) {
                     tracing::debug!("egress connection closed with an error");
+                }
+            }
+            Some((next, response)) = updates.recv() => {
+                tasks.shutdown().await;
+                let next_tls = authority.as_ref().map(|authority| authority.acceptor(next.hosts.iter().cloned().collect())).transpose();
+                match next_tls {
+                    Ok(next_tls) => {
+                        state = Arc::new(next);
+                        tls = next_tls;
+                        let _ = response.send(Ok(()));
+                    }
+                    Err(error) => {
+                        let _ = response.send(Err(error));
+                        break;
+                    }
                 }
             }
             incoming = accept(state.clone()) => {

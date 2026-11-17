@@ -13,6 +13,7 @@ use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{DNSClass, RData, Record, RecordType, rdata::A};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +34,9 @@ const SYNTHETIC_IP: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 #[async_trait]
 pub trait EgressTransport: Send + Sync {
     fn endpoints(&self) -> SandboxEgressProxy;
+    async fn update_policy(&self, _policy: &crate::EgressPolicy) -> Result<()> {
+        anyhow::bail!("egress transport does not support policy updates")
+    }
     /// Admit the VM only after acquisition has established its source address.
     async fn bind_source(&self, source_ip: Ipv4Addr) -> Result<()>;
     async fn accept(&self, tls: bool) -> Result<BoxSandboxTcpStream>;
@@ -49,6 +53,14 @@ pub trait EgressTransport: Send + Sync {
 #[async_trait]
 pub(crate) trait NetworkDns: Send + Sync {
     async fn resolve(&self, source: Ipv4Addr, host: &str) -> Result<Vec<Ipv4Addr>>;
+    async fn update_policy(
+        &self,
+        _source: Ipv4Addr,
+        _policy: &crate::EgressPolicy,
+        _endpoints: SandboxEgressProxy,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub struct LocalEgressTransport {
@@ -60,6 +72,8 @@ pub struct LocalEgressTransport {
     // Guest IPv4 admitted by accepts_peer. Zero means unbound; bind_source
     // rejects 0.0.0.0 so the sentinel cannot collide with a real source.
     source: Arc<AtomicU32>,
+    hosts: Arc<RwLock<Option<HashSet<String>>>>,
+    resolver: Option<Arc<dyn NetworkDns>>,
     cancel: CancellationToken,
 }
 
@@ -167,9 +181,7 @@ impl LocalEgressTransport {
                 Some(canonical_egress_hosts(allowed_hosts)?)
             }
             crate::SandboxNetworkPolicy::Unrestricted => None,
-            crate::SandboxNetworkPolicy::Disabled => {
-                anyhow::bail!("disabled networking cannot use an egress proxy")
-            }
+            crate::SandboxNetworkPolicy::Disabled => Some(HashSet::new()),
         };
         let config = match config {
             Some(config) => config,
@@ -226,11 +238,12 @@ impl LocalEgressTransport {
         let cancel = CancellationToken::new();
         let dns = Arc::new(Socket::new(dns));
         let dns_tcp = Arc::new(Socket::new(dns_tcp));
+        let hosts = Arc::new(RwLock::new(hosts));
         tokio::spawn(serve_dns(
             dns.clone(),
             dns_tcp.clone(),
             hosts.clone(),
-            resolver,
+            resolver.clone(),
             source.clone(),
             cancel.clone(),
         ));
@@ -241,6 +254,8 @@ impl LocalEgressTransport {
             dns,
             dns_tcp,
             source,
+            hosts,
+            resolver,
             cancel,
         })
     }
@@ -250,6 +265,27 @@ impl LocalEgressTransport {
 impl EgressTransport for LocalEgressTransport {
     fn endpoints(&self) -> SandboxEgressProxy {
         self.endpoints
+    }
+    async fn update_policy(&self, policy: &crate::EgressPolicy) -> Result<()> {
+        let hosts = match &policy.networking {
+            crate::SandboxNetworkPolicy::Limited { allowed_hosts } => {
+                Some(canonical_egress_hosts(allowed_hosts)?)
+            }
+            crate::SandboxNetworkPolicy::Unrestricted => None,
+            crate::SandboxNetworkPolicy::Disabled => Some(HashSet::new()),
+        };
+        let mut current = self.hosts.write().await;
+        if let Some(resolver) = &self.resolver {
+            resolver
+                .update_policy(
+                    Ipv4Addr::from(self.source.load(Ordering::SeqCst)),
+                    policy,
+                    self.endpoints,
+                )
+                .await?;
+        }
+        *current = hosts;
+        Ok(())
     }
 
     async fn bind_source(&self, source_ip: Ipv4Addr) -> Result<()> {
@@ -324,12 +360,11 @@ pub(super) async fn retry_after_error(cancel: &CancellationToken) -> bool {
 async fn serve_dns(
     dns: Arc<Socket<UdpSocket>>,
     tcp: Arc<Socket<TcpListener>>,
-    hosts: Option<HashSet<String>>,
+    hosts: Arc<RwLock<Option<HashSet<String>>>>,
     resolver: Option<Arc<dyn NetworkDns>>,
     source: Arc<AtomicU32>,
     cancel: CancellationToken,
 ) {
-    let hosts = Arc::new(hosts);
     let mut tasks = JoinSet::new();
     let mut buffer = [0u8; DNS_BUFFER_SIZE];
     loop {
@@ -355,7 +390,8 @@ async fn serve_dns(
                 let dns = dns.clone();
                 let query = buffer[..size].to_vec();
                 tasks.spawn(async move {
-                    let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), peer.ip(), &query).await?;
+                    let hosts = hosts.read().await;
+                    let answer = network_dns_response(hosts.as_ref(), resolver.as_deref(), peer.ip(), &query).await?;
                     dns.send_to(&answer, peer).await?;
                     Ok::<_, anyhow::Error>(())
                 });
@@ -380,7 +416,8 @@ async fn serve_dns(
                         ensure!(usize::from(size) <= DNS_BUFFER_SIZE, "DNS request too large");
                         let mut bytes = vec![0; size as usize];
                         stream.read_exact(&mut bytes).await?;
-                        let answer = network_dns_response(hosts.as_ref().as_ref(), resolver.as_deref(), peer.ip(), &bytes).await?;
+                        let hosts = hosts.read().await;
+                        let answer = network_dns_response(hosts.as_ref(), resolver.as_deref(), peer.ip(), &bytes).await?;
                         stream.write_u16(answer.len().try_into()?).await?;
                         stream.write_all(&answer).await?;
                         Ok::<_, anyhow::Error>(())

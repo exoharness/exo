@@ -68,6 +68,10 @@ async fn isolated_git_resources_live(
         credential: None,
     });
     let request = SandboxRequest {
+        policy: SandboxNetworkPolicy::Limited {
+            allowed_hosts: vec!["github.com".into()],
+        }
+        .into(),
         sandbox_id: format!("resource-preparation-{}", Uuid7::now()),
         scope: ResourceScope::Global,
         provider_state: None,
@@ -77,10 +81,6 @@ async fn isolated_git_resources_live(
             mounts: vec![],
             durable_file_systems: vec![],
             tcp_ports: vec![],
-            policy: SandboxNetworkPolicy::Limited {
-                allowed_hosts: vec!["github.com".into()],
-            }
-            .into(),
             default_workdir: "/tmp/exo-home/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -141,7 +141,7 @@ async fn isolated_git_resources_live(
             timeout: Some(std::time::Duration::from_secs(10)),
         }) };
         let mut offline = request.clone();
-        offline.spec.policy = SandboxNetworkPolicy::Disabled.into();
+        offline.policy = SandboxNetworkPolicy::Disabled.into();
         offline.scope = ResourceScope::Thread { agent_id: agent, thread_id: first };
         offline.sandbox_id = format!("resource-private-{}", Uuid7::now());
         run_resource_command(backend.as_ref(), offline.clone(), copies[0].clone(), command(first,

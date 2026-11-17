@@ -191,7 +191,7 @@ impl VercelSandboxBackend {
                 == request.spec.tcp_ports.len(),
             "sandbox TCP ports must be unique"
         );
-        let network_policy = VercelNetworkPolicy::from_policy(&request.spec.policy)?;
+        let network_policy = VercelNetworkPolicy::from_policy(&request.policy)?;
         reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let sandbox_name = vercel_sandbox_name(&request, &spec_hash);

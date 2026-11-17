@@ -300,7 +300,7 @@ impl CliContainerSandboxBackend {
         )?;
         self.ensure_system_started().await?;
         if matches!(
-            request.spec.policy.networking,
+            request.policy.networking,
             SandboxNetworkPolicy::Unrestricted
         ) {
             self.ensure_default_network_created().await?;
@@ -328,6 +328,7 @@ impl CliContainerSandboxBackend {
         )?);
 
         Ok(SandboxRequest {
+            policy: request.policy,
             sandbox_id: request.sandbox_id,
             scope: request.scope,
             spec: SandboxSpec {
@@ -340,7 +341,6 @@ impl CliContainerSandboxBackend {
                 resources: request.spec.resources,
                 mounts,
                 durable_file_systems: request.spec.durable_file_systems,
-                policy: request.spec.policy,
                 default_workdir: request.spec.default_workdir,
             },
             lifecycle: request.lifecycle,
@@ -405,7 +405,7 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         &self,
         request: SandboxRequest,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
+        request.policy.validate_basic("container sandbox")?;
         let request = self.prepare_request(request).await?;
 
         if request.lifecycle.idle_ttl.is_none() {
@@ -476,9 +476,9 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         request: SandboxRequest,
         attachment: SandboxAttachment,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
+        request.policy.validate_basic("container sandbox")?;
         ensure!(
-            request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
+            request.policy.networking == SandboxNetworkPolicy::Unrestricted,
             "Docker attachments cannot enforce policy.networking.disabled"
         );
         if self.cli != ContainerCliFlavor::Docker {
@@ -544,7 +544,7 @@ impl CliContainerSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("container sandbox")?;
+        request.policy.validate_basic("container sandbox")?;
         if request.lifecycle.idle_ttl.is_none() {
             bail!("restore-from-snapshot requires a warm sandbox lifecycle (idle_ttl must be set)");
         }
@@ -662,8 +662,8 @@ impl ManagedSandboxHandle for OneShotSandboxHandle {
     async fn exec(&self, command: &SandboxCommand) -> Result<SandboxCommandOutput> {
         exec_one_shot(
             &self.container_bin,
-            &self.request.spec,
-            network_name_for_policy(&self.request.spec.policy.networking),
+            &self.request,
+            network_name_for_policy(&self.request.policy.networking),
             command,
         )
         .await
@@ -672,8 +672,8 @@ impl ManagedSandboxHandle for OneShotSandboxHandle {
     async fn start_process(&self, command: &SandboxCommand) -> Result<crate::SandboxProcessParts> {
         start_one_shot_process(
             &self.container_bin,
-            &self.request.spec,
-            network_name_for_policy(&self.request.spec.policy.networking),
+            &self.request,
+            network_name_for_policy(&self.request.policy.networking),
             command,
         )
         .await
@@ -873,9 +873,9 @@ impl ManagedSandboxBackend for LocalProcessSandboxBackend {
         request: SandboxRequest,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         (|| -> Result<()> {
-            request.spec.policy.validate_basic("local process")?;
+            request.policy.validate_basic("local process")?;
             ensure!(
-                request.spec.policy.networking == SandboxNetworkPolicy::Unrestricted,
+                request.policy.networking == SandboxNetworkPolicy::Unrestricted,
                 "local process does not support policy.networking.disabled"
             );
             if !request.spec.durable_file_systems.is_empty() {
@@ -1176,7 +1176,7 @@ async fn create_named_warm_sandbox(
 
     configure_network_args(
         &mut process,
-        &request.spec.policy.networking,
+        &request.policy.networking,
         Some(DEFAULT_ENABLED_NETWORK_NAME),
     );
     configure_resource_args(&mut process, request.spec.resources);
@@ -1463,10 +1463,11 @@ async fn ensure_warm_sandbox_ready(
 
 async fn exec_one_shot(
     container_bin: &Path,
-    spec: &SandboxSpec,
+    request: &SandboxRequest,
     network_name: Option<&'static str>,
     command: &SandboxCommand,
 ) -> Result<SandboxCommandOutput> {
+    let spec = &request.spec;
     if command.argv.is_empty() {
         bail!("sandbox command requires at least one argv entry");
     }
@@ -1478,7 +1479,7 @@ async fn exec_one_shot(
 
     let mut process = Command::new(container_bin);
     process.arg("run").arg("--rm").arg("--workdir").arg(&cwd);
-    configure_network_args(&mut process, &spec.policy.networking, network_name);
+    configure_network_args(&mut process, &request.policy.networking, network_name);
     configure_resource_args(&mut process, spec.resources);
     configure_mount_args(&mut process, &spec.mounts);
     configure_env_args(&mut process, &command.env);
@@ -1491,10 +1492,11 @@ async fn exec_one_shot(
 
 async fn start_one_shot_process(
     container_bin: &Path,
-    spec: &SandboxSpec,
+    request: &SandboxRequest,
     network_name: Option<&'static str>,
     command: &SandboxCommand,
 ) -> Result<crate::SandboxProcessParts> {
+    let spec = &request.spec;
     if command.argv.is_empty() {
         bail!("sandbox command requires at least one argv entry");
     }
@@ -1511,7 +1513,7 @@ async fn start_one_shot_process(
         .arg("--interactive")
         .arg("--workdir")
         .arg(&cwd);
-    configure_network_args(&mut process, &spec.policy.networking, network_name);
+    configure_network_args(&mut process, &request.policy.networking, network_name);
     configure_resource_args(&mut process, spec.resources);
     configure_mount_args(&mut process, &spec.mounts);
     configure_env_args(&mut process, &command.env);
@@ -2814,6 +2816,7 @@ mod tests {
         )?;
         for resources in [None, Some(crate::SandboxResourceShape::default())] {
             let request = SandboxRequest {
+                policy: SandboxNetworkPolicy::Unrestricted.into(),
                 sandbox_id: "sandbox".into(),
                 scope: ResourceScope::Global,
                 spec: SandboxSpec {
@@ -2822,7 +2825,6 @@ mod tests {
                     resources,
                     mounts: vec![],
                     durable_file_systems: vec![],
-                    policy: SandboxNetworkPolicy::Unrestricted.into(),
                     default_workdir: "/".into(),
                 },
                 lifecycle: SandboxLifecycleConfig::default(),
@@ -2837,9 +2839,9 @@ mod tests {
             };
             std::fs::write(&args, "")?;
             create_named_warm_sandbox(&cli, &request, "name").await?;
-            assert!(exec_one_shot(&cli, &request.spec, None, &command).await?.ok);
+            assert!(exec_one_shot(&cli, &request, None, &command).await?.ok);
             assert_eq!(
-                start_one_shot_process(&cli, &request.spec, None, &command)
+                start_one_shot_process(&cli, &request, None, &command)
                     .await?
                     .wait
                     .await?,
@@ -2885,11 +2887,11 @@ mod tests {
     fn raw_sandbox_requests_do_not_require_scope() {
         let request: SandboxRequest = serde_json::from_value(serde_json::json!({
             "sandbox_id": "sandbox-1",
+            "policy": { "networking": { "type": "disabled" }, "credentials": [] },
             "spec": {
                 "image": "alpine",
                 "mounts": [],
                 "durable_file_systems": [],
-                "policy": { "networking": { "type": "disabled" }, "credentials": [] },
                 "default_workdir": "/"
             },
             "lifecycle": {},
@@ -3003,6 +3005,7 @@ mod tests {
         )?;
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))?;
         let request = SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "test".into(),
             scope: ResourceScope::Global,
             provider_state: None,
@@ -3017,7 +3020,6 @@ mod tests {
                     mount_path: "/reference".into(),
                     mode: crate::FileSystemMountMode::ReadOnly,
                 }],
-                policy: SandboxNetworkPolicy::Disabled.into(),
             },
             lifecycle: Default::default(),
         };
@@ -3074,6 +3076,7 @@ mod tests {
         fs::set_permissions(&script_path, permissions).expect("chmod fake docker");
 
         let request = SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -3085,7 +3088,6 @@ mod tests {
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
                 default_workdir: "/".to_string(),
             },
             lifecycle: SandboxLifecycleConfig {
@@ -3156,6 +3158,7 @@ mod tests {
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -3167,7 +3170,6 @@ mod tests {
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
                 default_workdir: "/".to_string(),
             },
             lifecycle: SandboxLifecycleConfig {
@@ -3251,6 +3253,7 @@ esac
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -3262,7 +3265,6 @@ esac
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
                 default_workdir: "/".to_string(),
             },
             lifecycle: SandboxLifecycleConfig {
@@ -3365,6 +3367,7 @@ esac
             warm_sandboxes: Arc::new(Mutex::new(HashMap::new())),
         };
         let request = SandboxRequest {
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -3376,7 +3379,6 @@ esac
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                policy: SandboxNetworkPolicy::Unrestricted.into(),
                 default_workdir: "/task".to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),

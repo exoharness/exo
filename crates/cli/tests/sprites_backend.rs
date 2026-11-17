@@ -17,6 +17,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
+        policy: SandboxNetworkPolicy::Unrestricted.into(),
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),
@@ -28,7 +29,6 @@ fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxReques
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: "/home/sprite".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -473,7 +473,7 @@ async fn disabled_networking_fails_before_any_provider_request() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
     let mut request = make_request(exoharness::Uuid7::now(), "disabled");
-    request.spec.policy = SandboxNetworkPolicy::Disabled.into();
+    request.policy = SandboxNetworkPolicy::Disabled.into();
     let result = backend.acquire(request).await;
     assert!(
         result

@@ -488,6 +488,7 @@ fn client(proxy: &EgressProxy) -> Result<reqwest::Client> {
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .add_root_certificate(reqwest::Certificate::from_pem(proxy.ca_pem().as_bytes())?)
+        .resolve("api.github.com", proxy.endpoints().https.into())
         .resolve("api.test", proxy.endpoints().https.into())
         .resolve("public.test", proxy.endpoints().https.into())
         .timeout(Duration::from_secs(10))
@@ -543,6 +544,56 @@ async fn proxy_requires_a_bound_source_and_closes_on_shutdown() -> Result<()> {
     proxy.bind_source(host_ip()?).await?;
     assert!(proxy.bind_source(host_ip()?).await.is_err());
     let proxy_client = client(&proxy)?;
+    assert!(
+        proxy_client
+            .get("https://api.test/auth")
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    let ca_pem = proxy.ca_pem().to_owned();
+    let mut next = policy();
+    next.networking = SandboxNetworkPolicy::Limited {
+        allowed_hosts: vec!["api.github.com".into()],
+    };
+    let state = State::new(
+        identity("one"),
+        next.clone(),
+        Some(resolver),
+        Arc::new(upstream.config.clone()),
+    )?;
+    proxy.update(state, &next).await?;
+    assert_eq!(proxy.ca_pem(), ca_pem);
+    assert!(
+        proxy_client
+            .get("https://api.github.com/auth")
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    if let Ok(response) = proxy_client.get("https://api.test/auth").send().await {
+        assert!(!response.status().is_success());
+    }
+    let dns = tokio::net::UdpSocket::bind((host_ip()?, 0)).await?;
+    for (host, expected) in [
+        ("api.test", ResponseCode::NXDomain),
+        ("api.github.com", ResponseCode::NoError),
+    ] {
+        let mut query = Message::new();
+        query.add_query(hickory_proto::op::Query::query(
+            hickory_proto::rr::Name::from_ascii(host)?,
+            RecordType::A,
+        ));
+        dns.send_to(&query.to_vec()?, proxy.endpoints().dns).await?;
+        let mut buffer = [0; 4096];
+        let count = tokio::time::timeout(Duration::from_secs(1), dns.recv(&mut buffer)).await??;
+        assert_eq!(
+            Message::from_vec(&buffer[..count])?.response_code(),
+            expected
+        );
+    }
     proxy.shutdown().await?;
     assert!(
         proxy_client
@@ -1158,6 +1209,7 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
         .proxy(host_ip()?, "live-two", resolver.clone())
         .await?;
     let request = |id: &str| SandboxRequest {
+        policy: policy(),
         sandbox_id: id.into(),
         scope: crate::ResourceScope::Global,
         provider_state: None,
@@ -1167,7 +1219,6 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
-            policy: policy(),
             default_workdir: "/home/exo/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -1319,6 +1370,7 @@ async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
         network_policy.networking = SandboxNetworkPolicy::Unrestricted;
     }
     let request = SandboxRequest {
+        policy: network_policy,
         sandbox_id: "managed-egress-live".into(),
         scope: ResourceScope::Thread {
             agent_id: crate::Uuid7::now(),
@@ -1331,7 +1383,6 @@ async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
-            policy: network_policy,
             default_workdir: "/home/exo/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -2402,6 +2453,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
     let backend = make_backend();
     let image = backend.resolve_image(&image).await?.image;
     let request = SandboxRequest {
+        policy: config,
         sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
         scope: identity("smolvm-proxy").scope,
         provider_state: None,
@@ -2411,7 +2463,6 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
             resources: SandboxResourceShape::new(2, 1024),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: config,
             default_workdir: "/".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -2615,6 +2666,7 @@ async fn firecracker_template_egress_resources(codex_image: Option<String>) -> R
         .await?
         .with_egress(Some(resolver.clone()), Arc::new(upstream.config.clone()));
     let request = SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: "pristine-template".into(),
         scope: ResourceScope::Global,
         provider_state: None,
@@ -2624,7 +2676,6 @@ async fn firecracker_template_egress_resources(codex_image: Option<String>) -> R
             mounts: vec![],
             durable_file_systems: vec![],
             tcp_ports: vec![8765],
-            policy: SandboxNetworkPolicy::Disabled.into(),
             default_workdir: "/home/exo/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -2689,9 +2740,9 @@ if os.environ['EXO_TEST_CODEX'] == 'true':
             let mut allocation = request.clone();
             allocation.sandbox_id = format!("template-clone-{index}");
             allocation.scope = ResourceScope::Thread { agent_id: agent, thread_id: thread };
-            allocation.spec.policy = policy();
-            allocation.spec.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
-            allocation.spec.policy.credentials[0].networking = CredentialNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.policy = policy();
+            allocation.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.policy.credentials[0].networking = CredentialNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
             allocation.spec.mounts = mounts.into_iter().map(|mount| SandboxMount {
                 host_path: mount.host_path.into(), guest_path: mount.mount_path, internal: true,
                 access: SandboxMountAccess::ReadWrite,

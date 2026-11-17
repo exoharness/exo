@@ -418,11 +418,12 @@ impl SmolvmSandboxBackend {
     /// or creating a machine. The default binary probe above only selects which
     /// runtime to use; it does not decide which features a request needs.
     async fn require_capabilities(&self, request: &SandboxRequest) -> Result<()> {
-        let protected = request.spec.policy.requires_proxy();
-        let limited = matches!(
-            request.spec.policy.networking,
-            SandboxNetworkPolicy::Limited { .. }
-        );
+        let protected = request.policy.requires_proxy() || self.external_proxy.is_some();
+        let limited = !protected
+            && matches!(
+                request.policy.networking,
+                SandboxNetworkPolicy::Limited { .. }
+            );
         if protected {
             ensure!(
                 request.lifecycle.idle_ttl.is_some() && self.mode != SmolvmExecutionMode::OneShot,
@@ -524,8 +525,19 @@ impl SmolvmSandboxBackend {
             MachineSource::Pack(pack) => create.arg("--from").arg(pack),
         };
         self.stamp_labels(&mut create, &request.sandbox_id).await;
-        configure_spec_args(&mut create, spec, self.storage_gib, self.overlay_gib)?;
-        let exact_host_policy = exact_host_policy_fingerprint(&spec.policy.networking)?;
+        let boot_policy = if egress.is_some() {
+            SandboxNetworkPolicy::Unrestricted.into()
+        } else {
+            request.policy.clone()
+        };
+        configure_spec_args(
+            &mut create,
+            spec,
+            &boot_policy,
+            self.storage_gib,
+            self.overlay_gib,
+        )?;
+        let exact_host_policy = exact_host_policy_fingerprint(&boot_policy.networking)?;
         if let Some(policy) = &exact_host_policy {
             create
                 .arg(LABEL_FLAG)
@@ -623,7 +635,7 @@ impl SmolvmSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("smolvm")?;
+        request.policy.validate_basic("smolvm")?;
         if !CONSUMABLE_SNAPSHOT_FORMATS.contains(&payload.format) {
             bail!(
                 "smolvm backend cannot restore snapshot format {}",
@@ -666,7 +678,7 @@ impl SmolvmSandboxBackend {
             );
             (manifest.pack_path, None)
         };
-        reject_unsupported_spec(&request.spec, &pack_path.to_string_lossy())?;
+        reject_unsupported_spec(&request.spec, &request.policy, &pack_path.to_string_lossy())?;
         let machine = machine_name(request.sandbox_id.as_str());
         let machine_guard =
             Arc::new(filesystem::lock_machine(&self.snapshot_root, &machine).await?);
@@ -1024,7 +1036,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 Ok(())
             })()?;
             let image = self.prepare_image(&request.spec.image).await?;
-            reject_unsupported_spec(&request.spec, &image)?;
+            reject_unsupported_spec(&request.spec, &request.policy, &image)?;
             let boot_binary = self.boot_binary().await?.clone();
             return Ok(Arc::new(SmolvmOneShotHandle {
                 id: format!("smolvm-oneshot:{}", request.sandbox_id),
@@ -1048,7 +1060,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 SmolvmProxy::start,
                 |egress| async {
                     let image = self.prepare_image(&request.spec.image).await?;
-                    reject_unsupported_spec(&request.spec, &image)?;
+                    reject_unsupported_spec(&request.spec, &request.policy, &image)?;
                     Ok(self
                         .ensure_machine_started(
                             &machine,
@@ -1168,6 +1180,7 @@ impl SmolvmOneShotHandle {
         configure_spec_args(
             &mut process,
             &self.request.spec,
+            &self.request.policy,
             self.storage_gib,
             self.overlay_gib,
         )?;
@@ -1512,6 +1525,7 @@ fn exact_host_policy_fingerprint(networking: &SandboxNetworkPolicy) -> Result<Op
 fn configure_spec_args(
     process: &mut Command,
     spec: &SandboxSpec,
+    policy: &crate::EgressPolicy,
     storage_gib: Option<NonZeroU32>,
     overlay_gib: Option<NonZeroU32>,
 ) -> Result<()> {
@@ -1524,12 +1538,12 @@ fn configure_spec_args(
     if let Some(overlay) = overlay_gib {
         process.arg("--overlay").arg(overlay.to_string());
     }
-    if spec.policy.networking_enabled() {
+    if policy.networking_enabled() {
         process.args(["--net", "--net-backend", "virtio-net"]);
     } else if !spec.tcp_ports.is_empty() {
         process.arg("--outbound-localhost-only");
     }
-    if let Some(hosts) = exact_limited_hosts(&spec.policy.networking)? {
+    if let Some(hosts) = exact_limited_hosts(&policy.networking)? {
         for host in hosts {
             process.arg(HOST_PATTERN_FLAG).arg(host);
         }
@@ -1616,7 +1630,11 @@ async fn is_file(path: &Path) -> bool {
 
 /// smolvm has no named durable filesystem; refuse rather than hand back a sandbox
 /// missing storage the caller asked for, as the Daytona backend does.
-fn reject_unsupported_spec(spec: &SandboxSpec, image: &str) -> Result<()> {
+fn reject_unsupported_spec(
+    spec: &SandboxSpec,
+    policy: &crate::EgressPolicy,
+    image: &str,
+) -> Result<()> {
     if !spec.durable_file_systems.is_empty() {
         let names: Vec<&str> = spec
             .durable_file_systems
@@ -1632,7 +1650,7 @@ fn reject_unsupported_spec(spec: &SandboxSpec, image: &str) -> Result<()> {
     // smolvm resolves registry references over the machine's own network and
     // refuses this combination even for a cached image. Caught here so the caller
     // gets the two real remedies, not a failure deep in the CLI output.
-    if spec.policy.networking == SandboxNetworkPolicy::Disabled && !is_local_image_ref(image) {
+    if policy.networking == SandboxNetworkPolicy::Disabled && !is_local_image_ref(image) {
         bail!(
             "smolvm cannot use registry image '{}' in a network-disabled sandbox: \
              it resolves registry references over the machine's network, even for \
@@ -2285,7 +2303,7 @@ esac"#,
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy.networking = SandboxNetworkPolicy::Limited {
+        request.policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into()],
         };
         backend
@@ -2293,7 +2311,7 @@ esac"#,
             .await?;
         let args = std::fs::read_to_string(args_file)?;
         assert!(args.contains("--allow-host-pattern\napi.test\n"), "{args}");
-        let policy = exact_host_policy_fingerprint(&request.spec.policy.networking)?.unwrap();
+        let policy = exact_host_policy_fingerprint(&request.policy.networking)?.unwrap();
         assert!(
             args.contains(&format!("--label\n{EXACT_HOST_POLICY_LABEL}={policy}\n")),
             "{args}"
@@ -2327,7 +2345,7 @@ esac"#,
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy.networking = SandboxNetworkPolicy::Limited {
+        request.policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into()],
         };
         let error = backend
@@ -2363,9 +2381,8 @@ esac"#,
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy = SandboxNetworkPolicy::Unrestricted.into();
+        request.policy = SandboxNetworkPolicy::Unrestricted.into();
         request
-            .spec
             .policy
             .credentials
             .push(crate::EgressCredentialBinding {
@@ -2386,7 +2403,7 @@ esac"#,
         assert!(error.contains("--egress-interceptor"), "{error}");
         assert!(!dir.path().join("cache").exists());
         let mut limited = request.clone();
-        limited.spec.policy.networking = SandboxNetworkPolicy::Limited {
+        limited.policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into()],
         };
         let error = backend.acquire(limited).await.err().unwrap().to_string();
@@ -2394,37 +2411,6 @@ esac"#,
         request.lifecycle.idle_ttl = None;
         let error = backend.acquire(request).await.err().unwrap().to_string();
         assert!(error.contains("managed warm sandbox"), "{error}");
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn limited_networking_reports_missing_flags_before_preparing_images() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let binary = dir.path().join("smolvm");
-        write_test_binary(
-            &binary,
-            r#"case "$*" in
---version) printf 'smolvm 1.19.0\n';;
-'machine start --help') printf '%s\n' '--egress-interceptor <ADDR>';;
-'machine create --help') exit 0;;
-*) exit 23;;
-esac"#,
-        );
-        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
-            binary: Some(binary),
-            image_cache: Some(dir.path().join("cache")),
-            ..Default::default()
-        });
-        let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy.networking = SandboxNetworkPolicy::Limited {
-            allowed_hosts: vec!["api.test".into()],
-        };
-        request.spec.image = "/nonexistent/image.tar".into();
-        let error = backend.acquire(request).await.err().unwrap().to_string();
-        assert!(error.contains(HOST_PATTERN_FLAG), "{error}");
-        assert!(error.contains(LABEL_FLAG), "{error}");
-        assert!(!dir.path().join("cache").exists());
         Ok(())
     }
 
@@ -2602,7 +2588,7 @@ esac"#,
             write_test_binary(&binary, "printf 'smolvm 1.20.0\\n'");
             assert_eq!(backend.binary().await.unwrap(), &binary);
             let mut request = test_request(Some(Duration::from_secs(60)));
-            request.spec.policy.networking = SandboxNetworkPolicy::Limited {
+            request.policy.networking = SandboxNetworkPolicy::Limited {
                 allowed_hosts: vec!["api.test".into()],
             };
             let error = backend
@@ -2611,8 +2597,6 @@ esac"#,
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(INTERCEPTOR_FLAG), "{error}");
-            assert!(error.contains(HOST_PATTERN_FLAG), "{error}");
-            assert!(error.contains(LABEL_FLAG), "{error}");
             write_test_binary(&root.join("bin/smolvm"), "printf 'smolvm 1.16.2\\n'");
             write_test_binary(
                 &binary,
@@ -2865,6 +2849,7 @@ esac"#,
 
     pub(super) fn test_request(idle_ttl: Option<Duration>) -> SandboxRequest {
         SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "s".into(),
             scope: ResourceScope::Agent {
                 agent_id: crate::Uuid7::now(),
@@ -2875,7 +2860,6 @@ esac"#,
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
                 default_workdir: "/".into(),
             },
             lifecycle: SandboxLifecycleConfig { idle_ttl },
@@ -2990,13 +2974,15 @@ esac"#,
 
     #[test]
     fn durable_file_systems_are_rejected_not_ignored() {
-        let mut spec = test_request(None).spec;
+        let request = test_request(None);
+        let policy = request.policy;
+        let mut spec = request.spec;
         spec.durable_file_systems = vec![crate::DurableFileSystem {
             name: "cache".into(),
             mount_path: "/cache".into(),
             mode: crate::FileSystemMountMode::ReadWrite,
         }];
-        let err = reject_unsupported_spec(&spec, &spec.image)
+        let err = reject_unsupported_spec(&spec, &policy, &spec.image)
             .unwrap_err()
             .to_string();
         assert!(err.contains("cache"), "error should name the fs: {err}");
@@ -3005,25 +2991,27 @@ esac"#,
     /// Must fail at acquire with guidance, not deep inside the CLI.
     #[test]
     fn registry_image_without_network_is_rejected() {
-        let mut spec = test_request(None).spec;
+        let request = test_request(None);
+        let mut policy = request.policy;
+        let mut spec = request.spec;
         spec.image = "docker.io/library/ubuntu:24.04".into();
-        spec.policy.networking = SandboxNetworkPolicy::Disabled;
-        let err = reject_unsupported_spec(&spec, &spec.image)
+        policy.networking = SandboxNetworkPolicy::Disabled;
+        let err = reject_unsupported_spec(&spec, &policy, &spec.image)
             .unwrap_err()
             .to_string();
         assert!(err.contains("network-disabled"), "unexpected error: {err}");
 
         // Fine once the sandbox is allowed network...
-        spec.policy.networking = SandboxNetworkPolicy::Unrestricted;
-        assert!(reject_unsupported_spec(&spec, &spec.image).is_ok());
+        policy.networking = SandboxNetworkPolicy::Unrestricted;
+        assert!(reject_unsupported_spec(&spec, &policy, &spec.image).is_ok());
 
         // ...and a local archive is fine while staying isolated.
-        spec.policy.networking = SandboxNetworkPolicy::Disabled;
+        policy.networking = SandboxNetworkPolicy::Disabled;
         spec.image = "/tmp/alpine.tar".into();
-        assert!(reject_unsupported_spec(&spec, &spec.image).is_ok());
+        assert!(reject_unsupported_spec(&spec, &policy, &spec.image).is_ok());
 
         spec.image = "docker.io/library/ubuntu:24.04".into();
-        assert!(reject_unsupported_spec(&spec, "/tmp/prepared-rootfs").is_ok());
+        assert!(reject_unsupported_spec(&spec, &policy, "/tmp/prepared-rootfs").is_ok());
     }
 
     #[test]
@@ -3074,6 +3062,7 @@ esac"#,
 
     #[test]
     fn resource_shape_and_mounts_are_forwarded() {
+        let policy = SandboxNetworkPolicy::Disabled.into();
         let spec = SandboxSpec {
             tcp_ports: vec![],
             image: "alpine".into(),
@@ -3093,12 +3082,11 @@ esac"#,
                 },
             ],
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
             default_workdir: "/work".into(),
         };
 
         let mut process = Command::new("smolvm");
-        configure_spec_args(&mut process, &spec, None, None).unwrap();
+        configure_spec_args(&mut process, &spec, &policy, None, None).unwrap();
         let rendered: Vec<String> = process
             .as_std()
             .get_args()
@@ -3114,13 +3102,15 @@ esac"#,
 
     #[test]
     fn limited_hosts_are_forwarded_to_smolvm() {
-        let mut spec = test_request(Some(Duration::from_secs(60))).spec;
+        let request = test_request(Some(Duration::from_secs(60)));
+        let mut policy = request.policy;
+        let mut spec = request.spec;
         spec.resources = crate::SandboxResourceShape::new(3, 2048);
-        spec.policy.networking = SandboxNetworkPolicy::Limited {
+        policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["Z.example.com".into(), "api.example.com".into()],
         };
         let mut process = Command::new("smolvm");
-        configure_spec_args(&mut process, &spec, None, None).unwrap();
+        configure_spec_args(&mut process, &spec, &policy, None, None).unwrap();
         let rendered: Vec<String> = process
             .as_std()
             .get_args()
@@ -3143,10 +3133,10 @@ esac"#,
             ]
         );
 
-        spec.policy.networking = SandboxNetworkPolicy::Limited {
+        policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: Vec::new(),
         };
-        let error = configure_spec_args(&mut Command::new("smolvm"), &spec, None, None)
+        let error = configure_spec_args(&mut Command::new("smolvm"), &spec, &policy, None, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains("at least one allowed host"), "{error}");

@@ -392,7 +392,6 @@ impl FirecrackerSnapshotManifest {
 
 fn template_spec_hash(spec: &SandboxSpec) -> String {
     let mut spec = spec.clone();
-    spec.policy = SandboxNetworkPolicy::Disabled.into();
     spec.mounts.clear();
     sandbox_spec_hash(&spec)
 }
@@ -1652,11 +1651,9 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         target: SandboxRequest,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         source
-            .spec
             .policy
             .validate_basic("Firecracker snapshot source")?;
         target
-            .spec
             .policy
             .validate_basic("Firecracker snapshot target")?;
         let mut source = prepare_request(source.into())?;
@@ -1945,7 +1942,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
 impl FirecrackerSandboxHandle {
     async fn capture_snapshot(&self, template: bool) -> crate::SandboxResult<SnapshotPayload> {
         if template {
-            if self.request.spec.policy != SandboxNetworkPolicy::Disabled.into() {
+            if self.request.policy != SandboxNetworkPolicy::Disabled.into() {
                 return Err(anyhow::anyhow!(
                     "template capture requires disabled networking and no credentials"
                 )
@@ -2161,7 +2158,7 @@ impl Shared {
                             .is_none_or(|entry| entry.egress_proxy != Some(proxy))
                     {
                         let network = machine.record.network();
-                        let policy = request.spec.policy.clone();
+                        let policy = request.policy.clone();
                         tokio::task::spawn_blocking(move || {
                             let rules = format!(
                                 "delete table inet {}\n{}",
@@ -2307,7 +2304,8 @@ impl Shared {
         let machine_id = machine_id.to_string();
         let spec_hash = spec_hash.to_string();
         let resolved_image = request.spec.image.clone();
-        let network_enabled = network_device_enabled(&self.config, &request.spec.policy.networking);
+        let network_enabled = request.egress_proxy.is_some()
+            || network_device_enabled(&self.config, &request.policy.networking);
         let workspace_id = if snapshot.is_none() {
             request
                 .spec
@@ -2397,7 +2395,7 @@ impl Shared {
                     prepare_network(
                         &config,
                         &network,
-                        &request.spec.policy,
+                        &request.policy,
                         request.egress_proxy,
                         jailer_uid(&config, &record)?,
                     )?;
@@ -2618,13 +2616,9 @@ fn prepare_request(request: FirecrackerRequest) -> crate::SandboxResult<Firecrac
 
 fn validate_request(mut request: FirecrackerRequest) -> Result<FirecrackerRequest> {
     if let Some(proxy) = request.egress_proxy {
-        if request.spec.policy.networking == SandboxNetworkPolicy::Disabled {
-            bail!("disabled networking cannot use an egress proxy");
-        }
         proxy.validate()?;
     } else {
         request
-            .spec
             .policy
             .validate_basic("Firecracker without a configured egress runtime")?;
     }
@@ -3703,18 +3697,47 @@ pub(super) async fn native_egress_transport(
         policy,
         listen,
         Some(Arc::new(FirecrackerDns {
-            limited: matches!(policy, SandboxNetworkPolicy::Limited { .. }),
+            limited: std::sync::atomic::AtomicBool::new(matches!(
+                policy,
+                SandboxNetworkPolicy::Limited { .. }
+            )),
         })),
     )
     .await
 }
 
 struct FirecrackerDns {
-    limited: bool,
+    limited: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
 impl crate::egress::NetworkDns for FirecrackerDns {
+    async fn update_policy(
+        &self,
+        source: Ipv4Addr,
+        policy: &crate::EgressPolicy,
+        endpoints: crate::SandboxEgressProxy,
+    ) -> Result<()> {
+        let offset = u32::from(source)
+            .checked_sub(u32::from(NETWORK_BASE))
+            .context("invalid Firecracker DNS source")?;
+        ensure!(offset % 8 == 6, "invalid Firecracker DNS source");
+        let network = network_config(offset / 8);
+        let rules = format!(
+            "delete table inet {}\n{}",
+            network.nft_table,
+            proxy_network_firewall_rules(&network, policy, endpoints)?
+        );
+        tokio::task::spawn_blocking(move || {
+            run_checked_input("nft", &["-f", "-"], rules.as_bytes())
+        })
+        .await??;
+        self.limited.store(
+            matches!(policy.networking, SandboxNetworkPolicy::Limited { .. }),
+            Ordering::SeqCst,
+        );
+        Ok(())
+    }
     async fn resolve(&self, source: Ipv4Addr, host: &str) -> Result<Vec<Ipv4Addr>> {
         use crate::egress::UpstreamResolver;
         let resolved = crate::egress::PublicUpstreamResolver
@@ -3731,7 +3754,7 @@ impl crate::egress::NetworkDns for FirecrackerDns {
         addresses.sort_unstable();
         addresses.dedup();
         ensure!(addresses.len() <= 32, "too many DNS addresses");
-        if self.limited {
+        if self.limited.load(Ordering::SeqCst) {
             // network_config allocates eight addresses per slot; the guest is
             // offset six. Only the bound VM can query this DNS listener.
             let offset = u32::from(source)
@@ -3871,10 +3894,30 @@ fn proxy_network_firewall_rules(
             "add rule inet {table} {chain} iifname {interface} counter reject"
         )?;
     }
-    writeln!(
-        rules,
-        "add rule inet {table} forward oifname {interface} ct state established,related counter accept"
-    )?;
+    if policy.networking_enabled() {
+        let hosts = if policy.networking == SandboxNetworkPolicy::Unrestricted {
+            ""
+        } else {
+            "ip saddr @allowed_hosts "
+        };
+        let ports = policy.allowed_tcp_ports.as_ref().map(|ports| {
+            ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
+        if ports.as_ref().is_none_or(|ports| !ports.is_empty()) {
+            let ports = ports.map_or_else(
+                || "meta l4proto tcp".to_owned(),
+                |ports| format!("tcp sport {{ {ports} }}"),
+            );
+            writeln!(
+                rules,
+                "add rule inet {table} forward oifname {interface} {hosts}{ports} ct state established,related counter accept"
+            )?;
+        }
+    }
     writeln!(
         rules,
         "add rule inet {table} forward oifname {interface} counter drop"

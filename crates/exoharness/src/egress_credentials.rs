@@ -411,7 +411,8 @@ impl NetworkPolicy {
     }
     pub(crate) fn check_port(&self, port: u16) -> Result<()> {
         ensure!(
-            port != 0
+            self.enabled
+                && port != 0
                 && self
                     .ports
                     .as_ref()

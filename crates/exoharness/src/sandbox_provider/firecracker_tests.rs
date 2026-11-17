@@ -154,6 +154,7 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
     };
     let request = |networking, egress_proxy| FirecrackerRequest {
         sandbox: SandboxRequest {
+            policy: crate::EgressPolicy::from(networking),
             sandbox_id: "policy-validation".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -164,7 +165,6 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
                 mounts: vec![],
                 durable_file_systems: vec![],
                 default_workdir: "/home/exo/workspace".into(),
-                policy: crate::EgressPolicy::from(networking),
             },
             lifecycle: Default::default(),
         },
@@ -175,7 +175,7 @@ fn proxy_transport_enforces_egress_independently_of_network_policy() {
         error.failure(),
         Some(crate::SandboxFailure::InvalidRequest { .. })
     ));
-    assert!(prepare_request(request(SandboxNetworkPolicy::Disabled, Some(proxy))).is_err());
+    assert!(prepare_request(request(SandboxNetworkPolicy::Disabled, Some(proxy))).is_ok());
     for policy in [limited, SandboxNetworkPolicy::Unrestricted] {
         let rules = network_firewall_rules(&config, &network, &policy.into(), Some(proxy)).unwrap();
         assert!(rules.contains("tcp dport 443 counter dnat ip to 192.0.2.10:18443"));
@@ -1162,6 +1162,13 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
         environment: HashMap::new(),
     })?;
     let request = SandboxRequest {
+        policy: crate::EgressPolicy {
+            networking: SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["github.com".into()],
+            },
+            allowed_tcp_ports: Some(vec![443]),
+            credentials: vec![],
+        },
         sandbox_id: "restricted-template".into(),
         scope: crate::ResourceScope::Global,
         provider_state: None,
@@ -1180,13 +1187,6 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
             durable_file_systems: vec![],
             tcp_ports: vec![],
             default_workdir: "/workspace".into(),
-            policy: crate::EgressPolicy {
-                networking: SandboxNetworkPolicy::Limited {
-                    allowed_hosts: vec!["github.com".into()],
-                },
-                allowed_tcp_ports: Some(vec![443]),
-                credentials: vec![],
-            },
         },
     };
     let payload = FirecrackerSnapshotManifest {
@@ -1293,6 +1293,10 @@ impl DurableStopFixture {
             ..Default::default()
         };
         let request = SandboxRequest {
+            policy: SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.test".into()],
+            }
+            .into(),
             sandbox_id: "durable".into(),
             scope: crate::ResourceScope::Global,
             spec: SandboxSpec {
@@ -1301,10 +1305,6 @@ impl DurableStopFixture {
                 resources: Default::default(),
                 mounts: vec![],
                 durable_file_systems: vec![],
-                policy: SandboxNetworkPolicy::Limited {
-                    allowed_hosts: vec!["api.test".into()],
-                }
-                .into(),
                 default_workdir: "/workspace".into(),
             },
             lifecycle: crate::SandboxLifecycleConfig {
@@ -1599,6 +1599,7 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
     use base64::Engine;
     let mut request = FirecrackerRequest {
         sandbox: SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "resources".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -1623,7 +1624,6 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
                 ],
                 durable_file_systems: vec![],
                 default_workdir: "/workspace".into(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
             },
         },
         egress_proxy: None,
@@ -1708,6 +1708,7 @@ async fn guest_root_permission_live() -> Result<()> {
         })
         .await?;
         let request = SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "root-policy".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -1715,7 +1716,6 @@ async fn guest_root_permission_live() -> Result<()> {
                 image: image.clone(),
                 resources: SandboxResourceShape::new(1, 512),
                 default_workdir: "/home/exo/workspace".into(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
                 tcp_ports: vec![],
                 mounts: vec![],
                 durable_file_systems: vec![],
@@ -1786,6 +1786,7 @@ async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()
     let agent = crate::Uuid7::now();
     let threads = [crate::Uuid7::now(), crate::Uuid7::now()];
     let request = |thread, mounts: Vec<crate::FileSystemMount>| SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: format!("resource-{thread}"),
         scope: crate::ResourceScope::Thread {
             agent_id: agent,
@@ -1809,7 +1810,6 @@ async fn resource_disks_live_isolate_resume_and_enforce_read_only() -> Result<()
                 .collect(),
             durable_file_systems: vec![],
             default_workdir: "/workspace".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
         },
         lifecycle: crate::SandboxLifecycleConfig {
             idle_ttl: Some(Duration::from_secs(60)),

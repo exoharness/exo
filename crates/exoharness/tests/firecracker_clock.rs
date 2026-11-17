@@ -24,6 +24,7 @@ async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Resul
     })
     .await?;
     let source = SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: "clock-source".into(),
         scope: exoharness::ResourceScope::Global,
         provider_state: None,
@@ -34,7 +35,6 @@ async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Resul
             image: "docker.io/library/alpine:3.22".into(),
             resources: SandboxResourceShape::new(1, 512),
             default_workdir: "/workspace".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
             tcp_ports: vec![],
             mounts: vec![],
             durable_file_systems: vec![],

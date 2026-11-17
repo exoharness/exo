@@ -277,6 +277,7 @@ fn native_request(config: &FirecrackerConfig, id: &str, image: &str) -> Result<S
         )?;
     }
     Ok(SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: id.into(),
         scope: crate::ResourceScope::Thread {
             agent_id,
@@ -299,7 +300,6 @@ fn native_request(config: &FirecrackerConfig, id: &str, image: &str) -> Result<S
                 mount_path: "/workspace".into(),
                 mode: FileSystemMountMode::ReadWrite,
             }],
-            policy: SandboxNetworkPolicy::Disabled.into(),
             tcp_ports: vec![],
         },
         lifecycle: crate::SandboxLifecycleConfig {
@@ -477,7 +477,7 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     })?;
     for id in ["seed-first", "seed-second"] {
         let mut target = native_request(&config, id, &image)?;
-        target.spec.policy = crate::EgressPolicy {
+        target.policy = crate::EgressPolicy {
             networking: SandboxNetworkPolicy::Limited {
                 allowed_hosts: vec!["github.com".into()],
             },

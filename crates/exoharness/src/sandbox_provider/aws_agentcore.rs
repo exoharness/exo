@@ -108,7 +108,7 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         &self,
         request: SandboxRequest,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("aws_agentcore")?;
+        request.policy.validate_basic("aws_agentcore")?;
         reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
@@ -434,10 +434,7 @@ fn reject_unsupported_request(
             bail!("AgentCore sandbox backend supports at most one durable file system");
         }
     }
-    if matches!(
-        request.spec.policy.networking,
-        SandboxNetworkPolicy::Disabled
-    ) {
+    if matches!(request.policy.networking, SandboxNetworkPolicy::Disabled) {
         bail!("AgentCore sandbox backend cannot enforce disabled networking");
     }
     Ok(())
@@ -582,6 +579,7 @@ mod tests {
 
     fn durable_request(mount_path: &str, mode: FileSystemMountMode) -> SandboxRequest {
         SandboxRequest {
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -597,7 +595,6 @@ mod tests {
                     mount_path: mount_path.to_string(),
                     mode,
                 }],
-                policy: SandboxNetworkPolicy::Unrestricted.into(),
                 default_workdir: "/mnt/workspace".to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),

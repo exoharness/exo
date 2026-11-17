@@ -429,11 +429,9 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         source.spec.resources.get_or_insert_with(Default::default);
         target.spec.resources.get_or_insert_with(Default::default);
         source
-            .spec
             .policy
             .validate_basic("Firecracker snapshot source")?;
         target
-            .spec
             .policy
             .validate_basic("Firecracker snapshot target")?;
         if target.lifecycle.idle_ttl.is_none() {
@@ -478,7 +476,6 @@ impl ManagedSandboxBackend for LimaFirecrackerSandboxBackend {
         }
         if payload.format != SnapshotFormat::FirecrackerFilesystemRef {
             request
-                .spec
                 .policy
                 .validate_basic("Firecracker snapshot restore")?;
             let handle = self.acquire_request(request.into(), Some(payload)).await?;
@@ -1718,6 +1715,19 @@ impl crate::egress::EgressTransport for LimaEgressTransport {
     fn endpoints(&self) -> crate::SandboxEgressProxy {
         self.endpoints
     }
+    async fn update_policy(&self, policy: &crate::EgressPolicy) -> Result<()> {
+        match self
+            .connection
+            .request(FirecrackerBridgeRequest::EgressUpdate {
+                listener_id: self.listener_id.clone(),
+                policy: policy.clone(),
+            })
+            .await?
+        {
+            FirecrackerBridgeResponse::Unit => Ok(()),
+            _ => bail!("Lima bridge did not update egress policy"),
+        }
+    }
     async fn bind_source(&self, source: std::net::Ipv4Addr) -> Result<()> {
         match self
             .connection
@@ -1834,6 +1844,10 @@ mod egress_cleanup_tests {
             let resources =
                 fail_proxy_cleanup.then(|| crate::SandboxResourceShape::new(3, 2048).unwrap());
             let request = SandboxRequest {
+                policy: crate::SandboxNetworkPolicy::Limited {
+                    allowed_hosts: vec!["api.test".into()],
+                }
+                .into(),
                 sandbox_id: "failed-egress-setup".into(),
                 scope: crate::ResourceScope::Global,
                 provider_state: None,
@@ -1844,10 +1858,6 @@ mod egress_cleanup_tests {
                     mounts: vec![],
                     durable_file_systems: vec![],
                     default_workdir: "/workspace".into(),
-                    policy: crate::SandboxNetworkPolicy::Limited {
-                        allowed_hosts: vec!["api.test".into()],
-                    }
-                    .into(),
                 },
                 lifecycle: crate::SandboxLifecycleConfig {
                     idle_ttl: Some(std::time::Duration::from_secs(60)),
@@ -2017,6 +2027,10 @@ mod egress_cleanup_tests {
             connection: Mutex::new(Some(connection.clone())),
         });
         let request = SandboxRequest {
+            policy: crate::SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.test".into()],
+            }
+            .into(),
             sandbox_id: "stop-test".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -2027,10 +2041,6 @@ mod egress_cleanup_tests {
                 mounts: vec![],
                 durable_file_systems: vec![],
                 default_workdir: "/workspace".into(),
-                policy: crate::SandboxNetworkPolicy::Limited {
-                    allowed_hosts: vec!["api.test".into()],
-                }
-                .into(),
             },
             lifecycle: crate::SandboxLifecycleConfig {
                 idle_ttl: Some(std::time::Duration::from_secs(60)),
