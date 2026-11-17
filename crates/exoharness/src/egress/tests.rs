@@ -2894,10 +2894,7 @@ async fn native_tls_uses_the_external_proxys_identity_and_credential_resolver() 
             EgressProxy::start_with_transport(transport, state, CancellationToken::new()).await?;
         proxy.bind_source(host_ip()?).await?;
         assert_eq!(proxy.ca_pem(), authorizer.ca_pem);
-        assert_eq!(
-            proxy.environment().contains_key("TEST_API_KEY"),
-            credentials
-        );
+        assert_eq!(proxy.environment().get("TEST_API_KEY"), Some(&placeholder));
         let mut request = client(&proxy)?
             .get("https://api.test/auth")
             .header("connection", "close");

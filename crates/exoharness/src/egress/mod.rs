@@ -228,6 +228,21 @@ impl Drop for EgressProxy {
 }
 
 impl State {
+    fn environment(&self) -> HashMap<String, String> {
+        let mut environment = self
+            .external
+            .as_ref()
+            .map(|proxy| proxy.environment.clone())
+            .unwrap_or_default();
+        environment.extend(self.bindings.iter().map(|binding| {
+            (
+                binding.config.environment_variable.clone(),
+                binding.placeholder.clone(),
+            )
+        }));
+        environment
+    }
+
     pub(crate) fn new(
         identity: EgressIdentity,
         policy: EgressPolicy,
@@ -762,11 +777,7 @@ impl ProxyConnection {
         F: std::future::Future<Output = Result<C>> + Send + 'static,
         C: std::future::Future<Output = Result<Connection>> + Send + 'static,
     {
-        let environment = state
-            .bindings
-            .iter()
-            .map(|b| (b.config.environment_variable.clone(), b.placeholder.clone()))
-            .collect();
+        let environment = state.environment();
         let authority = state
             .external
             .is_none()
@@ -803,16 +814,7 @@ impl ProxyConnection {
                 "an allocation must keep its trusted proxy CA"
             );
         }
-        let environment = state
-            .bindings
-            .iter()
-            .map(|binding| {
-                (
-                    binding.config.environment_variable.clone(),
-                    binding.placeholder.clone(),
-                )
-            })
-            .collect();
+        let environment = state.environment();
         let (response, result) = oneshot::channel();
         self.updates
             .send((state, response))
