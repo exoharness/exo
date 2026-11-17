@@ -25,7 +25,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::{Semaphore, mpsc, oneshot};
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, Id, JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::{self, ServerConfig, pki_types::PrivatePkcs8KeyDer};
 use tokio_util::sync::CancellationToken;
@@ -109,6 +109,93 @@ pub(crate) struct ProxyConnection {
     updates: mpsc::Sender<(State, oneshot::Sender<Result<()>>)>,
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
+}
+
+struct Connections {
+    state: Arc<State>,
+    active: HashMap<Id, ActiveConnection>,
+}
+
+struct ActiveConnection {
+    destinations: HashSet<ConnectionDestination>,
+    abort: AbortHandle,
+}
+
+#[derive(Eq, PartialEq, Hash)]
+struct ConnectionDestination {
+    host: String,
+    port: u16,
+    opaque: bool,
+}
+
+#[derive(Clone)]
+struct ConnectionState {
+    connections: Arc<Mutex<Connections>>,
+    id: Id,
+}
+
+#[derive(Clone)]
+enum SessionState {
+    Fixed(Arc<State>),
+    Live(ConnectionState),
+}
+
+impl From<Arc<State>> for SessionState {
+    fn from(state: Arc<State>) -> Self {
+        Self::Fixed(state)
+    }
+}
+
+impl SessionState {
+    fn snapshot(&self) -> Arc<State> {
+        match self {
+            Self::Fixed(state) => state.clone(),
+            Self::Live(connection) => connection
+                .connections
+                .lock()
+                .expect("egress connections poisoned")
+                .state
+                .clone(),
+        }
+    }
+
+    fn destination(&self, host: &str, port: u16, opaque: bool) -> Result<Arc<State>> {
+        let Self::Live(connection) = self else {
+            return Ok(self.snapshot());
+        };
+        let mut connections = connection
+            .connections
+            .lock()
+            .expect("egress connections poisoned");
+        let state = connections.state.clone();
+        state.check_port(port)?;
+        ensure!(state.network.permits_host(host), "host is not allowed");
+        ensure!(
+            !opaque || state.network.unrestricted(),
+            "opaque TCP requires unrestricted networking"
+        );
+        connections
+            .active
+            .get_mut(&connection.id)
+            .context("egress connection is closed")?
+            .destinations
+            .insert(ConnectionDestination {
+                host: host.to_owned(),
+                port,
+                opaque,
+            });
+        Ok(state)
+    }
+
+    fn request(
+        &self,
+        request: &Request<Incoming>,
+        sni: Option<&str>,
+    ) -> Result<Arc<State>, EgressError> {
+        let state = self.snapshot();
+        let (destination, _) = state.destination(request, sni)?;
+        Ok(self.destination(&destination.host, destination.port, false)?)
+    }
 }
 
 struct PooledClient {
@@ -228,6 +315,54 @@ impl Drop for EgressProxy {
 }
 
 impl State {
+    fn preserves(&self, next: &Self, destination: &ConnectionDestination) -> bool {
+        if self.identity != next.identity
+            || next.check_port(destination.port).is_err()
+            || !next.network.permits_host(&destination.host)
+            || (destination.opaque && !next.network.unrestricted())
+        {
+            return false;
+        }
+        match (&self.external, &next.external) {
+            (Some(old), Some(new))
+                if old.url == new.url
+                    && old.username == new.username
+                    && old.password == new.password
+                    && old.ca_pem == new.ca_pem => {}
+            (None, None) => {}
+            _ => return false,
+        }
+        let relevant = |binding: &&Binding| binding.permits_host(&destination.host);
+        let unchanged = |old: &Binding, new: &Binding| {
+            old.config == new.config
+                && old.placeholder == new.placeholder
+                && self
+                    .external
+                    .as_ref()
+                    .and_then(|proxy| proxy.credential_authorizations.get(&old.config.name))
+                    == next
+                        .external
+                        .as_ref()
+                        .and_then(|proxy| proxy.credential_authorizations.get(&new.config.name))
+                && match (&self.resolver, &next.resolver) {
+                    (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+                    (None, None) => true,
+                    _ => false,
+                }
+        };
+        self.bindings.iter().filter(relevant).all(|old| {
+            next.bindings
+                .iter()
+                .filter(relevant)
+                .any(|new| unchanged(old, new))
+        }) && next.bindings.iter().filter(relevant).all(|new| {
+            self.bindings
+                .iter()
+                .filter(relevant)
+                .any(|old| unchanged(old, new))
+        })
+    }
+
     fn environment(&self) -> HashMap<String, String> {
         let mut environment = self
             .external
@@ -623,18 +758,30 @@ impl TlsAuthority {
     }
 }
 
-async fn http_connection<T>(stream: T, state: Arc<State>, sni: Option<String>) -> Result<()>
+async fn http_connection<T>(
+    stream: T,
+    state: impl Into<SessionState>,
+    sni: Option<String>,
+) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
+    let state = state.into();
     let service = service_fn(move |request| {
         let state = state.clone();
         let sni = sni.clone();
         async move {
-            let response = match state.forward(request, sni.as_deref()).await {
+            let result = async {
+                state
+                    .request(&request, sni.as_deref())?
+                    .forward(request, sni.as_deref())
+                    .await
+            }
+            .await;
+            let response = match result {
                 Ok(response) => response,
                 Err(error) => {
-                    tracing::debug!(%error, sandbox_id = %state.identity.sandbox_id, "egress request failed");
+                    tracing::debug!(%error, sandbox_id = %state.snapshot().identity.sandbox_id, "egress request failed");
                     let (status, message) = match error {
                         EgressError::Rejected(message) => {
                             (StatusCode::FORBIDDEN, format!("{message}\n"))
@@ -671,12 +818,13 @@ where
 async fn https_connection<T>(
     stream: T,
     tls: TlsAcceptor,
-    state: Arc<State>,
+    state: impl Into<SessionState>,
     connect_host: Option<&str>,
 ) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
+    let state = state.into();
     let stream = tokio::time::timeout(IO_TIMEOUT, tls.accept(stream)).await??;
     let sni = stream
         .get_ref()
@@ -690,22 +838,25 @@ where
             "CONNECT host and TLS SNI must match"
         );
     }
+    state.destination(&sni, 443, false)?;
     http_connection(stream, state, Some(sni)).await
 }
 
 async fn transparent_https_connection<T>(
     mut stream: T,
     tls: Option<TlsAcceptor>,
-    state: Arc<State>,
+    state: impl Into<SessionState>,
 ) -> Result<()>
 where
     T: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
+    let session = state.into();
+    let state = session.snapshot();
     state.check_port(443)?;
     if !state.network.unrestricted()
         && let Some(tls) = &tls
     {
-        return https_connection(stream, tls.clone(), state, None).await;
+        return https_connection(stream, tls.clone(), session, None).await;
     }
     let (host, prefix) = tokio::time::timeout(IO_TIMEOUT, async {
         let mut acceptor = rustls::server::Acceptor::default();
@@ -734,11 +885,12 @@ where
     .await??;
     let (read, write) = tokio::io::split(stream);
     let mut stream = tokio::io::join(std::io::Cursor::new(prefix).chain(read), write);
+    let state = session.destination(&host, 443, false)?;
     ensure!(state.network.permits_host(&host), "host is not allowed");
     if state.hosts.contains(&host)
         && let Some(tls) = tls
     {
-        return https_connection(stream, tls, state, Some(&host)).await;
+        return https_connection(stream, tls, session, Some(&host)).await;
     }
     let mut upstream = if let Some(proxy) = &state.external {
         proxy.connect(&host).await?
@@ -760,6 +912,7 @@ pub(crate) enum Connection {
     Http(crate::BoxSandboxTcpStream),
     Https(crate::BoxSandboxTcpStream),
     Tcp {
+        destination: SocketAddr,
         downstream: crate::BoxSandboxTcpStream,
         upstream: tokio::net::TcpStream,
     },
@@ -807,12 +960,23 @@ impl ProxyConnection {
         })
     }
 
-    async fn update(&self, state: State) -> Result<()> {
+    async fn update(&self, mut state: State) -> Result<()> {
         if let Some(external) = &state.external {
             ensure!(
                 external.ca_pem == self.ca_pem,
                 "an allocation must keep its trusted proxy CA"
             );
+        }
+        if state.external.is_none() {
+            let environment = self
+                .environment
+                .lock()
+                .expect("egress environment poisoned");
+            for binding in &mut state.bindings {
+                if let Some(placeholder) = environment.get(&binding.config.environment_variable) {
+                    binding.placeholder.clone_from(placeholder);
+                }
+            }
         }
         let environment = state.environment();
         let (response, result) = oneshot::channel();
@@ -844,7 +1008,7 @@ async fn serve<A, F, C>(
     accept: A,
     mut tls: Option<TlsAcceptor>,
     authority: Option<TlsAuthority>,
-    mut state: Arc<State>,
+    state: Arc<State>,
     mut updates: mpsc::Receiver<(State, oneshot::Sender<Result<()>>)>,
     cancel: CancellationToken,
 ) where
@@ -853,21 +1017,43 @@ async fn serve<A, F, C>(
     C: std::future::Future<Output = Result<Connection>> + Send + 'static,
 {
     let mut tasks = JoinSet::new();
+    let connections = Arc::new(Mutex::new(Connections {
+        state,
+        active: HashMap::new(),
+    }));
     let permits = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
-            Some(result) = tasks.join_next(), if !tasks.is_empty() => {
-                if !matches!(result, Ok(Ok(()))) {
+            Some(result) = tasks.join_next_with_id(), if !tasks.is_empty() => {
+                let id = match &result { Ok((id, _)) => *id, Err(error) => error.id() };
+                connections.lock().expect("egress connections poisoned").active.remove(&id);
+                if !matches!(result, Ok((_, Ok(())))) {
                     tracing::debug!("egress connection closed with an error");
                 }
             }
             Some((next, response)) = updates.recv() => {
-                tasks.shutdown().await;
                 let next_tls = authority.as_ref().map(|authority| authority.acceptor(next.hosts.iter().cloned().collect())).transpose();
                 match next_tls {
                     Ok(next_tls) => {
-                        state = Arc::new(next);
+                        let mut cancelled = {
+                            let mut connections = connections.lock().expect("egress connections poisoned");
+                            let mut cancelled = HashSet::new();
+                            for (id, connection) in &connections.active {
+                                if connection.destinations.iter().any(|destination| !connections.state.preserves(&next, destination)) {
+                                    connection.abort.abort();
+                                    cancelled.insert(*id);
+                                }
+                            }
+                            connections.state = Arc::new(next);
+                            cancelled
+                        };
+                        while !cancelled.is_empty() {
+                            let Some(result) = tasks.join_next_with_id().await else { break; };
+                            let id = match result { Ok((id, _)) => id, Err(error) => error.id() };
+                            connections.lock().expect("egress connections poisoned").active.remove(&id);
+                            cancelled.remove(&id);
+                        }
                         tls = next_tls;
                         let _ = response.send(Ok(()));
                     }
@@ -877,22 +1063,29 @@ async fn serve<A, F, C>(
                     }
                 }
             }
-            incoming = accept(state.clone()) => {
+            incoming = {
+                let state = connections.lock().expect("egress connections poisoned").state.clone();
+                accept(state)
+            } => {
                 let Ok(connection) = incoming else { break; };
                 let Ok(permit) = permits.clone().try_acquire_owned() else { continue; };
-                let state = state.clone();
                 let tls = tls.clone();
-                tasks.spawn(async move {
+                let mut active = connections.lock().expect("egress connections poisoned");
+                let shared = connections.clone();
+                let task = tasks.spawn(async move {
+                    let state = SessionState::Live(ConnectionState { connections: shared, id: tokio::task::id() });
                     let _permit = permit;
                     match connection.await? {
                         Connection::Http(stream) => http_connection(stream, state, None).await,
                         Connection::Https(stream) => transparent_https_connection(stream, tls, state).await,
-                        Connection::Tcp { mut downstream, mut upstream } => {
+                        Connection::Tcp { mut downstream, mut upstream, destination } => {
+                            state.destination(&destination.ip().to_string(), destination.port(), true)?;
                             tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await?;
                             Ok(())
                         }
                     }
                 });
+                active.active.insert(task.id(), ActiveConnection { destinations: HashSet::new(), abort: task });
             }
         }
     }

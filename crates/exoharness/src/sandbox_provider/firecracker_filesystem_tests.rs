@@ -474,6 +474,7 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
         password: "filesystem-proxy-authorization".into(),
         ca_pem: ca.cert.pem(),
         environment: HashMap::from([("TEST_TOKEN".into(), placeholder.into())]),
+        credential_authorizations: HashMap::new(),
     })?;
     for id in ["seed-first", "seed-second"] {
         let mut target = native_request(&config, id, &image)?;

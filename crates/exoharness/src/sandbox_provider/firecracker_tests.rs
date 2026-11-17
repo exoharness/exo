@@ -1160,6 +1160,7 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
         password: "template-test-password".into(),
         ca_pem: ca.cert.pem(),
         environment: HashMap::new(),
+        credential_authorizations: HashMap::new(),
     })?;
     let request = SandboxRequest {
         policy: crate::EgressPolicy {

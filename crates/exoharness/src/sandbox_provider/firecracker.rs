@@ -3697,6 +3697,7 @@ pub(super) async fn native_egress_transport(
         policy,
         listen,
         Some(Arc::new(FirecrackerDns {
+            addresses: StdMutex::new(HashMap::new()),
             limited: std::sync::atomic::AtomicBool::new(matches!(
                 policy,
                 SandboxNetworkPolicy::Limited { .. }
@@ -3708,6 +3709,7 @@ pub(super) async fn native_egress_transport(
 
 struct FirecrackerDns {
     limited: std::sync::atomic::AtomicBool,
+    addresses: StdMutex<HashMap<String, (Instant, Vec<Ipv4Addr>)>>,
 }
 
 #[async_trait]
@@ -3723,11 +3725,54 @@ impl crate::egress::NetworkDns for FirecrackerDns {
             .context("invalid Firecracker DNS source")?;
         ensure!(offset % 8 == 6, "invalid Firecracker DNS source");
         let network = network_config(offset / 8);
-        let rules = format!(
+        let retained = {
+            let allowed = match &policy.networking {
+                SandboxNetworkPolicy::Limited { allowed_hosts } => {
+                    crate::types::canonical_egress_hosts(allowed_hosts)?
+                }
+                _ => HashSet::new(),
+            };
+            let mut addresses = self
+                .addresses
+                .lock()
+                .expect("Firecracker DNS addresses poisoned");
+            addresses
+                .retain(|host, (expires, _)| allowed.contains(host) && *expires > Instant::now());
+            let mut retained = HashMap::new();
+            for (expires, addresses) in addresses.values() {
+                for address in addresses {
+                    retained
+                        .entry(*address)
+                        .and_modify(|current: &mut Instant| *current = (*current).max(*expires))
+                        .or_insert(*expires);
+                }
+            }
+            retained
+                .into_iter()
+                .map(|(address, expires)| {
+                    format!(
+                        "{address} timeout {}ms",
+                        expires
+                            .saturating_duration_since(Instant::now())
+                            .as_millis()
+                            .max(1)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut rules = format!(
             "delete table inet {}\n{}",
             network.nft_table,
             proxy_network_firewall_rules(&network, policy, endpoints)?
         );
+        if !retained.is_empty() {
+            writeln!(
+                rules,
+                "add element inet {} allowed_hosts {{ {retained} }}",
+                network.nft_table
+            )?;
+        }
         tokio::task::spawn_blocking(move || {
             run_checked_input("nft", &["-f", "-"], rules.as_bytes())
         })
@@ -3784,6 +3829,16 @@ impl crate::egress::NetworkDns for FirecrackerDns {
                 "admitting DNS addresses: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            self.addresses
+                .lock()
+                .expect("Firecracker DNS addresses poisoned")
+                .insert(
+                    crate::types::canonical_egress_host(host)?,
+                    (
+                        Instant::now() + Duration::from_secs(3600),
+                        addresses.clone(),
+                    ),
+                );
         }
         Ok(addresses)
     }

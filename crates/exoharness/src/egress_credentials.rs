@@ -57,6 +57,10 @@ pub(crate) struct Binding {
 }
 
 impl Binding {
+    pub(crate) fn permits_host(&self, host: &str) -> bool {
+        self.hosts.contains(host)
+    }
+
     pub(crate) fn permits_header(&self, destination: &EgressDestination) -> bool {
         self.config.injection_location.header
             && self.hosts.contains(&destination.host)
