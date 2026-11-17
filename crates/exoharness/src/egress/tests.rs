@@ -1463,6 +1463,21 @@ print('PASS automatic placeholders, Python and curl trust, native transport, DNS
 "#)).await?;
         ensure!(check.ok, "managed check failed: {}", check.stderr);
         println!("{}", check.stdout);
+        let process = handle.start_process(&command("import urllib.request; r = urllib.request.build_opener(urllib.request.ProxyHandler({})).open('https://api.test/sse'); print(r.readline().decode().strip(), flush=True); r.read()".into())).await?;
+        let mut output = tokio::io::BufReader::new(process.stdout.compat());
+        let mut line = String::new();
+        tokio::io::AsyncBufReadExt::read_line(&mut output, &mut line).await?;
+        ensure!(line == "first\n", "stream did not start: {line:?}");
+        let mut changed = request.clone();
+        changed.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.test".into()] };
+        ensure!(backend.acquire(changed.clone()).await?.id() == id, "policy update replaced VM");
+        line.clear();
+        ensure!(tokio::time::timeout(Duration::from_millis(50), tokio::io::AsyncBufReadExt::read_line(&mut output, &mut line)).await.is_err(), "overlapping download was interrupted");
+        changed.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["public.test".into()] };
+        backend.acquire(changed).await?;
+        ensure!(tokio::time::timeout(Duration::from_secs(5), process.wait).await?? != 0, "removed host download continued");
+        backend.acquire(request.clone()).await?;
+        println!("PASS overlapping policy retains download; removed host closes it on the same VM");
         *resolver.value.write().await = Some("canary-v2".into());
         let check = handle.exec(&run("assert get() == (200, 'authenticated-v2')\nprint('PASS rotation')")).await?;
         ensure!(check.ok, "rotation failed: {}", check.stderr);
@@ -1499,6 +1514,15 @@ print('PASS reconnect retains VM files and rejects the previous placeholder')
         let check = new_handle.exec(&run("assert get()[0] == 502\nprint('PASS revocation')")).await?;
         ensure!(check.ok, "revocation failed: {}", check.stderr);
         println!("{}", check.stdout);
+        *resolver.value.write().await = Some("canary-v2".into());
+        let snapshot = replacement.suspend(request.clone(), crate::SnapshotKind::Filesystem).await?;
+        let mut restored_request = request.clone();
+        restored_request.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.test".into()] };
+        let restored = replacement.acquire_from_snapshot(restored_request, snapshot.clone()).await?;
+        let check = restored.exec(&run("assert pathlib.Path('egress-retained').read_text() == 'keep this'\nassert get() == (200, 'authenticated-v2')\nprint('PASS suspend/restore retains files and applies changed network permissions')")).await?;
+        ensure!(check.ok, "restore with changed policy failed: {}", check.stderr);
+        println!("{}", check.stdout);
+        replacement.delete_snapshot(snapshot).await?;
         replacement.terminate(request.clone()).await?;
         Ok(())
     }.await;
