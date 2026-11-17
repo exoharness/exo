@@ -85,7 +85,7 @@ impl AccessPolicy for RecoveryPolicy {
 struct CallerRecordingExecutor(Arc<Mutex<Vec<Option<String>>>>);
 
 #[derive(Default)]
-struct CountingToolRuntime(AtomicUsize);
+struct CountingToolRuntime(AtomicUsize, tokio::sync::Notify);
 
 #[async_trait]
 impl ToolRuntime for CountingToolRuntime {
@@ -94,6 +94,7 @@ impl ToolRuntime for CountingToolRuntime {
         policies: &exo_managed_agents::permissions::PermissionPolicies,
         name: &str,
     ) -> exo_managed_agents::permissions::PermissionPolicy {
+        self.1.notify_one();
         if name == "write_file" {
             exo_managed_agents::permissions::PermissionPolicy::AlwaysAsk {}
         } else {
@@ -899,6 +900,9 @@ async fn service_restart_resumes_pending_tool_approval() -> Result<()> {
     let agent = state.get_agent(&agent_id).await?.unwrap();
     let thread = agent.get_thread(&thread_id).await?.unwrap();
     wait_for_active_turn(&runtime, agent_id, thread.as_ref(), turn_id).await?;
+    // Active registration precedes recovery's saved-tool validation. Answer
+    // only after execution reaches authorization for the pending tool.
+    tokio::time::timeout(Duration::from_secs(3), tools.1.notified()).await?;
     assert_eq!(tools.0.load(Ordering::SeqCst), 0);
     assert!(model.requests().is_empty());
     runtime
