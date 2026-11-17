@@ -32,6 +32,8 @@ mod sandbox_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sandbox_process;
 mod sandbox_provider;
+#[cfg(all(not(target_arch = "wasm32"), feature = "firecracker"))]
+mod sandbox_signal;
 #[cfg(feature = "store")]
 mod secrets;
 #[cfg(feature = "store")]
