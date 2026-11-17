@@ -4846,7 +4846,9 @@ fn firecracker_vm_configuration(
             vcpu_count: record.runtime.vcpu_count,
             mem_size_mib: record.runtime.boot_memory_mib(),
             smt: false,
-            track_dirty_pages: true,
+            // Swap-free growth uses resident-page diff snapshots, allowing huge
+            // KVM mappings that dirty logging would split into 4 KiB pages.
+            track_dirty_pages: record.runtime.memory_ceiling_mib.is_none(),
             huge_pages: record.runtime.memory_ceiling_mib.map(|_| "Transparent"),
         },
         network_interfaces,
@@ -5751,7 +5753,7 @@ fn launch_snapshot_clone(
                 backend_path: "/snapshot/memory",
                 backend_type: "File",
             },
-            track_dirty_pages: true,
+            track_dirty_pages: record.runtime.memory_ceiling_mib.is_none(),
             resume_vm: false,
         },
         FIRECRACKER_API_TIMEOUT,

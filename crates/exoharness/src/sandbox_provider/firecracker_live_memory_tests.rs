@@ -287,8 +287,34 @@ while True:
     result
 }
 
+fn assert_resident_snapshots(config: &FirecrackerConfig, record: &MachineRecord) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Tracking {
+        track_dirty_pages: bool,
+    }
+    let tracking: Tracking = serde_json::from_slice(&firecracker_api_response(
+        &jail_root(config, &record.machine_id).join("run/firecracker.socket"),
+        "GET",
+        "/machine-config",
+        &[],
+        FIRECRACKER_API_TIMEOUT,
+    )?)?;
+    ensure!(
+        !tracking.track_dirty_pages,
+        "live growth enabled KVM dirty logging"
+    );
+    let swap_max = fs::read_to_string(
+        firecracker_cgroup_dir(config, &record.machine_id).join("memory.swap.max"),
+    )?;
+    ensure!(
+        swap_max.trim() == "0",
+        "resident-page snapshots require host swap to be disabled"
+    );
+    Ok(())
+}
+
 #[tokio::test]
-#[ignore = "requires root, KVM, Firecracker artifacts, and TMPDIR on XFS"]
+#[ignore = "requires root, KVM, Python guest image, and TMPDIR on XFS"]
 async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("m").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
@@ -314,14 +340,47 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
     };
     let mut target = source.clone();
     target.sandbox_id = "ram-target".into();
-    let result: Result<()> = async {
+    let exercise = async {
         let handle = backend.acquire(source.clone()).await?;
+        assert_resident_snapshots(&config, &allocation(&backend, &source).await?)?;
         handle
             .expand_resources(SandboxResourceShape::new(1, 1025).unwrap())
             .await?;
-        shell(&handle, "printf retained > /tmp/ram-state").await?;
+        // tmpfs contents exist only in guest RAM, so disk capture cannot make
+        // these checks pass if the RAM snapshot misses resident or COW pages.
+        shell(
+            &handle,
+            r#"python3 -c '
+from pathlib import Path
+Path("/dev/shm/ram-state").write_bytes(bytes([17]) * 16 * 1024**2)
+'"#,
+        )
+        .await?;
+        let check = r#"python3 -c '
+import hashlib
+with open("/dev/shm/ram-state", "rb") as f:
+    print(hashlib.sha256(f.read()).hexdigest(), end="")
+'"#;
+        let update = |value| {
+            format!(
+                r#"python3 -c '
+with open("/dev/shm/ram-state", "r+b") as f:
+    for offset in [0, 4096, 16*1024**2-1]:
+        f.seek(offset)
+        f.write(bytes([{value}]))
+'"#
+            )
+        };
+        let mut expected = vec![17u8; 16 * 1024 * 1024];
+        let original = format!("{:x}", Sha256::digest(&expected));
+        assert_eq!(shell(&handle, check).await?, original);
         let fork = backend.fork_sandbox(source.clone(), target.clone()).await?;
         let fork_record = allocation(&backend, &target).await?;
+        assert_resident_snapshots(&config, &fork_record)?;
+        assert_eq!(
+            fork.live_resource_grant().await?,
+            SandboxResourceShape::new(1, 1025)
+        );
         ensure!(
             balloon::grant(&fork_record)? == 1025,
             "fork lost the memory grant"
@@ -330,7 +389,14 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
             fork_record.runtime.memory_mib == 512,
             "fork changed the sandbox identity"
         );
-        assert_eq!(shell(&fork, "cat /tmp/ram-state").await?, "retained");
+        assert_eq!(shell(&fork, check).await?, original);
+        shell(&handle, &update(34)).await?;
+        for offset in [0, 4096, expected.len() - 1] {
+            expected[offset] = 34;
+        }
+        let source_digest = format!("{:x}", Sha256::digest(&expected));
+        assert_eq!(shell(&handle, check).await?, source_digest);
+        assert_eq!(shell(&fork, check).await?, original);
         target.provider_state = fork.provider_state();
         target.spec.image = fork.effective_image().context("missing fork image")?;
         let attached = backend.acquire(target.clone()).await?;
@@ -338,23 +404,52 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
             allocation(&backend, &target).await?.machine_id == fork_record.machine_id,
             "reacquisition replaced the fork"
         );
+        // Change RAM in a VM restored from the first capture. A second capture
+        // must preserve these private COW writes as well as untouched RAM.
+        shell(&attached, &update(51)).await?;
+        for offset in [0, 4096, expected.len() - 1] {
+            expected[offset] = 51;
+        }
+        let changed = format!("{:x}", Sha256::digest(&expected));
+        assert_eq!(shell(&attached, check).await?, changed);
         let snapshot = attached.snapshot(crate::SnapshotKind::Full).await?;
         backend.terminate(target.clone()).await?;
         let restored = backend
             .acquire_from_snapshot(target.clone(), snapshot.clone())
             .await?;
         let restored_record = allocation(&backend, &target).await?;
+        assert_resident_snapshots(&config, &restored_record)?;
+        assert_eq!(
+            restored.live_resource_grant().await?,
+            SandboxResourceShape::new(1, 1025)
+        );
         ensure!(
             balloon::grant(&restored_record)? == 1025,
             "RAM restore lost the memory grant"
         );
         assert_balloon(&config, &restored_record, 1)?;
-        assert_eq!(shell(&restored, "cat /tmp/ram-state").await?, "retained");
+        assert_eq!(shell(&restored, check).await?, changed);
+        assert_eq!(shell(&handle, check).await?, source_digest);
+        // Resident-page diffs may include clean pages across a mapped slot;
+        // the unused node capacity must still stay sparse.
+        for entry in fs::read_dir(config.state_root.join("snapshots"))? {
+            let memory = entry?.path().join("memory");
+            if memory.try_exists()? {
+                let metadata = memory.metadata()?;
+                let allocated = metadata.blocks() * 512;
+                ensure!(
+                    allocated < 2 * 1024 * 1024 * 1024,
+                    "RAM capture allocated {} bytes for logical {} bytes",
+                    allocated,
+                    metadata.len()
+                );
+            }
+        }
         restored.stop().await?;
         backend.delete_snapshot(snapshot).await?;
         Ok(())
-    }
-    .await;
+    };
+    let result: Result<()> = exercise.await;
     backend.terminate_all().await?;
     result
 }

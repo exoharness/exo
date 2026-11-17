@@ -202,9 +202,12 @@ Device page counts are read on demand; guest statistics are polled once an hour.
 This is a native Linux Rust API. The CLI and macOS bridge do not expose live
 resource updates; invoke the native backend inside Lima for local validation.
 
-Exo enables dirty-page tracking and captures sparse memory snapshots instead
-of writing the entire configured RAM size. Each capture merges changes into a
-private reflink of the machine's latest captured memory, or its original restore
+Exo captures sparse memory snapshots. Live growth uses Firecracker's
+[resident-page snapshots](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/snapshotting/snapshot-support.md#creating-diff-snapshots)
+with host swap disabled, allowing huge KVM mappings. These snapshots may include
+unchanged resident pages. VMs with growth disabled retain KVM dirty-page tracking.
+Each capture merges changes into a private reflink of the machine's latest
+captured memory, or its original restore
 template on the first capture. The result is independently restorable. Published
 templates remain read-only and shared by restored VMs; disk and memory are
 captured while the guest is paused. RAM files retain the mapped capacity as
