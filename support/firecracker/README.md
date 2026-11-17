@@ -189,6 +189,11 @@ CPU changes, shrinking, and over-capacity requests are rejected. Retain the
 reservation after an error or disconnect until `live_resource_grant` reconciles
 it or terminate the VM; retrying the same target is safe. Filesystem and RAM
 captures retain the grant separately from request identity.
+
+Lease renewal updates existing leases without waiting for the lifecycle lock, so
+exec stays responsive during growth. This also applies when live growth is
+disabled; a deleted lease is never recreated by an exec.
+
 One convergence deadline covers hotplug and balloon adjustment: 30 seconds plus
 one second per 128 MiB of the target grant. Each API wait is capped at the lesser
 of five seconds and the remaining budget; convergence is polled every 100 ms.
@@ -202,7 +207,8 @@ of writing the entire configured RAM size. Each capture merges changes into a
 private reflink of the machine's latest captured memory, or its original restore
 template on the first capture. The result is independently restorable. Published
 templates remain read-only and shared by restored VMs; disk and memory are
-captured while the guest is paused.
+captured while the guest is paused. RAM files retain the mapped capacity as
+their logical size; copies must preserve sparse holes.
 
 The latest memory base is retained outside the writable jail, counted against
 the snapshot budget, and removed with the machine. An interrupted capture blocks

@@ -158,6 +158,7 @@ fn wait_for_target(socket: &Path, amount_mib: u32, deadline: Instant) -> Result<
     }
 }
 
+#[tracing::instrument(name = "firecracker.resources_ready", skip_all)]
 pub(super) fn initialize_until(
     config: &FirecrackerConfig,
     record: &MachineRecord,
@@ -250,15 +251,9 @@ fn apply_grant(
     record.memory_grant_mib = Some(resources.memory_mib);
     // Journal the reservation before changing any host or guest limit.
     replace_manifest(&config.state_root, &record)?;
-    fs::write(
-        cgroup.join("memory.max"),
-        (u64::from(firecracker_host_reservation(resources)?.memory_mib.get()) * 1024 * 1024)
-            .to_string(),
-    )?;
-    fs::write(
-        cgroup.join("memory.high"),
-        ((u64::from(memory) + 256) * 1024 * 1024).to_string(),
-    )?;
+    let (memory_max, memory_high) = firecracker_memory_limits(resources)?;
+    fs::write(cgroup.join("memory.max"), memory_max.to_string())?;
+    fs::write(cgroup.join("memory.high"), memory_high.to_string())?;
     initialize_until(config, &record, deadline)?;
     Ok(resources)
 }
@@ -458,6 +453,14 @@ mod tests {
                 write!(stream, "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).unwrap();
             }
         });
+        let trace = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
+            .with_writer(Arc::new(trace.reopen().unwrap()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
         let resources = SandboxResourceShape::new(2, 8192).unwrap();
         assert!(apply_grant(&config, &record, &cgroup, resources).is_err());
         let record: MachineRecord = serde_json::from_slice(
@@ -478,6 +481,10 @@ mod tests {
             resources
         );
         peer.join().unwrap();
+        let trace = fs::read_to_string(trace.path()).unwrap();
+        assert!(trace.contains("firecracker.resources_ready"), "{trace}");
+        assert_eq!(trace.matches("firecracker.api").count(), 3, "{trace}");
+        assert!(!trace.contains("method=\"GET\""), "{trace}");
         assert_eq!(grant(&record).unwrap(), 8192);
         assert_eq!(configuration(&record).unwrap().unwrap().amount_mib, 0);
         assert!(

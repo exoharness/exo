@@ -67,11 +67,16 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
     let mut request = native_request(&config, "growth", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 4096);
     request.spec.tcp_ports = vec![8765];
-    let result: Result<()> = async {
+    let exercise = async {
         let handle = backend.acquire(request.clone()).await?;
         request.provider_state = handle.provider_state();
-        let capacity = handle.live_resource_ceiling().context("missing growth capacity")?;
-        ensure!(capacity.memory_mib.get() >= 8192, "test needs at least 8 GiB capacity");
+        let capacity = handle
+            .live_resource_ceiling()
+            .context("missing growth capacity")?;
+        ensure!(
+            capacity.memory_mib.get() >= 8192,
+            "test needs at least 8 GiB capacity"
+        );
         let record = allocation(&backend, &request).await?;
         assert_balloon(&config, &record, 0)?;
         let before = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
@@ -118,14 +123,18 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
             .await?;
         terminal.output.read_exact(&mut ready).await?;
         assert_eq!(&ready, b"ready");
-        let mut server = handle.start_process(&command(r#"python3 -u -c 'import socket
+        let mut server = handle
+            .start_process(&command(
+                r#"python3 -u -c 'import socket
 s=socket.socket(); s.bind(("0.0.0.0",8765)); s.listen(); print("ready",flush=True)
 c,_=s.accept()
 while True:
  b=c.recv(1024)
  if not b: break
  c.sendall(b)'
-"#)).await?;
+"#,
+            ))
+            .await?;
         let mut server_ready = [0; 6];
         server.stdout.read_exact(&mut server_ready).await?;
         let mut connection = handle
@@ -272,7 +281,8 @@ while True:
         reattached.stop().await?;
         backend.delete_snapshot(snapshot).await?;
         Ok(())
-    }.await;
+    };
+    let result: Result<()> = exercise.await;
     backend.terminate_all().await?;
     result
 }
@@ -492,12 +502,12 @@ print("wrote-and-verified-6-GiB")'
 #[tokio::test]
 #[ignore = "requires root, KVM, Python guest image, XFS TMPDIR"]
 async fn live_memory_small_grant_is_writable() -> Result<()> {
-    let temp = tempfile::Builder::new().prefix("acct-").tempdir()?;
+    let temp = tempfile::Builder::new().prefix("mem-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     let mut config = config(temp.path(), &image);
     config.network_device_policy = FirecrackerNetworkDevicePolicy::EnabledSandboxes;
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
-    let mut request = native_request(&config, "accounting", &image)?;
+    let mut request = native_request(&config, "small-grant", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 512);
     let result: Result<()> = async {
         let handle = backend.acquire(request.clone()).await?;

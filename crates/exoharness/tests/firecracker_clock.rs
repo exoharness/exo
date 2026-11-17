@@ -19,7 +19,6 @@ async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Resul
         workspace_size_gib: 1,
         network_device_policy: FirecrackerNetworkDevicePolicy::AllSandboxes,
         allow_guest_root: false,
-        live_resource_growth: true,
         allowed_registries: vec!["docker.io".into()],
         ..Default::default()
     })
@@ -45,18 +44,12 @@ async fn firecracker_snapshot_restore_synchronizes_wall_clock() -> anyhow::Resul
     restored.sandbox_id = "clock-restored".into();
     let result = async {
         let handle = backend.acquire(source.clone()).await?;
-        let expanded = SandboxResourceShape::new(1, 1024).unwrap();
-        assert_eq!(handle.expand_resources(expanded).await?, expanded);
         let snapshot = handle.snapshot_template(SnapshotKind::Full).await?;
         backend.terminate(source.clone()).await?;
         tokio::time::sleep(Duration::from_secs(5)).await;
         let handle = backend
             .acquire_from_snapshot(restored.clone(), snapshot.clone())
             .await?;
-        assert_eq!(
-            handle.live_resource_grant().await?,
-            SandboxResourceShape::new(1, 1024)
-        );
         let before = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs();

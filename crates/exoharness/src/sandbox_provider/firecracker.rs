@@ -353,11 +353,11 @@ impl FirecrackerRuntimeFingerprint {
     }
 
     fn validate_memory_grant(&self, grant: u32) -> Result<()> {
+        let capacity = self.memory_ceiling_mib.unwrap_or(self.memory_mib);
         ensure!(
-            grant > 0
-                && grant >= self.memory_mib
-                && grant <= self.memory_ceiling_mib.unwrap_or(self.memory_mib),
-            "invalid Firecracker memory grant"
+            grant > 0 && grant >= self.memory_mib && grant <= capacity,
+            "Firecracker memory grant {grant} MiB must be within the initial {} MiB and capacity {capacity} MiB; restore requires capacity for the saved grant",
+            self.memory_mib
         );
         let slot = self.memory_slot_size_mib.unwrap_or(128);
         ensure!(
@@ -1686,13 +1686,11 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     ) -> Result<Vec<crate::FileSystemMount>> {
         let config = self.shared.config.clone();
         tokio::task::spawn_blocking(move || {
-            {
-                crate::resources::ResourceStore::image_store(
-                    &config.state_root,
-                    gib_bytes(config.workspace_size_gib, "workspace")?,
-                )?
-                .materialize_images(request)
-            }
+            crate::resources::ResourceStore::image_store(
+                &config.state_root,
+                gib_bytes(config.workspace_size_gib, "workspace")?,
+            )?
+            .materialize_images(request)
         })
         .await?
     }
@@ -1704,13 +1702,11 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     ) -> Result<()> {
         let config = self.shared.config.clone();
         tokio::task::spawn_blocking(move || {
-            {
-                crate::resources::ResourceStore::image_store(
-                    &config.state_root,
-                    gib_bytes(config.workspace_size_gib, "workspace")?,
-                )?
-                .remove_thread(agent, thread)
-            }
+            crate::resources::ResourceStore::image_store(
+                &config.state_root,
+                gib_bytes(config.workspace_size_gib, "workspace")?,
+            )?
+            .remove_thread(agent, thread)
         })
         .await?
     }
@@ -4622,6 +4618,14 @@ fn firecracker_host_reservation(resources: SandboxResourceShape) -> Result<Sandb
     })
 }
 
+fn firecracker_memory_limits(resources: SandboxResourceShape) -> Result<(u64, u64)> {
+    let hard = u64::from(firecracker_host_reservation(resources)?.memory_mib.get()) * 1024 * 1024;
+    // Guest RAM, block-device page cache, and kernel allocations share the cgroup.
+    // Start reclaim before the hard limit to leave room for disk writeback.
+    let reclaim = (u64::from(resources.memory_mib.get()) + 256) * 1024 * 1024;
+    Ok((hard, reclaim))
+}
+
 #[tracing::instrument(name = "firecracker.launch_vmm", skip_all)]
 fn spawn_jailed_firecracker(
     config: &FirecrackerConfig,
@@ -4633,12 +4637,7 @@ fn spawn_jailed_firecracker(
     let memory_mib = balloon::grant(record)?;
     let resources = SandboxResourceShape::new(record.runtime.vcpu_count, memory_mib)
         .context("invalid Firecracker grant")?;
-    let memory_max =
-        u64::from(firecracker_host_reservation(resources)?.memory_mib.get()) * 1024 * 1024;
-    // Guest RAM is anonymous memory in the VMM. Block-device page cache and
-    // kernel allocations also count against this cgroup. Start reclaim before
-    // the hard limit, with room for disk writeback to complete at full guest RAM.
-    let memory_high = (u64::from(memory_mib) + 256) * 1024 * 1024;
+    let (memory_max, memory_high) = firecracker_memory_limits(resources)?;
     let cpu_max = format!("{} 100000", u32::from(record.runtime.vcpu_count) * 100_000);
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
@@ -4848,12 +4847,7 @@ fn firecracker_vm_configuration(
             mem_size_mib: record.runtime.boot_memory_mib(),
             smt: false,
             track_dirty_pages: true,
-            // THP is an optimization; odd-sized capacities use normal pages.
-            huge_pages: record
-                .runtime
-                .memory_ceiling_mib
-                .filter(|_| record.runtime.boot_memory_mib().is_multiple_of(2))
-                .map(|_| "Transparent"),
+            huge_pages: record.runtime.memory_ceiling_mib.map(|_| "Transparent"),
         },
         network_interfaces,
         vsock: FirecrackerVsock {
@@ -5116,6 +5110,7 @@ fn firecracker_api_patch<T: Serialize>(socket: &Path, path: &str, body: &T) -> R
     firecracker_api_request(socket, "PATCH", path, body, FIRECRACKER_API_TIMEOUT)
 }
 
+#[tracing::instrument(name = "firecracker.api", skip_all, fields(method, path))]
 fn firecracker_api_request<T: Serialize>(
     socket: &Path,
     method: &str,
@@ -5237,7 +5232,6 @@ impl Write for FirecrackerApiStream {
     }
 }
 
-#[tracing::instrument(name = "firecracker.api", skip_all, fields(method, path))]
 fn firecracker_api_response(
     socket: &Path,
     method: &str,

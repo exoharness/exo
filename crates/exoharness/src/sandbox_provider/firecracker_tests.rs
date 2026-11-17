@@ -1147,18 +1147,20 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
             policy: SandboxNetworkPolicy::Disabled.into(),
         },
     });
-    assert!(
-        shared
-            .new_machine_record(
-                &request,
-                "fc-grant",
-                "spec",
-                None,
-                std::num::NonZeroU32::new(8193)
-            )
-            .await
-            .is_err()
-    );
+    let error = shared
+        .new_machine_record(
+            &request,
+            "fc-grant",
+            "spec",
+            None,
+            std::num::NonZeroU32::new(8193),
+        )
+        .await
+        .unwrap_err();
+    let error = error.to_string();
+    assert!(error.contains("8193 MiB"), "{error}");
+    assert!(error.contains("capacity 8192 MiB"), "{error}");
+    assert!(error.contains("restore"), "{error}");
     let mut oversized = request.clone();
     oversized.spec.resources = SandboxResourceShape::new(1, 8193);
     assert!(
