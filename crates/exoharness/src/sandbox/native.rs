@@ -57,6 +57,7 @@ const DEFAULT_NETWORK_CREATE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_NETWORK_CREATE_RETRY_DELAY: Duration = Duration::from_millis(200);
 pub(crate) const WARM_SANDBOX_KEY_LABEL: &str = "exo.sandbox.key";
 pub(crate) const WARM_SANDBOX_SPEC_HASH_LABEL: &str = "exo.sandbox.spec-hash";
+const WARM_SANDBOX_NETWORK_LABEL: &str = "exo.sandbox.networking";
 pub(crate) const WARM_SANDBOX_OWNER_PID_LABEL: &str = "exo.sandbox.owner-pid";
 const APPLE_ABSOLUTE_TIME_UNIX_OFFSET_SECONDS: f64 = 978_307_200.0;
 const DURABLE_FILE_SYSTEM_ROOT_ENV: &str = "EXO_DURABLE_FILE_SYSTEM_ROOT";
@@ -421,7 +422,10 @@ impl ManagedSandboxBackend for CliContainerSandboxBackend {
         let replaced = {
             let mut warm_sandboxes = self.warm_sandboxes.lock().await;
             match warm_sandboxes.get(request.sandbox_id.as_str()) {
-                Some(entry) if entry.request.spec == request.spec => {
+                Some(entry)
+                    if entry.request.spec == request.spec
+                        && entry.request.policy == request.policy =>
+                {
                     return Ok(Arc::new(WarmSandboxHandle {
                         id: format!("warm:{}", request.sandbox_id.as_str()),
                         cli: self.cli,
@@ -1168,6 +1172,11 @@ async fn create_named_warm_sandbox(
         ))
         .arg("--label")
         .arg(format!(
+            "{WARM_SANDBOX_NETWORK_LABEL}={}",
+            request.policy.networking_enabled()
+        ))
+        .arg("--label")
+        .arg(format!(
             "{WARM_SANDBOX_OWNER_PID_LABEL}={}",
             std::process::id()
         ))
@@ -1317,7 +1326,10 @@ async fn find_running_apple_container_warm_sandbox(
         let spec_matches = labels
             .get(WARM_SANDBOX_SPEC_HASH_LABEL)
             .is_some_and(|value| value == &spec_hash);
-        (key_matches && spec_matches).then_some(container.configuration.id)
+        let network_matches = labels
+            .get(WARM_SANDBOX_NETWORK_LABEL)
+            .is_some_and(|value| value == &request.policy.networking_enabled().to_string());
+        (key_matches && spec_matches && network_matches).then_some(container.configuration.id)
     }))
 }
 
@@ -1331,6 +1343,10 @@ async fn find_running_docker_warm_sandbox(
         request.sandbox_id.as_str()
     );
     let spec_filter = format!("label={WARM_SANDBOX_SPEC_HASH_LABEL}={spec_hash}");
+    let network_filter = format!(
+        "label={WARM_SANDBOX_NETWORK_LABEL}={}",
+        request.policy.networking_enabled()
+    );
     let output = run_container_admin_command(
         container_bin,
         WARM_SANDBOX_CLEANUP_TIMEOUT,
@@ -1340,6 +1356,8 @@ async fn find_running_docker_warm_sandbox(
             key_filter.as_str(),
             "--filter",
             spec_filter.as_str(),
+            "--filter",
+            network_filter.as_str(),
             "--filter",
             "status=running",
             "--format",
@@ -1377,7 +1395,9 @@ async fn ensure_warm_sandbox_ready(
 
     let mut warm_sandboxes = warm_sandboxes.lock().await;
     let (current_name, current_owned) = match warm_sandboxes.get_mut(request.sandbox_id.as_str()) {
-        Some(entry) if entry.request.spec == request.spec => {
+        Some(entry)
+            if entry.request.spec == request.spec && entry.request.policy == request.policy =>
+        {
             entry.last_used_at = Instant::now();
             (entry.name.clone(), entry.owned)
         }
@@ -3116,6 +3136,8 @@ mod tests {
                 key_filter.as_str(),
                 "--filter",
                 spec_filter.as_str(),
+                "--filter",
+                "label=exo.sandbox.networking=false",
                 "--filter",
                 "status=running",
                 "--format",
