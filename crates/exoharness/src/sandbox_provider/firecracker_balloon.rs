@@ -324,25 +324,34 @@ mod tests {
         let socket = jail_root(&config, &record.machine_id).join("run/firecracker.socket");
         fs::create_dir_all(socket.parent().context("socket parent")?)?;
         let listener = StdUnixListener::bind(socket)?;
+        let (release, blocked) = std::sync::mpsc::channel();
         let peer = std::thread::spawn(move || -> Result<()> {
             let (mut stream, _) = listener.accept()?;
             let (request, _) = super::super::tests::read_api_request(&mut stream)?;
             assert!(request.starts_with("PATCH /hotplug/memory "));
-            std::thread::sleep(Duration::from_millis(150));
             stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")?;
             let (mut stream, _) = listener.accept()?;
             let (request, _) = super::super::tests::read_api_request(&mut stream)?;
             assert!(request.starts_with("GET /hotplug/memory "));
-            std::thread::sleep(Duration::from_millis(1500));
+            blocked.recv()?;
             Ok(())
         });
         let started = Instant::now();
-        assert!(initialize_until(&config, &record, started + Duration::from_millis(250)).is_err());
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "API wait ignored the remaining deadline"
-        );
+        let error =
+            initialize_until(&config, &record, started + Duration::from_secs(2)).unwrap_err();
+        let elapsed = started.elapsed();
+        release.send(())?;
         peer.join().unwrap()?;
+        assert!(
+            error.chain().any(|cause| cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)),
+            "{error:#}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "API wait ignored the remaining deadline: {elapsed:?}"
+        );
         Ok(())
     }
 
