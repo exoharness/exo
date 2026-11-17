@@ -315,22 +315,17 @@ impl Drop for EgressProxy {
 }
 
 impl State {
-    fn preserves(&self, next: &Self, destination: &ConnectionDestination) -> bool {
-        if self.identity != next.identity
-            || next.check_port(destination.port).is_err()
+    fn preserves(
+        &self,
+        next: &Self,
+        destination: &ConnectionDestination,
+        same_resolver: bool,
+    ) -> bool {
+        if next.check_port(destination.port).is_err()
             || !next.network.permits_host(&destination.host)
             || (destination.opaque && !next.network.unrestricted())
         {
             return false;
-        }
-        match (&self.external, &next.external) {
-            (Some(old), Some(new))
-                if old.url == new.url
-                    && old.username == new.username
-                    && old.password == new.password
-                    && old.ca_pem == new.ca_pem => {}
-            (None, None) => {}
-            _ => return false,
         }
         let relevant = |binding: &&Binding| binding.permits_host(&destination.host);
         let unchanged = |old: &Binding, new: &Binding| {
@@ -344,11 +339,7 @@ impl State {
                         .external
                         .as_ref()
                         .and_then(|proxy| proxy.credential_authorizations.get(&new.config.name))
-                && match (&self.resolver, &next.resolver) {
-                    (Some(old), Some(new)) => Arc::ptr_eq(old, new),
-                    (None, None) => true,
-                    _ => false,
-                }
+                && same_resolver
         };
         self.bindings.iter().filter(relevant).all(|old| {
             next.bindings
@@ -1039,8 +1030,22 @@ async fn serve<A, F, C>(
                         let mut cancelled = {
                             let mut connections = connections.lock().expect("egress connections poisoned");
                             let mut cancelled = HashSet::new();
+                            let same_proxy = match (&connections.state.external, &next.external) {
+                                (Some(old), Some(new)) => old.url == new.url
+                                    && old.username == new.username
+                                    && old.password == new.password
+                                    && old.ca_pem == new.ca_pem,
+                                (None, None) => true,
+                                _ => false,
+                            };
+                            let same_identity = connections.state.identity == next.identity;
+                            let same_resolver = match (&connections.state.resolver, &next.resolver) {
+                                (Some(old), Some(new)) => Arc::ptr_eq(old, new),
+                                (None, None) => true,
+                                _ => false,
+                            };
                             for (id, connection) in &connections.active {
-                                if connection.destinations.iter().any(|destination| !connections.state.preserves(&next, destination)) {
+                                if !same_identity || !same_proxy || connection.destinations.iter().any(|destination| !connections.state.preserves(&next, destination, same_resolver)) {
                                     connection.abort.abort();
                                     cancelled.insert(*id);
                                 }

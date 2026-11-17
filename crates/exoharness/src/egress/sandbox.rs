@@ -202,6 +202,28 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         self.sandboxes.lock().expect("egress sandbox map poisoned")
     }
 
+    fn state(
+        &self,
+        request: &SandboxRequest,
+        external_proxy: Option<&super::ExternalProxyConfig>,
+    ) -> Result<State> {
+        let identity = EgressIdentity {
+            sandbox_id: request.sandbox_id.clone(),
+            scope: request.scope,
+        };
+        match external_proxy {
+            Some(proxy) => {
+                State::with_external_proxy(identity, request.policy.clone(), proxy.clone())
+            }
+            None => State::new(
+                identity,
+                request.policy.clone(),
+                self.resolver.clone(),
+                self.upstream.clone(),
+            ),
+        }
+    }
+
     fn ensure_open(&self) -> Result<()> {
         ensure!(
             !self.closed.is_cancelled(),
@@ -276,23 +298,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                     .into());
                 }
                 if !same_policy {
-                    let identity = EgressIdentity {
-                        sandbox_id: request.sandbox_id.clone(),
-                        scope: request.scope,
-                    };
-                    let state = match external_proxy {
-                        Some(proxy) => State::with_external_proxy(
-                            identity,
-                            request.policy.clone(),
-                            proxy.clone(),
-                        ),
-                        None => State::new(
-                            identity,
-                            request.policy.clone(),
-                            self.resolver.clone(),
-                            self.upstream.clone(),
-                        ),
-                    };
+                    let state = self.state(&request, external_proxy);
                     let result = async { egress.proxy.update(state?, &request.policy).await }.await;
                     if let Err(error) = result {
                         egress.close();
@@ -316,21 +322,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                 anyhow::anyhow!("proxy egress requires a managed sandbox lifecycle").into(),
             );
         }
-        let identity = EgressIdentity {
-            sandbox_id: request.sandbox_id.clone(),
-            scope: request.scope,
-        };
-        let state = match external_proxy {
-            Some(proxy) => {
-                State::with_external_proxy(identity, request.policy.clone(), proxy.clone())?
-            }
-            None => State::new(
-                identity,
-                request.policy.clone(),
-                self.resolver.clone(),
-                self.upstream.clone(),
-            )?,
-        };
+        let state = self.state(&request, external_proxy)?;
         // The proxy must exist before boot so the backend can install its
         // endpoints in the VM's network rules. It admits no source yet.
         let egress = Arc::new(SandboxEgress {

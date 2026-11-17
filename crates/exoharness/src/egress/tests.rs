@@ -555,6 +555,28 @@ async fn proxy_requires_a_bound_source_and_closes_on_shutdown() -> Result<()> {
     let ca_pem = proxy.ca_pem().to_owned();
     let mut download = proxy_client.get("https://api.test/sse").send().await?;
     assert_eq!(download.chunk().await?.unwrap(), "first\n");
+    let mut package = proxy_client.get("https://public.test/sse").send().await?;
+    assert_eq!(package.chunk().await?.unwrap(), "first\n");
+    let resolver = TestResolver::new();
+    let state = State::new(
+        identity("one"),
+        policy(),
+        Some(resolver.clone()),
+        Arc::new(upstream.config.clone()),
+    )?;
+    proxy.update(state, &policy()).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), download.chunk())
+            .await?
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), package.chunk())
+            .await
+            .is_err()
+    );
+    let mut download = proxy_client.get("https://api.test/sse").send().await?;
+    assert_eq!(download.chunk().await?.unwrap(), "first\n");
     let mut overlap = policy();
     overlap.networking = SandboxNetworkPolicy::Limited {
         allowed_hosts: vec!["api.test".into(), "api.github.com".into()],
