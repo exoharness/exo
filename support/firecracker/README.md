@@ -18,16 +18,13 @@ as a release archive. No registry service is required beyond wherever that
 immutable image or archive is already published.
 
 Build the initramfs from the exact Exo source revision used by the host's
-`exoharness` dependency. Pin the Firecracker release and kernel build for each
-architecture, verify downloaded files before installing them, and record the
-resulting initramfs checksum after building it. For example, this is a concrete
-bundle known to work:
-
-| Asset                                                  | Version or build                         | x86_64 SHA-256                                                     | aarch64 SHA-256                                                    |
-| ------------------------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| Firecracker release archive (includes matching jailer) | 1.18.0                                   | `1ac8eec866dd5eea14efecf6323e22b23eea24054545338a5b34bc5bca6623cd` | `2a6130ff0338901ff9d7fbd73ce046c6b1c6123889dc84a34d678aa53bd0c0c2` |
-| Firecracker CI kernel                                  | 6.18.56, build `20261105-6ea6634994fa-0` | `af348226aa2a25b846156150d5cdb5dae3bf2a022f1db176e3a2b9a3249817bf` | `5e1990cd2f6e1c70196955b9405e32a5059f9f0a2c839478bc4f064a08f3a2ff` |
-| Exo guest initramfs                                    | same Exo revision as the host            | record after building                                              | record after building                                              |
+`exoharness` dependency. [`bundle.env`](bundle.env) pins the Firecracker
+release and CI kernel build known to work with that revision, with SHA-256s for
+the release archive (which includes the matching jailer) and `vmlinux` on
+x86_64 and aarch64. It is plain `KEY=value` lines, so CI and deployment images
+can source it from the same Exo checkout they build the initramfs from. Verify
+downloaded files against it before installing them, and record the resulting
+initramfs checksum after building it.
 
 Filesystem capture requires Firecracker 1.16.2 or newer because
 [upstream #6100](https://github.com/firecracker-microvm/firecracker/pull/6100)
