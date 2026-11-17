@@ -149,12 +149,38 @@ while True:
         let listener = StdUnixListener::bind(&api)?;
         let (entered, waiting) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
+        let cgroup_for_peer = cgroup.clone();
         let peer = std::thread::spawn(move || -> Result<()> {
             let (mut stream, _) = listener.accept()?;
             let (request, _) = read_api_request(&mut stream)?;
             assert!(request.starts_with("PATCH /hotplug/memory "));
             entered.send(()).unwrap();
             released.recv_timeout(Duration::from_secs(10))?;
+            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")?;
+            let timeout = rustix::event::Timespec::try_from(FIRECRACKER_API_TIMEOUT)?;
+            ensure!(
+                rustix::event::poll(
+                    &mut [rustix::event::PollFd::new(
+                        &listener,
+                        rustix::event::PollFlags::IN
+                    )],
+                    Some(&timeout),
+                )? > 0,
+                "warm acquire did not reach guest memory reconciliation"
+            );
+            let (mut stream, _) = listener.accept()?;
+            let (request, _) = read_api_request(&mut stream)?;
+            assert!(request.starts_with("PATCH /hotplug/memory "));
+            let (max, high) = firecracker_memory_limits(grown)?;
+            let actual = fs::read_to_string(cgroup_for_peer.join("memory.max"))?;
+            ensure!(
+                actual.trim() == max.to_string(),
+                "warm acquire reached guest growth with memory.max={actual}, expected {max}"
+            );
+            ensure!(
+                fs::read_to_string(cgroup_for_peer.join("memory.high"))?.trim() == high.to_string(),
+                "warm acquire did not replay memory.high"
+            );
             stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")?;
             Ok(())
         });
@@ -170,11 +196,17 @@ while True:
         .await;
         release.send(())?;
         let failure = growth.await?;
-        peer.join().unwrap()?;
-        fs::rename(&parked, &api)?;
         assert_eq!(concurrent??, "during-growth");
         assert!(failure.is_err());
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
+        // Recreate a crash after the journal write but before host limits changed.
+        fs::write(cgroup.join("memory.max"), &original_limits.0)?;
+        fs::write(cgroup.join("memory.high"), &original_limits.1)?;
+        assert!(backend.acquire(request.clone()).await.is_err());
+        peer.join().unwrap()?;
+        fs::rename(&parked, &api)?;
+        let recovered = backend.acquire(request.clone()).await?;
+        assert_eq!(recovered.live_resource_grant().await?, Some(grown));
         assert_balloon(&config, &record, 0)?;
         assert!(
             handle

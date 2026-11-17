@@ -349,7 +349,11 @@ impl FirecrackerRuntimeFingerprint {
     }
 
     fn physical_memory_mib(&self, grant: u32) -> u32 {
-        self.boot_memory_mib().max(grant.div_ceil(2) * 2)
+        if self.memory_ceiling_mib.is_some() {
+            self.boot_memory_mib().max(grant.div_ceil(2) * 2)
+        } else {
+            self.memory_mib
+        }
     }
 
     fn validate_memory_grant(&self, grant: u32) -> Result<()> {
@@ -2465,7 +2469,20 @@ impl Shared {
             let record = record.clone();
             let span = tracing::Span::current();
             tokio::task::spawn_blocking(move || {
-                span.in_scope(|| balloon::initialize_until(&config, &record, deadline))
+                span.in_scope(|| {
+                    let memory = balloon::grant(&record)?;
+                    if memory > record.runtime.memory_mib {
+                        // A journaled expansion can precede the host-limit writes.
+                        let resources =
+                            SandboxResourceShape::new(record.runtime.vcpu_count, memory)
+                                .context("invalid Firecracker grant")?;
+                        balloon::apply_host_memory_limits(
+                            &firecracker_cgroup_dir(&config, &record.machine_id),
+                            resources,
+                        )?;
+                    }
+                    balloon::initialize_until(&config, &record, deadline)
+                })
             })
             .await??;
         }

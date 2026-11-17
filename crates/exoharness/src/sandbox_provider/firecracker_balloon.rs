@@ -142,11 +142,13 @@ fn wait_for_target(socket: &Path, amount_mib: u32, deadline: Instant) -> Result<
     let pages = u64::from(amount_mib) * 256;
     let mut observed: Option<Statistics> = None;
     loop {
-        let timeout = api_timeout(deadline).with_context(|| {
-            format!("Firecracker balloon timed out: target {pages} pages, observed {observed:?}")
-        })?;
-        let response =
-            firecracker_api_response(socket, "GET", "/balloon/statistics", &[], timeout)?;
+        let response = api_timeout(deadline)
+            .and_then(|timeout| {
+                firecracker_api_response(socket, "GET", "/balloon/statistics", &[], timeout)
+            })
+            .with_context(|| {
+                format!("Firecracker balloon readiness failed: target {pages} pages, observed {observed:?}")
+            })?;
         let stats: Statistics = serde_json::from_slice(&response)?;
         if stats.target_pages == pages && stats.actual_pages == pages {
             return Ok(());
@@ -239,6 +241,16 @@ pub(super) fn expand(
     )
 }
 
+pub(super) fn apply_host_memory_limits(
+    cgroup: &Path,
+    resources: SandboxResourceShape,
+) -> Result<()> {
+    let (memory_max, memory_high) = firecracker_memory_limits(resources)?;
+    fs::write(cgroup.join("memory.max"), memory_max.to_string())?;
+    fs::write(cgroup.join("memory.high"), memory_high.to_string())?;
+    Ok(())
+}
+
 fn apply_grant(
     config: &FirecrackerConfig,
     record: &MachineRecord,
@@ -251,9 +263,7 @@ fn apply_grant(
     record.memory_grant_mib = Some(resources.memory_mib);
     // Journal the reservation before changing any host or guest limit.
     replace_manifest(&config.state_root, &record)?;
-    let (memory_max, memory_high) = firecracker_memory_limits(resources)?;
-    fs::write(cgroup.join("memory.max"), memory_max.to_string())?;
-    fs::write(cgroup.join("memory.high"), memory_high.to_string())?;
+    apply_host_memory_limits(cgroup, resources)?;
     initialize_until(config, &record, deadline)?;
     Ok(resources)
 }
@@ -288,6 +298,7 @@ mod tests {
         let root = tempfile::tempdir_in("/tmp")?;
         let socket = root.path().join("api");
         let listener = StdUnixListener::bind(&socket)?;
+        let (release, blocked) = std::sync::mpsc::channel();
         let peer = std::thread::spawn(move || -> Result<()> {
             let (mut stream, _) = listener.accept()?;
             let (request, body) = super::super::tests::read_api_request(&mut stream)?;
@@ -299,12 +310,14 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             )?;
+            blocked.recv()?;
             Ok(())
         });
         let error =
-            wait_for_target(&socket, 1, Instant::now() + Duration::from_millis(20)).unwrap_err();
-        assert!(error.to_string().contains("actual_pages: 7"));
+            wait_for_target(&socket, 1, Instant::now() + Duration::from_secs(2)).unwrap_err();
+        release.send(())?;
         peer.join().unwrap()?;
+        assert!(error.to_string().contains("actual_pages: 7"), "{error:#}");
         Ok(())
     }
 

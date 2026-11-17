@@ -77,6 +77,12 @@ fn runtime_fingerprint_uses_requested_resources() {
 }
 
 #[test]
+fn ordinary_odd_memory_is_not_rounded_for_capture() {
+    let runtime = test_host_runtime().for_resources(SandboxResourceShape::new(1, 513).unwrap());
+    assert_eq!(runtime.physical_memory_mib(513), 513);
+}
+
+#[test]
 fn guest_root_policy_changes_runtime_and_snapshot_identity() {
     assert!(FirecrackerConfig::default().allow_guest_root);
     let restricted = test_runtime();
