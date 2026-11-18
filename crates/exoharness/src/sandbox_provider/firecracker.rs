@@ -223,7 +223,7 @@ pub struct FirecrackerConfig {
     /// Host memory overhead as a percentage of guest RAM. Defaults to 10%.
     #[serde(default = "default_memory_overhead_percent")]
     pub memory_overhead_percent: u8,
-    /// Opt in to live growth up to the host's memory capacity.
+    /// Opt in to live CPU and memory growth up to the host's capacity.
     /// The requested shape remains the initial grant. Reserve backend host
     /// overhead as well as the grant before requesting growth.
     #[serde(default)]
@@ -2073,9 +2073,11 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
     }
 
     fn live_resource_ceiling(&self) -> Option<SandboxResourceShape> {
-        let mut capacity = self.machine.record.runtime.growth_capacity?.resources;
-        capacity.vcpu_count = balloon::resources(&self.machine.record).ok()?.vcpu_count;
-        Some(capacity)
+        self.machine
+            .record
+            .runtime
+            .growth_capacity
+            .map(|capacity| capacity.resources)
     }
 
     async fn live_resource_grant(&self) -> Result<Option<SandboxResourceShape>> {
@@ -6635,3 +6637,7 @@ mod tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "firecracker_live_memory_tests.rs"]
 mod live_memory_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "firecracker_live_cpu_tests.rs"]
+mod live_cpu_tests;

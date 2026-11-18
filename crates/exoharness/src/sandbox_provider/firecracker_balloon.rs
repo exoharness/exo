@@ -314,7 +314,7 @@ pub(super) fn expand(
     let current = resources(record)?;
     let ceiling = ceiling(&record.runtime).context("invalid Firecracker resource capacity")?;
     if record.runtime.growth_capacity.is_none()
-        || target.vcpu_count != current.vcpu_count
+        || target.vcpu_count < current.vcpu_count
         || target.memory_mib < current.memory_mib
         || target.vcpu_count > ceiling.vcpu_count
         || target.memory_mib > ceiling.memory_mib

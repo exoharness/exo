@@ -67,6 +67,7 @@ async fn live_memory_capacity_changes_preserve_reattach_and_ram_restore() -> Res
     config.firecracker_bin = std::env::var("EXO_FIRECRACKER_BINARY")?.into();
     config.jailer_bin = std::env::var("EXO_FIRECRACKER_JAILER")?.into();
     config.max_machines = None;
+    config.allow_guest_root = false;
     let mut backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     ensure!(
         balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)? >= 32,
@@ -166,6 +167,18 @@ async fn live_memory_capacity_changes_preserve_reattach_and_ram_restore() -> Res
             shell(&handle, "cat /dev/shm/capacity-proof; nproc").await?,
             "retained1\n"
         );
+        let expanded = SandboxResourceShape::new(2, 2048).unwrap();
+        assert!(matches!(handle.expand_resources(expanded).await?,
+            crate::SandboxResourceUpdate::Applied { grant } if grant == expanded));
+        assert_eq!(shell(&handle, "nproc").await?, "2\n");
+        let record = allocation(&backend, &request).await?;
+        assert_eq!(
+            fs::read_to_string(
+                firecracker_cgroup_dir(&config, &record.machine_id).join("cpu.max")
+            )?
+            .trim(),
+            "200000 100000"
+        );
         handle.stop().await?;
         backend.delete_snapshot(snapshot).await?;
         Ok(())
@@ -198,6 +211,7 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
         );
         let record = allocation(&backend, &request).await?;
         assert_balloon(&config, &record, 0)?;
+        ensure!(capacity.vcpu_count.get() >= 4, "test needs four host CPUs");
         let before = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
             .trim()
@@ -271,7 +285,7 @@ while True:
         let mut echo = [0; 6];
         tokio::io::AsyncReadExt::read_exact(&mut connection, &mut echo).await?;
         assert_eq!(&echo, b"before");
-        let grown = SandboxResourceShape::new(1, 8192).unwrap();
+        let grown = SandboxResourceShape::new(4, 8192).unwrap();
         let api = jail_root(&config, &record.machine_id).join("run/firecracker.socket");
         let parked = api.with_extension("parked");
         fs::rename(&api, &parked)?;
@@ -302,7 +316,7 @@ while True:
             assert!(request.starts_with("PATCH /hotplug/memory "));
             let max = expected_memory_max;
             ensure!(
-                fs::read_to_string(cgroup_for_peer.join("cpu.max"))?.trim() == "100000 100000",
+                fs::read_to_string(cgroup_for_peer.join("cpu.max"))?.trim() == "400000 100000",
                 "warm acquire did not replay cpu.max"
             );
             let actual = fs::read_to_string(cgroup_for_peer.join("memory.max"))?;
@@ -338,7 +352,7 @@ while True:
         );
         assert_eq!(
             fs::read_to_string(cgroup.join("cpu.max"))?.trim(),
-            "100000 100000"
+            "400000 100000"
         );
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
         // Recreate a crash after the journal write but before host limits changed.
@@ -348,6 +362,26 @@ while True:
         assert!(backend.acquire(request.clone()).await.is_err());
         peer.join().unwrap()?;
         fs::rename(&parked, &api)?;
+        // Let CPU 1 online, then fail CPU 2 through a read-only bind mount.
+        // This exercises a real partial guest change rather than a mocked response.
+        shell(
+            &handle,
+            r#"sudo -n sh -ec '
+printf 0 > /tmp/cpu-online-block
+mount --bind /tmp/cpu-online-block /sys/devices/system/cpu/cpu2/online
+mount -o remount,bind,ro /tmp/cpu-online-block /sys/devices/system/cpu/cpu2/online
+'"#,
+        )
+        .await?;
+        assert!(matches!(handle.expand_resources(grown).await?,
+            crate::SandboxResourceUpdate::Incomplete { reservation, .. } if reservation == grown));
+        assert_eq!(shell(&handle, "nproc").await?, "2\n");
+        assert_eq!(handle.live_resource_grant().await?, Some(grown));
+        shell(
+            &handle,
+            "sudo -n umount /sys/devices/system/cpu/cpu2/online",
+        )
+        .await?;
         let recovered = backend.acquire(request.clone()).await?;
         assert_eq!(recovered.live_resource_grant().await?, Some(grown));
         assert_balloon(&config, &record, 0)?;
@@ -413,7 +447,7 @@ while True:
                 firecracker_cgroup_dir(&config, &restored_record.machine_id).join("cpu.max")
             )?
             .trim(),
-            "100000 100000"
+            "400000 100000"
         );
         let available = shell(&restored, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
@@ -506,7 +540,7 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
         assert_resident_snapshots(&config, &allocation(&backend, &source).await?)?;
         assert!(matches!(
             handle
-                .expand_resources(SandboxResourceShape::new(1, 1025).unwrap())
+                .expand_resources(SandboxResourceShape::new(2, 1025).unwrap())
                 .await?,
             crate::SandboxResourceUpdate::Applied { .. }
         ));
@@ -543,7 +577,7 @@ with open("/dev/shm/ram-state", "r+b") as f:
         assert_resident_snapshots(&config, &fork_record)?;
         assert_eq!(
             fork.live_resource_grant().await?,
-            SandboxResourceShape::new(1, 1025)
+            SandboxResourceShape::new(2, 1025)
         );
         ensure!(
             fork_record.runtime.memory_mib == 512,
@@ -581,7 +615,7 @@ with open("/dev/shm/ram-state", "r+b") as f:
         assert_resident_snapshots(&config, &restored_record)?;
         assert_eq!(
             restored.live_resource_grant().await?,
-            SandboxResourceShape::new(1, 1025)
+            SandboxResourceShape::new(2, 1025)
         );
         assert_balloon(&config, &restored_record, 1)?;
         assert_eq!(shell(&restored, check).await?, changed);
@@ -725,7 +759,14 @@ async fn live_memory_growth_makes_six_gib_writable() -> Result<()> {
         );
         assert_eq!(
             handle.live_resource_ceiling(),
-            SandboxResourceShape::new(1, 262144)
+            Some(
+                backend
+                    .shared
+                    .host_fingerprint
+                    .growth_capacity
+                    .unwrap()
+                    .resources
+            )
         );
         let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
@@ -781,13 +822,12 @@ async fn live_memory_small_grant_is_writable() -> Result<()> {
             let handle = backend.acquire(request.clone()).await?;
             let record = allocation(&backend, &request).await?;
             assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
-            let mut capacity = backend
+            let capacity = backend
                 .shared
                 .host_fingerprint
                 .growth_capacity
                 .unwrap()
                 .resources;
-            capacity.vcpu_count = request.spec.resources.unwrap().vcpu_count;
             assert_eq!(handle.live_resource_ceiling(), Some(capacity));
             assert_balloon(&config, &record, memory % 2)?;
             let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")

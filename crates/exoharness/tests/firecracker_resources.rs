@@ -96,7 +96,7 @@ async fn firecracker_memory_growth_retries_and_restores() -> anyhow::Result<()> 
         let mut ready = [0; 5];
         process.stdout.read_exact(&mut ready).await?;
         assert_eq!(&ready, b"ready");
-        let expanded = SandboxResourceShape::new(1, 1024).unwrap();
+        let expanded = SandboxResourceShape::new(2, 1024).unwrap();
         for _ in 0..2 {
             assert!(matches!(handle.expand_resources(expanded).await?,
                 exoharness::SandboxResourceUpdate::Applied { grant } if grant == expanded));

@@ -178,6 +178,9 @@ so a large growth range does not consume the initial grant at boot.
 Boot RAM uses transparent huge pages when growth is enabled.
 Only the requested CPUs are online at boot (`maxcpus=<grant>`), while the VM
 reserves its CPU topology for growth; `CONFIG_HOTPLUG_CPU=y` is required.
+CPU growth raises the host quota before the guest agent onlines additional CPUs,
+and completes only after the guest confirms the requested online count.
+Capacity is bounded by the jailer allocation, KVM, and Firecracker's 32-vCPU maximum.
 Existing VMs and RAM snapshots retain their boot geometry when detected capacity changes.
 
 Call `host_resource_reservation` on the backend before acquisition or growth.
@@ -190,7 +193,7 @@ and [balloon security guidance](https://github.com/firecracker-microvm/firecrack
 
 Growth persists the grant and raises host limits before changing guest resources.
 `SandboxResourceUpdate::Applied` confirms convergence; `Incomplete` carries the
-reservation to retain and the error. CPU changes, shrinking, and over-capacity
+reservation to retain and the error. Shrinking and over-capacity
 requests are rejected before mutation. Keep the reservation after failure or
 disconnect until `live_resource_grant` reconciles it or terminate the VM;
 retrying the same target is safe. Filesystem and RAM captures retain both grants
