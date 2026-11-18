@@ -66,6 +66,7 @@ async fn live_memory_capacity_changes_preserve_reattach_and_ram_restore() -> Res
     let mut config = config(temp.path(), &image);
     config.firecracker_bin = std::env::var("EXO_FIRECRACKER_BINARY")?.into();
     config.jailer_bin = std::env::var("EXO_FIRECRACKER_JAILER")?.into();
+    config.max_machines = None;
     let mut backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     ensure!(
         balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)? >= 32,
@@ -131,8 +132,23 @@ async fn live_memory_capacity_changes_preserve_reattach_and_ram_restore() -> Res
             "retained1\n"
         );
         let snapshot = handle.snapshot_template(crate::SnapshotKind::Full).await?;
-        handle.stop().await?;
         drop(handle);
+        stop_machine_process_blocking(
+            &original.machine_id,
+            &backend.shared.pid_path(&original.machine_id),
+        )?;
+        assert!(backend.acquire(request.clone()).await.is_err());
+        assert!(!process_running(
+            &backend.shared.pid_path(&original.machine_id)
+        ));
+        assert_eq!(
+            allocation(&backend, &request).await?.runtime,
+            original.runtime
+        );
+        backend
+            .shared
+            .cleanup_machine(&original.machine_id, true)
+            .await?;
         Arc::get_mut(&mut backend.shared)
             .context("backend unexpectedly shared")?
             .host_fingerprint

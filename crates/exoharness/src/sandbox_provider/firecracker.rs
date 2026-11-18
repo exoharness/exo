@@ -2446,6 +2446,8 @@ impl Shared {
                     self.initialize_resources(&machine.record, deadline).await?;
                     return Ok(machine);
                 }
+                self.host_fingerprint
+                    .validate_resources(balloon::resources(record)?)?;
                 self.cleanup_machine(machine_id, false).await?;
             }
         }
