@@ -32,7 +32,7 @@ async fn cpu_rate(cgroup: &Path) -> Result<f64> {
 }
 
 #[tokio::test]
-#[ignore = "requires root, KVM, Python guest image, at least four host CPUs, and TMPDIR on XFS"]
+#[ignore = "requires root, KVM, Python guest image, four idle host CPUs, and XFS TMPDIR"]
 async fn live_cpu_growth_increases_execution_capacity() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("cpu-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
@@ -182,16 +182,10 @@ async fn live_cpu_and_memory_grow_from_small_request_to_node_capacity() -> Resul
             fs::read_to_string(cgroup.join("cpu.max"))?.trim(),
             balloon::cpu_quota(capacity.vcpu_count.get())
         );
+        let reservation = backend.host_resource_reservation(capacity)?;
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.max"))?.trim(),
-            (u64::from(
-                backend
-                    .host_resource_reservation(capacity)?
-                    .memory_mib
-                    .get()
-            ) * 1024
-                * 1024)
-                .to_string()
+            (u64::from(reservation.memory_mib.get()) * 1024 * 1024).to_string()
         );
         // Four writable GiB exceeds the two-GiB boot grant without turning
         // the node-capacity regression into a saturation benchmark.
