@@ -61,24 +61,27 @@ fn restore_reservation_reads_the_saved_grant_before_admission() -> Result<()> {
     };
     let mut manifest = FilesystemManifest::from_payload(&fixture(&config)?)?;
     manifest.resource_grant = SandboxResourceShape::new(2, 8192);
-    let payload = manifest.payload()?;
     let backend = FirecrackerSandboxBackend {
         external_proxy: None,
         shared: super::super::tests::test_shared(config, HashMap::new())?,
         egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
     };
-    for (request, expected) in [
-        ((1, 512), (2, 10240)),
-        ((4, 4096), (4, 10240)),
-        ((1, 16384), (2, 20480)),
-    ] {
-        assert_eq!(
-            backend.host_resource_reservation(
-                SandboxResourceShape::new(request.0, request.1).unwrap(),
-                Some(&payload),
-            )?,
-            SandboxResourceShape::new(expected.0, expected.1).unwrap()
-        );
+    for partial in [false, true] {
+        manifest.partial = partial;
+        let payload = manifest.payload()?;
+        for (request, expected) in [
+            ((1, 512), (2, 10240)),
+            ((4, 4096), (4, 10240)),
+            ((1, 16384), (2, 20480)),
+        ] {
+            assert_eq!(
+                backend.host_resource_reservation(
+                    SandboxResourceShape::new(request.0, request.1).unwrap(),
+                    Some(&payload),
+                )?,
+                SandboxResourceShape::new(expected.0, expected.1).unwrap()
+            );
+        }
     }
     Ok(())
 }

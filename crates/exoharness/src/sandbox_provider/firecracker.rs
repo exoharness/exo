@@ -1760,7 +1760,10 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         snapshot: Option<&SnapshotPayload>,
     ) -> Result<SandboxResourceShape> {
         let saved = match snapshot {
-            Some(payload) if payload.format == SnapshotFormat::FirecrackerFilesystemRef => {
+            Some(payload)
+                if payload.format == SnapshotFormat::FirecrackerFilesystemRef
+                    || payload.format == SnapshotFormat::FirecrackerLazyFilesystemRef =>
+            {
                 filesystem::resource_grant(payload)?
             }
             Some(payload) => {
