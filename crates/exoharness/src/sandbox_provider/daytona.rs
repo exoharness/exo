@@ -176,10 +176,7 @@ impl DaytonaSandboxBackend {
             env: HashMap::new(),
             auto_stop_interval: auto_stop_minutes,
             auto_delete_interval: request.lifecycle.idle_ttl.is_none().then_some(0),
-            network_block_all: matches!(
-                request.spec.policy.networking,
-                SandboxNetworkPolicy::Disabled
-            ),
+            network_block_all: matches!(request.policy.networking, SandboxNetworkPolicy::Disabled),
         };
 
         let response = self
@@ -272,7 +269,7 @@ impl ManagedSandboxBackend for DaytonaSandboxBackend {
         &self,
         request: SandboxRequest,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("daytona")?;
+        request.policy.validate_basic("daytona")?;
         reject_unsupported_mounts(&request)?;
         let spec_hash = sandbox_spec_hash(&request.spec);
 
@@ -341,7 +338,7 @@ impl DaytonaSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("daytona")?;
+        request.policy.validate_basic("daytona")?;
         reject_unsupported_mounts(&request)?;
         let snapshot_name = if payload.format == SnapshotFormat::DaytonaRef {
             let manifest: DaytonaSnapshotManifest = serde_json::from_slice(&payload.bytes)

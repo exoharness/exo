@@ -892,6 +892,7 @@ async fn local_process_contract_handle(
         Arc::new(crate::LocalProcessSandboxBackend::new());
     backend
         .acquire(SandboxRequest {
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
             sandbox_id: sandbox_id.to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -903,7 +904,6 @@ async fn local_process_contract_handle(
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                policy: SandboxNetworkPolicy::Unrestricted.into(),
                 default_workdir: tempdir.path().display().to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),
@@ -1095,6 +1095,7 @@ fn provider_contract_request(
     default_workdir: &str,
 ) -> SandboxRequest {
     SandboxRequest {
+        policy: SandboxNetworkPolicy::Unrestricted.into(),
         sandbox_id: format!("{provider}-{contract}-contract"),
         scope: ResourceScope::Thread {
             agent_id: crate::Uuid7::now(),
@@ -1106,7 +1107,6 @@ fn provider_contract_request(
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: default_workdir.to_string(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -2935,7 +2935,7 @@ impl ManagedSandboxBackend for TestProviderStateBackend {
         &self,
         request: SandboxRequest,
     ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
-        self.policies.lock().await.push(request.spec.policy.clone());
+        self.policies.lock().await.push(request.policy.clone());
         self.requests.lock().await.push(request.provider_state);
         Ok(Arc::new(TestProviderStateHandle {
             state: self.state.clone(),
@@ -3511,6 +3511,7 @@ async fn local_process_sandbox_rejects_disabled_networking() {
     let backend = crate::LocalProcessSandboxBackend::new();
     let result = backend
         .acquire(crate::SandboxRequest {
+            policy: crate::SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "disabled-network".into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -3521,7 +3522,6 @@ async fn local_process_sandbox_rejects_disabled_networking() {
                 mounts: vec![],
                 durable_file_systems: vec![],
                 default_workdir: "/tmp".into(),
-                policy: crate::SandboxNetworkPolicy::Disabled.into(),
             },
             lifecycle: crate::SandboxLifecycleConfig::default(),
         })

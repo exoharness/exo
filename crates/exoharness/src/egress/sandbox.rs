@@ -27,6 +27,9 @@ pub(crate) struct SandboxEgress<P = EgressProxy> {
 #[async_trait::async_trait]
 pub(crate) trait SandboxProxy: Send + Sync {
     fn connection(&self) -> &super::ProxyConnection;
+    async fn update(&self, state: State, _policy: &crate::EgressPolicy) -> Result<()> {
+        self.connection().update(state).await
+    }
     fn close(&self) {
         self.connection().close();
     }
@@ -43,6 +46,14 @@ pub(crate) trait SandboxProxy: Send + Sync {
 impl SandboxProxy for EgressProxy {
     fn connection(&self) -> &super::ProxyConnection {
         &self.connection
+    }
+    async fn update(&self, state: State, policy: &crate::EgressPolicy) -> Result<()> {
+        self.connection.update(state).await?;
+        if let Err(error) = self.transport.update_policy(policy).await {
+            self.close();
+            return Err(error);
+        }
+        Ok(())
     }
     fn close(&self) {
         EgressProxy::close(self);
@@ -127,7 +138,13 @@ impl<P: SandboxProxy> SandboxEgress<P> {
             self.is_open(),
             "sandbox egress proxy is closed; acquire the sandbox again"
         );
-        let mut env = self.proxy.connection().environment.clone();
+        let mut env = self
+            .proxy
+            .connection()
+            .environment
+            .lock()
+            .expect("egress environment poisoned")
+            .clone();
         for key in super::TRUST_VARIABLES {
             env.insert(key.into(), self.ca_path.clone());
         }
@@ -185,6 +202,28 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         self.sandboxes.lock().expect("egress sandbox map poisoned")
     }
 
+    fn state(
+        &self,
+        request: &SandboxRequest,
+        external_proxy: Option<&super::ExternalProxyConfig>,
+    ) -> Result<State> {
+        let identity = EgressIdentity {
+            sandbox_id: request.sandbox_id.clone(),
+            scope: request.scope,
+        };
+        match external_proxy {
+            Some(proxy) => {
+                State::with_external_proxy(identity, request.policy.clone(), proxy.clone())
+            }
+            None => State::new(
+                identity,
+                request.policy.clone(),
+                self.resolver.clone(),
+                self.upstream.clone(),
+            ),
+        }
+    }
+
     fn ensure_open(&self) -> Result<()> {
         ensure!(
             !self.closed.is_cancelled(),
@@ -234,14 +273,14 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
         let _guard = self.lock(&request.sandbox_id).await;
         let cached = self.sandboxes().get(&request.sandbox_id).map(|cached| {
             (
-                cached.request.spec == request.spec
-                    && cached.request.scope == request.scope
+                cached.request.spec == request.spec && cached.request.scope == request.scope,
+                cached.request.policy == request.policy
                     && cached.external_proxy.as_ref() == external_proxy,
                 cached.handle.clone(),
                 cached.egress.clone(),
             )
         });
-        if let Some((unchanged, handle, egress)) = cached {
+        if let Some((unchanged, same_policy, handle, egress)) = cached {
             if let Some(handle) = handle
                 && egress.is_open()
                 && handle.is_running().await? == Some(true)
@@ -258,12 +297,23 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                     )
                     .into());
                 }
+                if !same_policy {
+                    let state = self.state(&request, external_proxy);
+                    let result = async { egress.proxy.update(state?, &request.policy).await }.await;
+                    if let Err(error) = result {
+                        egress.close();
+                        return Err(error.into());
+                    }
+                    if let Some(cached) = self.sandboxes().get_mut(&request.sandbox_id) {
+                        cached.request = request.clone();
+                        cached.external_proxy = external_proxy.cloned();
+                    }
+                }
                 return Ok(handle);
             }
             self.remove(&request.sandbox_id).await?;
         }
-        // Unrestricted/disabled networking only needs the backend's own rules.
-        if !request.spec.policy.requires_proxy() {
+        if external_proxy.is_none() && !request.policy.requires_proxy() {
             return Ok(Arc::new(build(None).await?));
         }
         self.ensure_open()?;
@@ -272,21 +322,7 @@ impl<H: ManagedSandboxHandle + 'static, P: SandboxProxy> EgressRuntime<H, P> {
                 anyhow::anyhow!("proxy egress requires a managed sandbox lifecycle").into(),
             );
         }
-        let identity = EgressIdentity {
-            sandbox_id: request.sandbox_id.clone(),
-            scope: request.scope,
-        };
-        let state = match external_proxy {
-            Some(proxy) => {
-                State::with_external_proxy(identity, request.spec.policy.clone(), proxy.clone())?
-            }
-            None => State::new(
-                identity,
-                request.spec.policy.clone(),
-                self.resolver.clone(),
-                self.upstream.clone(),
-            )?,
-        };
+        let state = self.state(&request, external_proxy)?;
         // The proxy must exist before boot so the backend can install its
         // endpoints in the VM's network rules. It admits no source yet.
         let egress = Arc::new(SandboxEgress {
@@ -395,7 +431,7 @@ impl<H: ManagedSandboxHandle + 'static> EgressRuntime<H> {
         B: FnOnce(Option<Arc<SandboxEgress>>) -> BF,
         BF: Future<Output = crate::SandboxResult<H>>,
     {
-        let policy = request.spec.policy.networking.clone();
+        let policy = request.policy.networking.clone();
         self.acquire_with_proxy(
             mode,
             request,
@@ -462,10 +498,15 @@ mod tests {
         closed: AtomicBool,
         shutdown_completed: AtomicBool,
         fail_shutdown: AtomicBool,
+        policy: Mutex<Option<crate::EgressPolicy>>,
     }
 
     #[async_trait]
     impl EgressTransport for Transport {
+        async fn update_policy(&self, policy: &crate::EgressPolicy) -> Result<()> {
+            *self.policy.lock().unwrap() = Some(policy.clone());
+            Ok(())
+        }
         fn endpoints(&self) -> crate::SandboxEgressProxy {
             crate::SandboxEgressProxy {
                 http: "192.0.2.1:80".parse().unwrap(),
@@ -499,6 +540,10 @@ mod tests {
 
     fn request(id: &str) -> SandboxRequest {
         SandboxRequest {
+            policy: SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["api.test".into()],
+            }
+            .into(),
             sandbox_id: id.into(),
             scope: crate::ResourceScope::Global,
             provider_state: None,
@@ -509,15 +554,76 @@ mod tests {
                 mounts: vec![],
                 durable_file_systems: vec![],
                 default_workdir: "/tmp".into(),
-                policy: SandboxNetworkPolicy::Limited {
-                    allowed_hosts: vec!["api.test".into()],
-                }
-                .into(),
             },
             lifecycle: SandboxLifecycleConfig {
                 idle_ttl: Some(Duration::from_secs(60)),
             },
         }
+    }
+
+    #[cfg(feature = "firecracker")]
+    #[tokio::test]
+    async fn reacquire_updates_permissions_without_replacing_the_allocation() -> Result<()> {
+        let runtime = EgressRuntime::<Handle>::new(None, Arc::new(PublicUpstreamResolver));
+        let transport = Arc::new(Transport::default());
+        let initial = request("one");
+        let spec_hash = crate::sandbox::sandbox_spec_hash(&initial.spec);
+        let handle = runtime
+            .acquire(
+                AcquisitionMode::Acquire,
+                initial.clone(),
+                None,
+                |_| async { Ok(transport.clone() as Arc<dyn EgressTransport>) },
+                |_| async { Ok(Handle(Some(true))) },
+                async { panic!("must not terminate") },
+            )
+            .await?;
+        let ca = runtime
+            .sandboxes()
+            .get("one")
+            .unwrap()
+            .egress
+            .proxy
+            .ca_pem()
+            .to_owned();
+        for networking in [
+            SandboxNetworkPolicy::Disabled,
+            SandboxNetworkPolicy::Limited {
+                allowed_hosts: vec!["other.test".into()],
+            },
+            SandboxNetworkPolicy::Unrestricted,
+        ] {
+            let mut next = initial.clone();
+            next.policy = networking.into();
+            assert_eq!(crate::sandbox::sandbox_spec_hash(&next.spec), spec_hash);
+            let current = runtime
+                .acquire(
+                    AcquisitionMode::Acquire,
+                    next.clone(),
+                    None,
+                    |_| async { panic!("must keep transport") },
+                    |_| async { panic!("must keep VM") },
+                    async { panic!("must not terminate") },
+                )
+                .await?;
+            assert!(Arc::ptr_eq(&handle, &current));
+            assert_eq!(
+                transport.policy.lock().unwrap().as_ref(),
+                Some(&next.policy)
+            );
+            assert_eq!(
+                runtime
+                    .sandboxes()
+                    .get("one")
+                    .unwrap()
+                    .egress
+                    .proxy
+                    .ca_pem(),
+                ca
+            );
+        }
+        runtime.shutdown();
+        Ok(())
     }
 
     #[cfg(feature = "firecracker")]

@@ -36,7 +36,6 @@ use async_trait::async_trait;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
@@ -70,8 +69,6 @@ const MIN_FILESYSTEM_SNAPSHOT_VERSION: Version = Version::new(1, 20, 0);
 /// reported 1.7.5, so a version gate would refuse a flag that is right there.
 const LABEL_FLAG: &str = "--label";
 const INTERCEPTOR_FLAG: &str = "--egress-interceptor";
-const HOST_PATTERN_FLAG: &str = "--allow-host-pattern";
-const EXACT_HOST_POLICY_LABEL: &str = "exo.sandbox.exact-host-policy";
 const TCP_FORWARD_LABEL_PREFIX: &str = "exo.sandbox.tcp-forward.";
 static CONSUMABLE_SNAPSHOT_FORMATS: [SnapshotFormat; 2] = [
     SnapshotFormat::SmolvmMachinePack,
@@ -86,7 +83,6 @@ struct Capabilities {
     /// `machine create --label`, used for sandbox identity and TCP forwarding.
     labels: bool,
     interceptor: bool,
-    host_patterns: bool,
     #[cfg(unix)]
     filesystem_snapshots: bool,
 }
@@ -387,9 +383,6 @@ impl SmolvmSandboxBackend {
                             .await,
                     labels: self.probe_flag("machine", "create", LABEL_FLAG).await,
                     interceptor: self.probe_flag("machine", "start", INTERCEPTOR_FLAG).await,
-                    host_patterns: self
-                        .probe_flag("machine", "create", HOST_PATTERN_FLAG)
-                        .await,
                 }
             })
             .await)
@@ -418,11 +411,7 @@ impl SmolvmSandboxBackend {
     /// or creating a machine. The default binary probe above only selects which
     /// runtime to use; it does not decide which features a request needs.
     async fn require_capabilities(&self, request: &SandboxRequest) -> Result<()> {
-        let protected = request.spec.policy.requires_proxy();
-        let limited = matches!(
-            request.spec.policy.networking,
-            SandboxNetworkPolicy::Limited { .. }
-        );
+        let protected = request.policy.requires_proxy() || self.external_proxy.is_some();
         if protected {
             ensure!(
                 request.lifecycle.idle_ttl.is_some() && self.mode != SmolvmExecutionMode::OneShot,
@@ -438,10 +427,7 @@ impl SmolvmSandboxBackend {
         if protected && !caps.interceptor {
             missing.push(INTERCEPTOR_FLAG);
         }
-        if limited && !caps.host_patterns {
-            missing.push(HOST_PATTERN_FLAG);
-        }
-        if (limited || !request.spec.tcp_ports.is_empty()) && !caps.labels {
+        if !request.spec.tcp_ports.is_empty() && !caps.labels {
             missing.push(LABEL_FLAG);
         }
         ensure!(
@@ -524,13 +510,18 @@ impl SmolvmSandboxBackend {
             MachineSource::Pack(pack) => create.arg("--from").arg(pack),
         };
         self.stamp_labels(&mut create, &request.sandbox_id).await;
-        configure_spec_args(&mut create, spec, self.storage_gib, self.overlay_gib)?;
-        let exact_host_policy = exact_host_policy_fingerprint(&spec.policy.networking)?;
-        if let Some(policy) = &exact_host_policy {
-            create
-                .arg(LABEL_FLAG)
-                .arg(format!("{EXACT_HOST_POLICY_LABEL}={policy}"));
-        }
+        let boot_policy = if egress.is_some() {
+            SandboxNetworkPolicy::Unrestricted.into()
+        } else {
+            request.policy.clone()
+        };
+        configure_spec_args(
+            &mut create,
+            spec,
+            &boot_policy,
+            self.storage_gib,
+            self.overlay_gib,
+        )?;
         let (host_ports, reservations) = self.configure_tcp_forwards(&mut create, spec).await?;
         // The workload is PID 1. A shell reaps orphaned service processes;
         // sleep alone leaves zombies that can prevent build servers restarting.
@@ -550,8 +541,7 @@ impl SmolvmSandboxBackend {
             if !allow_reuse || !cli_says::already_exists(&stderr) {
                 bail!("smolvm machine create failed: {}", stderr.trim());
             }
-            self.existing_tcp_forwards(name, &spec.tcp_ports, exact_host_policy.as_deref())
-                .await?
+            self.existing_tcp_forwards(name, &spec.tcp_ports).await?
         } else {
             host_ports
         };
@@ -623,7 +613,7 @@ impl SmolvmSandboxBackend {
         request: SandboxRequest,
         payload: SnapshotPayload,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("smolvm")?;
+        request.policy.validate_basic("smolvm")?;
         if !CONSUMABLE_SNAPSHOT_FORMATS.contains(&payload.format) {
             bail!(
                 "smolvm backend cannot restore snapshot format {}",
@@ -666,7 +656,7 @@ impl SmolvmSandboxBackend {
             );
             (manifest.pack_path, None)
         };
-        reject_unsupported_spec(&request.spec, &pack_path.to_string_lossy())?;
+        reject_unsupported_spec(&request.spec, &request.policy, &pack_path.to_string_lossy())?;
         let machine = machine_name(request.sandbox_id.as_str());
         let machine_guard =
             Arc::new(filesystem::lock_machine(&self.snapshot_root, &machine).await?);
@@ -748,7 +738,6 @@ impl SmolvmSandboxBackend {
         &self,
         machine: &str,
         guest_ports: &[u16],
-        expected_exact_host_policy: Option<&str>,
     ) -> Result<BTreeMap<u16, u16>> {
         #[derive(Deserialize)]
         struct Status {
@@ -766,15 +755,6 @@ impl SmolvmSandboxBackend {
             String::from_utf8_lossy(&output.stderr).trim()
         );
         let status: Status = serde_json::from_slice(&output.stdout)?;
-        if let Some(expected) = expected_exact_host_policy {
-            ensure!(
-                status
-                    .labels
-                    .get(EXACT_HOST_POLICY_LABEL)
-                    .is_some_and(|actual| actual == expected),
-                "existing smolvm machine has an older or different limited host policy; terminate it before reacquiring"
-            );
-        }
         let mut host_ports = BTreeMap::new();
         for (label, value) in status.labels {
             if let Some(port) = label.strip_prefix(TCP_FORWARD_LABEL_PREFIX) {
@@ -1024,7 +1004,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 Ok(())
             })()?;
             let image = self.prepare_image(&request.spec.image).await?;
-            reject_unsupported_spec(&request.spec, &image)?;
+            reject_unsupported_spec(&request.spec, &request.policy, &image)?;
             let boot_binary = self.boot_binary().await?.clone();
             return Ok(Arc::new(SmolvmOneShotHandle {
                 id: format!("smolvm-oneshot:{}", request.sandbox_id),
@@ -1048,7 +1028,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
                 SmolvmProxy::start,
                 |egress| async {
                     let image = self.prepare_image(&request.spec.image).await?;
-                    reject_unsupported_spec(&request.spec, &image)?;
+                    reject_unsupported_spec(&request.spec, &request.policy, &image)?;
                     Ok(self
                         .ensure_machine_started(
                             &machine,
@@ -1091,7 +1071,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
         let host_ports = cell
             .get_or_try_init(|| async {
                 let machine = machine_name(&request.sandbox_id);
-                self.existing_tcp_forwards(&machine, &request.spec.tcp_ports, None)
+                self.existing_tcp_forwards(&machine, &request.spec.tcp_ports)
                     .await
             })
             .await?;
@@ -1100,7 +1080,7 @@ impl ManagedSandboxBackend for SmolvmSandboxBackend {
             Err(_) => {
                 let machine = machine_name(&request.sandbox_id);
                 let refreshed = self
-                    .existing_tcp_forwards(&machine, &request.spec.tcp_ports, None)
+                    .existing_tcp_forwards(&machine, &request.spec.tcp_ports)
                     .await?;
                 let stream = connect_published_tcp(&refreshed, port).await?;
                 self.tcp_forwards
@@ -1168,6 +1148,7 @@ impl SmolvmOneShotHandle {
         configure_spec_args(
             &mut process,
             &self.request.spec,
+            &self.request.policy,
             self.storage_gib,
             self.overlay_gib,
         )?;
@@ -1476,42 +1457,11 @@ fn resolve_cwd(command: &SandboxCommand, spec: &SandboxSpec) -> String {
         .unwrap_or_else(|| spec.default_workdir.clone())
 }
 
-fn exact_limited_hosts(networking: &SandboxNetworkPolicy) -> Result<Option<Vec<String>>> {
-    let SandboxNetworkPolicy::Limited { allowed_hosts } = networking else {
-        return Ok(None);
-    };
-    let mut hosts: Vec<String> = crate::types::canonical_egress_hosts(allowed_hosts)?
-        .into_iter()
-        .collect();
-    ensure!(
-        !hosts.is_empty(),
-        "smolvm limited networking requires at least one allowed host"
-    );
-    hosts.sort();
-    Ok(Some(hosts))
-}
-
-/// Mark machines created with exact-host DNS rules so a warm machine made under
-/// the older `--allow-host` rules cannot be reused with a stricter request.
-fn exact_host_policy_fingerprint(networking: &SandboxNetworkPolicy) -> Result<Option<String>> {
-    let Some(hosts) = exact_limited_hosts(networking)? else {
-        return Ok(None);
-    };
-    let mut digest = Sha256::new();
-    // The prefix distinguishes this exact-host policy from future label formats.
-    digest.update(b"exact-v1\0");
-    for host in hosts {
-        digest.update(host.as_bytes());
-        // Hostnames cannot contain NUL, so this separates adjacent entries.
-        digest.update([0]);
-    }
-    Ok(Some(format!("exact-v1-{:x}", digest.finalize())))
-}
-
 /// Mounts and network policy, shared by the create/run paths.
 fn configure_spec_args(
     process: &mut Command,
     spec: &SandboxSpec,
+    policy: &crate::EgressPolicy,
     storage_gib: Option<NonZeroU32>,
     overlay_gib: Option<NonZeroU32>,
 ) -> Result<()> {
@@ -1524,15 +1474,10 @@ fn configure_spec_args(
     if let Some(overlay) = overlay_gib {
         process.arg("--overlay").arg(overlay.to_string());
     }
-    if spec.policy.networking_enabled() {
+    if policy.networking_enabled() {
         process.args(["--net", "--net-backend", "virtio-net"]);
     } else if !spec.tcp_ports.is_empty() {
         process.arg("--outbound-localhost-only");
-    }
-    if let Some(hosts) = exact_limited_hosts(&spec.policy.networking)? {
-        for host in hosts {
-            process.arg(HOST_PATTERN_FLAG).arg(host);
-        }
     }
     for mount in &spec.mounts {
         let mut value = format!("{}:{}", mount.host_path.display(), mount.guest_path);
@@ -1616,7 +1561,11 @@ async fn is_file(path: &Path) -> bool {
 
 /// smolvm has no named durable filesystem; refuse rather than hand back a sandbox
 /// missing storage the caller asked for, as the Daytona backend does.
-fn reject_unsupported_spec(spec: &SandboxSpec, image: &str) -> Result<()> {
+fn reject_unsupported_spec(
+    spec: &SandboxSpec,
+    policy: &crate::EgressPolicy,
+    image: &str,
+) -> Result<()> {
     if !spec.durable_file_systems.is_empty() {
         let names: Vec<&str> = spec
             .durable_file_systems
@@ -1632,7 +1581,7 @@ fn reject_unsupported_spec(spec: &SandboxSpec, image: &str) -> Result<()> {
     // smolvm resolves registry references over the machine's own network and
     // refuses this combination even for a cached image. Caught here so the caller
     // gets the two real remedies, not a failure deep in the CLI output.
-    if spec.policy.networking == SandboxNetworkPolicy::Disabled && !is_local_image_ref(image) {
+    if policy.networking == SandboxNetworkPolicy::Disabled && !is_local_image_ref(image) {
         bail!(
             "smolvm cannot use registry image '{}' in a network-disabled sandbox: \
              it resolves registry references over the machine's network, even for \
@@ -2263,21 +2212,25 @@ esac"#,
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn limited_machine_is_labeled_with_its_exact_host_policy() -> Result<()> {
+    async fn limited_machine_uses_the_proxy() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let binary = dir.path().join("smolvm");
         let args_file = dir.path().join("create-args");
+        let start_args_file = dir.path().join("start-args");
         write_test_binary(
             &binary,
             &format!(
                 "case \"$1 $2 $3\" in\n\
                  '--version  ') printf 'smolvm 1.20.0\\n';;\n\
-                 'machine create --help') printf '%s\\n' '--label --allow-host-pattern';;\n\
+                 'machine create --help') printf '%s\\n' '--label';;\n\
+                 'machine start --help') printf '%s\\n' '--egress-interceptor';;\n\
                  'machine create '*) printf '%s\\n' \"$@\" > '{}';;\n\
-                 'machine start '*) exit 0;;\n\
+                 'machine start '*) printf '%s\\n' \"$@\" > '{}';;\n\
+                 'machine exec '*) cat >/dev/null;;\n\
                  *) exit 23;;\n\
                  esac",
-                args_file.display()
+                args_file.display(),
+                start_args_file.display()
             ),
         );
         let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
@@ -2285,62 +2238,16 @@ esac"#,
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy.networking = SandboxNetworkPolicy::Limited {
+        request.policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into()],
         };
-        backend
-            .ensure_machine_started("test", request.clone(), Image("alpine"), None)
-            .await?;
+        backend.acquire(request).await?;
         let args = std::fs::read_to_string(args_file)?;
-        assert!(args.contains("--allow-host-pattern\napi.test\n"), "{args}");
-        let policy = exact_host_policy_fingerprint(&request.spec.policy.networking)?.unwrap();
-        assert!(
-            args.contains(&format!("--label\n{EXACT_HOST_POLICY_LABEL}={policy}\n")),
-            "{args}"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn limited_machine_rejects_existing_broader_host_policy() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let binary = dir.path().join("smolvm");
-        let started = dir.path().join("started");
-        write_test_binary(
-            &binary,
-            &format!(
-                "case \"$1 $2 $3\" in\n\
-                 '--version  ') printf 'smolvm 1.20.0\\n';;\n\
-                 'machine create --help') printf '%s\\n' '--label --allow-host-pattern';;\n\
-                 'machine start --help') exit 0;;\n\
-                 'machine create '*) echo 'already exists' >&2; exit 1;;\n\
-                 'machine status '*) printf '%s\\n' '{{\"labels\":{{}}}}';;\n\
-                 'machine start '*) touch '{}';;\n\
-                 *) exit 23;;\n\
-                 esac",
-                started.display()
-            ),
-        );
-        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
-            binary: Some(binary),
-            ..Default::default()
-        });
-        let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy.networking = SandboxNetworkPolicy::Limited {
-            allowed_hosts: vec!["api.test".into()],
-        };
-        let error = backend
-            .ensure_machine_started("test", request.clone(), Image("alpine"), None)
-            .await
-            .err()
-            .context("existing machine should reject the changed host policy")?
-            .to_string();
-        assert!(
-            error.contains("older or different limited host policy"),
-            "{error}"
-        );
-        assert!(!started.exists());
+        assert!(args.contains("--net\n"), "{args}");
+        assert!(!args.contains("--allow-host"), "{args}");
+        assert!(!args.contains("exo.sandbox.exact-host-policy"), "{args}");
+        let args = std::fs::read_to_string(start_args_file)?;
+        assert!(args.contains("--egress-interceptor\n"), "{args}");
         Ok(())
     }
 
@@ -2363,9 +2270,8 @@ esac"#,
             ..Default::default()
         });
         let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy = SandboxNetworkPolicy::Unrestricted.into();
+        request.policy = SandboxNetworkPolicy::Unrestricted.into();
         request
-            .spec
             .policy
             .credentials
             .push(crate::EgressCredentialBinding {
@@ -2386,7 +2292,7 @@ esac"#,
         assert!(error.contains("--egress-interceptor"), "{error}");
         assert!(!dir.path().join("cache").exists());
         let mut limited = request.clone();
-        limited.spec.policy.networking = SandboxNetworkPolicy::Limited {
+        limited.policy.networking = SandboxNetworkPolicy::Limited {
             allowed_hosts: vec!["api.test".into()],
         };
         let error = backend.acquire(limited).await.err().unwrap().to_string();
@@ -2398,49 +2304,13 @@ esac"#,
     }
 
     #[tokio::test]
-    #[cfg(unix)]
-    async fn limited_networking_reports_missing_flags_before_preparing_images() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let binary = dir.path().join("smolvm");
-        write_test_binary(
-            &binary,
-            r#"case "$*" in
---version) printf 'smolvm 1.19.0\n';;
-'machine start --help') printf '%s\n' '--egress-interceptor <ADDR>';;
-'machine create --help') exit 0;;
-*) exit 23;;
-esac"#,
-        );
-        let backend = SmolvmSandboxBackend::from_config(SmolvmBackendConfig {
-            binary: Some(binary),
-            image_cache: Some(dir.path().join("cache")),
-            ..Default::default()
-        });
-        let mut request = test_request(Some(Duration::from_secs(60)));
-        request.spec.policy.networking = SandboxNetworkPolicy::Limited {
-            allowed_hosts: vec!["api.test".into()],
-        };
-        request.spec.image = "/nonexistent/image.tar".into();
-        let error = backend.acquire(request).await.err().unwrap().to_string();
-        assert!(error.contains(HOST_PATTERN_FLAG), "{error}");
-        assert!(error.contains(LABEL_FLAG), "{error}");
-        assert!(!dir.path().join("cache").exists());
-        Ok(())
-    }
-
-    #[tokio::test]
     #[cfg(feature = "smolvm")]
     #[ignore = "provisions the pinned SmolVM release in the local SDK cache"]
     async fn provisioned_runtime_supports_native_egress() -> Result<()> {
         let backend = SmolvmSandboxBackend::new();
         let binary = backend.binary().await?;
         let capabilities = backend.capabilities().await?;
-        assert!(
-            capabilities.warm
-                && capabilities.labels
-                && capabilities.interceptor
-                && capabilities.host_patterns
-        );
+        assert!(capabilities.warm && capabilities.labels && capabilities.interceptor);
         eprintln!("Compatible SmolVM: {}", binary.display());
         Ok(())
     }
@@ -2602,7 +2472,7 @@ esac"#,
             write_test_binary(&binary, "printf 'smolvm 1.20.0\\n'");
             assert_eq!(backend.binary().await.unwrap(), &binary);
             let mut request = test_request(Some(Duration::from_secs(60)));
-            request.spec.policy.networking = SandboxNetworkPolicy::Limited {
+            request.policy.networking = SandboxNetworkPolicy::Limited {
                 allowed_hosts: vec!["api.test".into()],
             };
             let error = backend
@@ -2611,8 +2481,6 @@ esac"#,
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(INTERCEPTOR_FLAG), "{error}");
-            assert!(error.contains(HOST_PATTERN_FLAG), "{error}");
-            assert!(error.contains(LABEL_FLAG), "{error}");
             write_test_binary(&root.join("bin/smolvm"), "printf 'smolvm 1.16.2\\n'");
             write_test_binary(
                 &binary,
@@ -2865,6 +2733,7 @@ esac"#,
 
     pub(super) fn test_request(idle_ttl: Option<Duration>) -> SandboxRequest {
         SandboxRequest {
+            policy: SandboxNetworkPolicy::Disabled.into(),
             sandbox_id: "s".into(),
             scope: ResourceScope::Agent {
                 agent_id: crate::Uuid7::now(),
@@ -2875,7 +2744,6 @@ esac"#,
                 resources: Default::default(),
                 mounts: Vec::new(),
                 durable_file_systems: Vec::new(),
-                policy: SandboxNetworkPolicy::Disabled.into(),
                 default_workdir: "/".into(),
             },
             lifecycle: SandboxLifecycleConfig { idle_ttl },
@@ -2990,13 +2858,15 @@ esac"#,
 
     #[test]
     fn durable_file_systems_are_rejected_not_ignored() {
-        let mut spec = test_request(None).spec;
+        let request = test_request(None);
+        let policy = request.policy;
+        let mut spec = request.spec;
         spec.durable_file_systems = vec![crate::DurableFileSystem {
             name: "cache".into(),
             mount_path: "/cache".into(),
             mode: crate::FileSystemMountMode::ReadWrite,
         }];
-        let err = reject_unsupported_spec(&spec, &spec.image)
+        let err = reject_unsupported_spec(&spec, &policy, &spec.image)
             .unwrap_err()
             .to_string();
         assert!(err.contains("cache"), "error should name the fs: {err}");
@@ -3005,25 +2875,27 @@ esac"#,
     /// Must fail at acquire with guidance, not deep inside the CLI.
     #[test]
     fn registry_image_without_network_is_rejected() {
-        let mut spec = test_request(None).spec;
+        let request = test_request(None);
+        let mut policy = request.policy;
+        let mut spec = request.spec;
         spec.image = "docker.io/library/ubuntu:24.04".into();
-        spec.policy.networking = SandboxNetworkPolicy::Disabled;
-        let err = reject_unsupported_spec(&spec, &spec.image)
+        policy.networking = SandboxNetworkPolicy::Disabled;
+        let err = reject_unsupported_spec(&spec, &policy, &spec.image)
             .unwrap_err()
             .to_string();
         assert!(err.contains("network-disabled"), "unexpected error: {err}");
 
         // Fine once the sandbox is allowed network...
-        spec.policy.networking = SandboxNetworkPolicy::Unrestricted;
-        assert!(reject_unsupported_spec(&spec, &spec.image).is_ok());
+        policy.networking = SandboxNetworkPolicy::Unrestricted;
+        assert!(reject_unsupported_spec(&spec, &policy, &spec.image).is_ok());
 
         // ...and a local archive is fine while staying isolated.
-        spec.policy.networking = SandboxNetworkPolicy::Disabled;
+        policy.networking = SandboxNetworkPolicy::Disabled;
         spec.image = "/tmp/alpine.tar".into();
-        assert!(reject_unsupported_spec(&spec, &spec.image).is_ok());
+        assert!(reject_unsupported_spec(&spec, &policy, &spec.image).is_ok());
 
         spec.image = "docker.io/library/ubuntu:24.04".into();
-        assert!(reject_unsupported_spec(&spec, "/tmp/prepared-rootfs").is_ok());
+        assert!(reject_unsupported_spec(&spec, &policy, "/tmp/prepared-rootfs").is_ok());
     }
 
     #[test]
@@ -3074,6 +2946,7 @@ esac"#,
 
     #[test]
     fn resource_shape_and_mounts_are_forwarded() {
+        let policy = SandboxNetworkPolicy::Disabled.into();
         let spec = SandboxSpec {
             tcp_ports: vec![],
             image: "alpine".into(),
@@ -3093,12 +2966,11 @@ esac"#,
                 },
             ],
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
             default_workdir: "/work".into(),
         };
 
         let mut process = Command::new("smolvm");
-        configure_spec_args(&mut process, &spec, None, None).unwrap();
+        configure_spec_args(&mut process, &spec, &policy, None, None).unwrap();
         let rendered: Vec<String> = process
             .as_std()
             .get_args()
@@ -3110,59 +2982,5 @@ esac"#,
         assert!(rendered.contains(&"/host/ro:/guest/ro:ro".to_string()));
         // Disabled is smolvm's default, so no flag is emitted.
         assert!(!rendered.contains(&"--net".to_string()));
-    }
-
-    #[test]
-    fn limited_hosts_are_forwarded_to_smolvm() {
-        let mut spec = test_request(Some(Duration::from_secs(60))).spec;
-        spec.resources = crate::SandboxResourceShape::new(3, 2048);
-        spec.policy.networking = SandboxNetworkPolicy::Limited {
-            allowed_hosts: vec!["Z.example.com".into(), "api.example.com".into()],
-        };
-        let mut process = Command::new("smolvm");
-        configure_spec_args(&mut process, &spec, None, None).unwrap();
-        let rendered: Vec<String> = process
-            .as_std()
-            .get_args()
-            .map(|arg| arg.to_string_lossy().to_string())
-            .collect();
-        assert_eq!(
-            rendered,
-            [
-                "--cpus",
-                "3",
-                "--mem",
-                "2048",
-                "--net",
-                "--net-backend",
-                "virtio-net",
-                "--allow-host-pattern",
-                "api.example.com",
-                "--allow-host-pattern",
-                "z.example.com",
-            ]
-        );
-
-        spec.policy.networking = SandboxNetworkPolicy::Limited {
-            allowed_hosts: Vec::new(),
-        };
-        let error = configure_spec_args(&mut Command::new("smolvm"), &spec, None, None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("at least one allowed host"), "{error}");
-    }
-
-    #[test]
-    fn exact_host_policy_fingerprint_tracks_the_canonical_host_set() -> Result<()> {
-        let policy = |hosts: &[&str]| SandboxNetworkPolicy::Limited {
-            allowed_hosts: hosts.iter().map(|host| (*host).into()).collect(),
-        };
-        let first = exact_host_policy_fingerprint(&policy(&["B.test", "a.test"]))?;
-        assert_eq!(
-            first,
-            exact_host_policy_fingerprint(&policy(&["a.test", "b.test", "A.test"]))?
-        );
-        assert_ne!(first, exact_host_policy_fingerprint(&policy(&["a.test"]))?);
-        Ok(())
     }
 }

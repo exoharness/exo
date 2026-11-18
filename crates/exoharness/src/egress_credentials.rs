@@ -57,6 +57,10 @@ pub(crate) struct Binding {
 }
 
 impl Binding {
+    pub(crate) fn permits_host(&self, host: &str) -> bool {
+        self.hosts.contains(host)
+    }
+
     pub(crate) fn permits_header(&self, destination: &EgressDestination) -> bool {
         self.config.injection_location.header
             && self.hosts.contains(&destination.host)
@@ -411,7 +415,8 @@ impl NetworkPolicy {
     }
     pub(crate) fn check_port(&self, port: u16) -> Result<()> {
         ensure!(
-            port != 0
+            self.enabled
+                && port != 0
                 && self
                     .ports
                     .as_ref()

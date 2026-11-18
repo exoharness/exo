@@ -35,6 +35,7 @@ fn live_provider_secret(provider: &str, secret_name: &str) -> Option<String> {
 
 fn make_e2b_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
+        policy: SandboxNetworkPolicy::Unrestricted.into(),
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),
@@ -46,7 +47,6 @@ fn make_e2b_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRe
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: "/home/user".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -87,6 +87,7 @@ fn sprites_config_from_env() -> Option<SpritesConfig> {
 
 fn make_sprites_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
+        policy: SandboxNetworkPolicy::Unrestricted.into(),
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),
@@ -98,7 +99,6 @@ fn make_sprites_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> Sandb
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: "/home/sprite".into(),
         },
         lifecycle: SandboxLifecycleConfig {

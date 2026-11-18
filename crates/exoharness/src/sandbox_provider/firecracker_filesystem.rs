@@ -496,7 +496,7 @@ pub(super) async fn snapshot_filesystem(
             .await;
         validate_capture_runtime(&shared.host_fingerprint.firecracker_version)?;
         if template
-            && (request.spec.policy != SandboxNetworkPolicy::Disabled.into()
+            && (request.policy != SandboxNetworkPolicy::Disabled.into()
                 || !request.spec.mounts.is_empty()
                 || !request.spec.durable_file_systems.is_empty())
         {

@@ -511,6 +511,7 @@ async fn container_registrations_reject_credentials_before_launch() -> Result<()
     let mut policy = policy("api");
     policy.networking = SandboxNetworkPolicy::Unrestricted;
     let request = crate::SandboxRequest {
+        policy,
         sandbox_id: "native-egress-required".into(),
         scope: ResourceScope::Global,
         provider_state: None,
@@ -520,7 +521,6 @@ async fn container_registrations_reject_credentials_before_launch() -> Result<()
             resources: crate::SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
-            policy,
             default_workdir: "/".into(),
         },
         lifecycle: crate::SandboxLifecycleConfig {

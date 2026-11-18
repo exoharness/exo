@@ -84,7 +84,6 @@ pub struct SandboxSpec {
     pub resources: Option<crate::SandboxResourceShape>,
     pub mounts: Vec<SandboxMount>,
     pub durable_file_systems: Vec<DurableFileSystem>,
-    pub policy: EgressPolicy,
     pub default_workdir: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tcp_ports: Vec<u16>,
@@ -96,6 +95,7 @@ pub struct SandboxRequest {
     #[serde(default)]
     pub scope: ResourceScope,
     pub spec: SandboxSpec,
+    pub policy: EgressPolicy,
     pub lifecycle: SandboxLifecycleConfig,
     pub provider_state: Option<Value>,
 }
@@ -438,7 +438,7 @@ pub trait ManagedSandboxBackend: Send + Sync {
         bail!("sandbox backend does not expose image configuration")
     }
 
-    /// Enforce `request.spec.policy` before returning a usable handle. Attach,
+    /// Enforce `request.policy` before returning a usable handle. Attach,
     /// restore, and fork must provide the same guarantee or reject the policy.
     async fn acquire(
         &self,

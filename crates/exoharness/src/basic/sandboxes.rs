@@ -2646,6 +2646,7 @@ pub(super) fn sandbox_request(
     provider_state: Option<Value>,
 ) -> SandboxRequest {
     SandboxRequest {
+        policy: sandbox.policy(),
         sandbox_id: sandbox_id.to_string(),
         scope: owner,
         spec: SandboxSpec {
@@ -2665,7 +2666,6 @@ pub(super) fn sandbox_request(
                 })
                 .collect(),
             durable_file_systems: sandbox.durable_file_systems.clone(),
-            policy: sandbox.policy(),
             default_workdir: sandbox
                 .default_workdir
                 .clone()

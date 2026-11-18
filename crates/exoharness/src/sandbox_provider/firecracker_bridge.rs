@@ -35,6 +35,10 @@ pub enum FirecrackerBridgeRequest {
         listener_id: String,
         source: std::net::Ipv4Addr,
     },
+    EgressUpdate {
+        listener_id: String,
+        policy: crate::EgressPolicy,
+    },
     EgressAccept {
         listener_id: String,
         tls: bool,
@@ -435,6 +439,17 @@ async fn handle_request(
                 .egress(&listener_id)
                 .await?
                 .bind_source(source)
+                .await?;
+            Ok(FirecrackerBridgeResponse::Unit)
+        }
+        FirecrackerBridgeRequest::EgressUpdate {
+            listener_id,
+            policy,
+        } => {
+            backends
+                .egress(&listener_id)
+                .await?
+                .update_policy(&policy)
                 .await?;
             Ok(FirecrackerBridgeResponse::Unit)
         }
