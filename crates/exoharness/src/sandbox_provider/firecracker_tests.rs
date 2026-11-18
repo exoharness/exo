@@ -29,10 +29,16 @@ pub(super) fn read_api_request(stream: &mut StdUnixStream) -> Result<(String, Ve
     Ok((request, body))
 }
 
+pub(super) fn test_growth_capacity(vcpu_count: u8, memory_mib: u32) -> FirecrackerGrowthCapacity {
+    FirecrackerGrowthCapacity {
+        resources: SandboxResourceShape::new(vcpu_count, memory_mib).unwrap(),
+        memory_slot_size_mib: 128,
+    }
+}
+
 fn test_host_runtime() -> FirecrackerHostFingerprint {
     FirecrackerHostFingerprint {
-        memory_ceiling_mib: None,
-        memory_slot_size_mib: None,
+        growth_capacity: None,
         architecture: "x86_64".to_string(),
         protocol_version: PROTOCOL_VERSION,
         firecracker_version: "v1.16.1".to_string(),
@@ -458,7 +464,7 @@ fn capacity_scan_counts_processes_instead_of_manifests() {
         machine_id: "fc-live".to_string(),
         spec_hash: "live".to_string(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -505,7 +511,7 @@ fn manifest_publish_does_not_replace_an_existing_machine() {
         machine_id: "fc-machine".to_string(),
         spec_hash: "first".to_string(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -537,7 +543,7 @@ fn persisted_lease_expires_machine_after_idle_ttl() {
         machine_id: "fc-machine".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -629,7 +635,7 @@ fn snapshot_gc_reaps_only_unreferenced_fork_templates() {
             machine_id: "fc-0123456789abcdef-01234567".to_string(),
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
-            memory_grant_mib: None,
+            resource_grant: None,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -696,7 +702,7 @@ fn snapshot_gc_does_not_delete_fork_between_capture_and_manifest_publish() {
             machine_id: "fc-0123456789abcdef-01234567".to_string(),
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
-            memory_grant_mib: None,
+            resource_grant: None,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -744,7 +750,7 @@ fn fork_snapshots_are_unique_per_target() {
         machine_id: "fc-source".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -776,7 +782,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
         machine_id: "fc-source".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 7,
         network_enabled: true,
@@ -794,7 +800,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
 
     let manifest = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
-        memory_grant_mib: None,
+        resource_grant: None,
         template: false,
         template_key: first,
         spec_hash: source.spec_hash,
@@ -1158,7 +1164,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
     Arc::get_mut(&mut shared)
         .unwrap()
         .host_fingerprint
-        .memory_ceiling_mib = std::num::NonZeroU32::new(8192);
+        .growth_capacity = Some(test_growth_capacity(8, 8192));
     let request = FirecrackerRequest::from(test_request("grant", 4096));
     let error = shared
         .new_machine_record(
@@ -1166,7 +1172,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
             "fc-grant",
             "spec",
             None,
-            std::num::NonZeroU32::new(8193),
+            SandboxResourceShape::new(1, 8193),
         )
         .await
         .unwrap_err();
@@ -1190,7 +1196,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
             "fc-grant",
             "spec",
             None,
-            std::num::NonZeroU32::new(8192),
+            SandboxResourceShape::new(1, 8192),
         )
         .await?;
     let persisted = shared
@@ -1320,7 +1326,7 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
     };
     let payload = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
-        memory_grant_mib: None,
+        resource_grant: None,
         template: true,
         template_key: "a".repeat(64),
         spec_hash: template_spec_hash(&request.spec),
@@ -1357,7 +1363,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
         machine_id: "fc-egress-reaped".into(),
         spec_hash: "test".into(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         resolved_image: "/images/test.ext4".into(),
         slot: 1,
         network_enabled: false,
@@ -1447,7 +1453,7 @@ impl DurableStopFixture {
             machine_id: machine_id(&request.sandbox_id, &sandbox_spec_hash(&request.spec)),
             spec_hash: sandbox_spec_hash(&request.spec),
             runtime: test_runtime(),
-            memory_grant_mib: None,
+            resource_grant: None,
             resolved_image: request.spec.image.clone(),
             slot: 1,
             network_enabled: false,
@@ -1765,7 +1771,7 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
         machine_id: "fc-resources".into(),
         spec_hash: "resources".into(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         resolved_image: "/base.ext4".into(),
         slot: 1,
         network_enabled: false,
@@ -2076,7 +2082,7 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
     Arc::get_mut(&mut shared)
         .unwrap()
         .host_fingerprint
-        .memory_ceiling_mib = std::num::NonZeroU32::new(1024);
+        .growth_capacity = Some(test_growth_capacity(1, 1024));
     let mut request = FirecrackerRequest::from(test_request("initial-balloon", 512));
     request.lifecycle.idle_ttl = Some(Duration::from_secs(600));
     let spec_hash = sandbox_spec_hash(&request.spec);
@@ -2089,7 +2095,7 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
     fs::write(shared.pid_path(&id), std::process::id().to_string())?;
     let guest = UnixListener::bind(&machine.vsock_path)?;
     let guest_peer = tokio::spawn(async move {
-        for _ in 0..2 {
+        for _ in 0..4 {
             let (stream, _) = guest.accept().await?;
             let mut reader = AsyncBufReader::new(stream);
             let mut handshake = String::new();
@@ -2101,8 +2107,13 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
             let mut payload = vec![0; length];
             stream.read_exact(&mut payload).await?;
             let request: Message<ProtocolGuestRequest<()>> = serde_json::from_slice(&payload)?;
-            assert!(matches!(request.payload, ProtocolGuestRequest::Ping));
+            let online_vcpu_count = match request.payload {
+                ProtocolGuestRequest::Ping => None,
+                ProtocolGuestRequest::EnsureOnlineCpus { vcpu_count } => Some(vcpu_count),
+                other => panic!("unexpected readiness request: {other:?}"),
+            };
             let response = GuestResponse {
+                online_vcpu_count,
                 identity: Some(exo_firecracker_protocol::GuestIdentity {
                     implementation_version: "test".into(),
                     build_id: "test".into(),

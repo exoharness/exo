@@ -16,6 +16,7 @@ fn config(root: &Path, image: &str) -> FirecrackerConfig {
     FirecrackerConfig {
         state_root: root.join("s"),
         allowed_local_images: vec![image.into()],
+        allowed_registries: vec!["docker.io".into()],
         image_size_gib: 1,
         workspace_size_gib: 1,
         network_device_policy: FirecrackerNetworkDevicePolicy::AllSandboxes,
@@ -58,6 +59,107 @@ fn assert_balloon(config: &FirecrackerConfig, record: &MachineRecord, mib: u32) 
 }
 
 #[tokio::test]
+#[ignore = "requires root, KVM, matching guest artifacts, and TMPDIR on XFS"]
+async fn live_memory_capacity_changes_preserve_reattach_and_ram_restore() -> Result<()> {
+    let temp = tempfile::Builder::new().prefix("cap-").tempdir()?;
+    let image = std::env::var("FIRECRACKER_IMAGE")?;
+    let mut config = config(temp.path(), &image);
+    config.firecracker_bin = std::env::var("EXO_FIRECRACKER_BINARY")?.into();
+    config.jailer_bin = std::env::var("EXO_FIRECRACKER_JAILER")?.into();
+    let mut backend = FirecrackerSandboxBackend::new(config.clone()).await?;
+    ensure!(
+        balloon::kvm_capability(balloon::KVM_CAP_MAX_VCPUS)? >= 32,
+        "test needs 32 virtual CPUs"
+    );
+    Arc::get_mut(&mut backend.shared)
+        .unwrap()
+        .host_fingerprint
+        .growth_capacity
+        .as_mut()
+        .unwrap()
+        .resources
+        .vcpu_count = std::num::NonZeroU8::new(32).unwrap();
+    let mut request = test_request("capacity-source", 2048);
+    request.spec.image = image;
+    request.lifecycle.idle_ttl = Some(Duration::from_secs(600));
+    request.spec.resources = SandboxResourceShape::new(1, 2048);
+    let result: Result<()> = async {
+        let handle = backend.acquire(request.clone()).await?;
+        let original = allocation(&backend, &request).await?;
+        assert_eq!(
+            shell(&handle, "nproc; cat /sys/devices/system/cpu/present").await?,
+            "1\n0-31\n"
+        );
+        let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
+            .await?
+            .trim()
+            .parse::<u64>()?;
+        ensure!(
+            available > 1024 * 1024,
+            "CPU boot capacity consumed the initial grant: {available} KiB"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                firecracker_cgroup_dir(&config, &original.machine_id).join("cpu.max")
+            )?
+            .trim(),
+            "100000 100000"
+        );
+        let pid = fs::read(backend.shared.pid_path(&original.machine_id))?;
+        shell(&handle, "printf retained > /dev/shm/capacity-proof").await?;
+        request.provider_state = handle.provider_state();
+        drop(handle);
+        Arc::get_mut(&mut backend.shared)
+            .context("backend unexpectedly shared")?
+            .host_fingerprint
+            .growth_capacity = Some(super::tests::test_growth_capacity(1, 512));
+        let mut cold = request.clone();
+        cold.sandbox_id = "capacity-cold".into();
+        cold.provider_state = None;
+        assert!(backend.acquire(cold).await.is_err());
+        let handle = backend.acquire(request.clone()).await?;
+        assert_eq!(
+            fs::read(backend.shared.pid_path(&original.machine_id))?,
+            pid
+        );
+        assert_eq!(
+            allocation(&backend, &request).await?.runtime,
+            original.runtime
+        );
+        assert_eq!(
+            shell(&handle, "cat /dev/shm/capacity-proof; nproc").await?,
+            "retained1\n"
+        );
+        let snapshot = handle.snapshot_template(crate::SnapshotKind::Full).await?;
+        handle.stop().await?;
+        drop(handle);
+        Arc::get_mut(&mut backend.shared)
+            .context("backend unexpectedly shared")?
+            .host_fingerprint
+            .growth_capacity = Some(super::tests::test_growth_capacity(2, 4096));
+        request.sandbox_id = "capacity-restored".into();
+        request.provider_state = None;
+        let handle = backend
+            .acquire_from_snapshot(request.clone(), snapshot.clone())
+            .await?;
+        assert_eq!(
+            allocation(&backend, &request).await?.runtime,
+            original.runtime
+        );
+        assert_eq!(
+            shell(&handle, "cat /dev/shm/capacity-proof; nproc").await?,
+            "retained1\n"
+        );
+        handle.stop().await?;
+        backend.delete_snapshot(snapshot).await?;
+        Ok(())
+    }
+    .await;
+    backend.terminate_all().await?;
+    result
+}
+
+#[tokio::test]
 #[ignore = "requires root, KVM, ARM64/x86_64 artifacts, Python guest image, and TMPDIR on XFS"]
 async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("m").tempdir()?;
@@ -89,7 +191,11 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
             fs::read(cgroup.join("memory.max"))?,
             fs::read(cgroup.join("memory.high"))?,
         );
-        for shape in [(2, 4096), (1, 2048), (1, capacity.memory_mib.get() + 1)] {
+        for shape in [
+            (capacity.vcpu_count.get() + 1, 4096),
+            (1, 2048),
+            (1, capacity.memory_mib.get() + 1),
+        ] {
             assert!(
                 handle
                     .expand_resources(SandboxResourceShape::new(shape.0, shape.1).unwrap())
@@ -172,6 +278,10 @@ while True:
             let (request, _) = read_api_request(&mut stream)?;
             assert!(request.starts_with("PATCH /hotplug/memory "));
             let (max, high) = firecracker_memory_limits(grown)?;
+            ensure!(
+                fs::read_to_string(cgroup_for_peer.join("cpu.max"))?.trim() == "100000 100000",
+                "warm acquire did not replay cpu.max"
+            );
             let actual = fs::read_to_string(cgroup_for_peer.join("memory.max"))?;
             ensure!(
                 actual.trim() == max.to_string(),
@@ -197,11 +307,21 @@ while True:
         release.send(())?;
         let failure = growth.await?;
         assert_eq!(concurrent??, "during-growth");
-        assert!(failure.is_err());
+        assert!(
+            matches!(failure?, crate::SandboxResourceUpdate::Incomplete {
+            reservation,
+            ..
+        } if reservation == grown)
+        );
+        assert_eq!(
+            fs::read_to_string(cgroup.join("cpu.max"))?.trim(),
+            "100000 100000"
+        );
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
         // Recreate a crash after the journal write but before host limits changed.
         fs::write(cgroup.join("memory.max"), &original_limits.0)?;
         fs::write(cgroup.join("memory.high"), &original_limits.1)?;
+        fs::write(cgroup.join("cpu.max"), "100000 100000")?;
         assert!(backend.acquire(request.clone()).await.is_err());
         peer.join().unwrap()?;
         fs::rename(&parked, &api)?;
@@ -218,8 +338,12 @@ while True:
             shell(&handle, "printf usable-after-failure").await?,
             "usable-after-failure"
         );
-        assert_eq!(handle.expand_resources(grown).await?, grown);
-        assert_eq!(handle.expand_resources(grown).await?, grown);
+        assert!(
+            matches!(handle.expand_resources(grown).await?, crate::SandboxResourceUpdate::Applied { grant } if grant == grown)
+        );
+        assert!(
+            matches!(handle.expand_resources(grown).await?, crate::SandboxResourceUpdate::Applied { grant } if grant == grown)
+        );
         assert_eq!(handle.live_resource_grant().await?, Some(grown));
         assert_balloon(&config, &record, 0)?;
         assert_eq!(
@@ -261,6 +385,13 @@ while True:
             .await?;
         let restored_record = allocation(&backend, &request).await?;
         assert_eq!(restored.live_resource_grant().await?, Some(grown));
+        assert_eq!(
+            fs::read_to_string(
+                firecracker_cgroup_dir(&config, &restored_record.machine_id).join("cpu.max")
+            )?
+            .trim(),
+            "100000 100000"
+        );
         let available = shell(&restored, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
             .trim()
@@ -350,9 +481,12 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
     let exercise = async {
         let handle = backend.acquire(source.clone()).await?;
         assert_resident_snapshots(&config, &allocation(&backend, &source).await?)?;
-        handle
-            .expand_resources(SandboxResourceShape::new(1, 1025).unwrap())
-            .await?;
+        assert!(matches!(
+            handle
+                .expand_resources(SandboxResourceShape::new(1, 1025).unwrap())
+                .await?,
+            crate::SandboxResourceUpdate::Applied { .. }
+        ));
         // tmpfs contents exist only in guest RAM, so disk capture cannot make
         // these checks pass if the RAM snapshot misses resident or COW pages.
         shell(
@@ -491,7 +625,10 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
             handle.expand_resources(SandboxResourceShape::new(1, 8192).unwrap()),
             handle.snapshot(crate::SnapshotKind::Filesystem),
         );
-        growth?;
+        assert!(matches!(
+            growth?,
+            crate::SandboxResourceUpdate::Applied { .. }
+        ));
         let capture = capture?;
         assert_eq!(
             balloon::grant(&allocation(&backend, &request).await?)?,
@@ -505,6 +642,12 @@ async fn live_memory_disconnect_capture_and_shutdown_races() -> Result<()> {
             handle.stop(),
         );
         stop?;
+        if let Ok(update) = &growth {
+            assert!(matches!(
+                update,
+                crate::SandboxResourceUpdate::Applied { .. }
+            ));
+        }
         if let Err(error) = growth {
             assert!(
                 error.to_string().contains("not running") || error.to_string().contains("missing"),
@@ -544,7 +687,11 @@ async fn live_memory_growth_makes_six_gib_writable() -> Result<()> {
     Arc::get_mut(&mut backend.shared)
         .context("backend unexpectedly shared")?
         .host_fingerprint
-        .memory_ceiling_mib = std::num::NonZeroU32::new(262144);
+        .growth_capacity
+        .as_mut()
+        .unwrap()
+        .resources
+        .memory_mib = std::num::NonZeroU32::new(262144).unwrap();
     let mut request = native_request(&config, "allocation", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 2048);
     let result: Result<()> = async {
@@ -565,9 +712,12 @@ async fn live_memory_growth_makes_six_gib_writable() -> Result<()> {
             available > 1024 * 1024,
             "large capacity consumed the initial grant: {available} KiB"
         );
-        handle
-            .expand_resources(SandboxResourceShape::new(1, 8192).unwrap())
-            .await?;
+        assert!(matches!(
+            handle
+                .expand_resources(SandboxResourceShape::new(1, 8192).unwrap())
+                .await?,
+            crate::SandboxResourceUpdate::Applied { .. }
+        ));
         // Fault in all 6 GiB and verify a nonzero byte in every page of guest RAM.
         // Reading MemTotal alone cannot prove that ballooned pages became usable.
         let mut probe = command(
@@ -698,8 +848,10 @@ async fn live_memory_shared_ceiling_accepts_small_and_odd_sized_requests() -> Re
                     backend
                         .shared
                         .host_fingerprint
-                        .memory_ceiling_mib
+                        .growth_capacity
                         .unwrap()
+                        .resources
+                        .memory_mib
                         .get()
                 )
             );

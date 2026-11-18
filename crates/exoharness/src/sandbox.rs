@@ -210,6 +210,22 @@ impl std::str::FromStr for SnapshotFormat {
     }
 }
 
+/// The result of a live resource update. Grants include guest/kernel overhead;
+/// reserve backend host overhead separately. They do not promise free application
+/// memory or a particular guest CPU topology.
+#[derive(Debug)]
+#[must_use = "inspect incomplete updates and retain their reservation until reconciliation"]
+pub enum SandboxResourceUpdate {
+    /// All requested limits are applied and memory ballooning has converged.
+    Applied { grant: crate::SandboxResourceShape },
+    /// Some limits may have changed. Retain this guest reservation plus backend
+    /// overhead and retry the target; this does not confirm usable capacity.
+    Incomplete {
+        reservation: crate::SandboxResourceShape,
+        error: crate::SandboxError,
+    },
+}
+
 #[async_trait]
 pub trait ManagedSandboxHandle: Send + Sync {
     fn id(&self) -> &str;
@@ -289,16 +305,20 @@ pub trait ManagedSandboxHandle: Send + Sync {
         Ok(None)
     }
 
-    /// Grow within the boot ceiling after reserving backend host overhead as
-    /// well as the guest grant (Firecracker requires an additional 1024 MiB).
-    /// Growth may continue after caller cancellation and retain a larger grant
-    /// after an error. Keep the reservation until live_resource_grant reconciles
-    /// it, or the sandbox is terminated. Retrying the same shape is safe.
+    /// Increase to an absolute target after reserving host capacity,
+    /// including backend overhead (Firecracker requires an additional 1024 MiB). A backend
+    /// can reject unsupported targets. Applied confirms the limits are installed
+    /// and ballooning has converged. Incomplete reports the reservation to retain
+    /// until live_resource_grant reconciles it, or the sandbox is terminated.
+    /// Growth may continue after cancellation. Retrying the same target is safe.
     async fn expand_resources(
         &self,
         _resources: crate::SandboxResourceShape,
-    ) -> Result<crate::SandboxResourceShape> {
-        bail!("sandbox handle does not support live resource expansion")
+    ) -> SandboxResult<SandboxResourceUpdate> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "sandbox handle does not support live resource expansion".into(),
+        }
+        .into())
     }
 
     async fn stop(&self) -> Result<()>;

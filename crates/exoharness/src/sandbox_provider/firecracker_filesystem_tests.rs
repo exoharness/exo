@@ -2,7 +2,7 @@ use super::*;
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
-        memory_grant_mib: None,
+        resource_grant: None,
         template: false,
         key: "a".repeat(64),
         sandbox_id: "filesystem-test".into(),

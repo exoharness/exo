@@ -92,7 +92,7 @@ impl FilesystemLayout {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FilesystemManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    memory_grant_mib: Option<std::num::NonZeroU32>,
+    resource_grant: Option<SandboxResourceShape>,
     template: bool,
     key: String,
     sandbox_id: SandboxId,
@@ -111,6 +111,9 @@ impl FilesystemManifest {
     }
 
     fn validate(self) -> Result<Self> {
+        if let Some(grant) = self.resource_grant {
+            validate_resource_shape(grant)?;
+        }
         validate_snapshot_key(&self.key)?;
         validate_snapshot_key(&self.base_image_sha256)?;
         ensure!(
@@ -420,7 +423,7 @@ impl FirecrackerSandboxBackend {
         let reservation = self.shared.reserve_machine_capacity(&id).await?;
         let record = self
             .shared
-            .new_machine_record(&resolved, &id, &spec_hash, None, manifest.memory_grant_mib)
+            .new_machine_record(&resolved, &id, &spec_hash, None, manifest.resource_grant)
             .await?;
         let config = self.shared.config.clone();
         let request_for_disks = resolved.clone();
@@ -565,7 +568,7 @@ pub(super) async fn snapshot_filesystem(
         let source_for_capture = source.clone();
         let payload = tokio::task::spawn_blocking(move || {
             let manifest = FilesystemManifest {
-                memory_grant_mib: source_for_capture.live_memory_grant()?,
+                resource_grant: source_for_capture.live_resource_grant()?,
                 template,
                 key: new_capture_key(),
                 sandbox_id: request.sandbox_id,

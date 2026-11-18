@@ -167,7 +167,8 @@ attached virtio-rng device.
 
 Live growth is opt-in through `FirecrackerConfig.live_resource_growth`.
 The request remains the initial grant; memory capacity is detected from host RAM
-and cgroup limits, less 1024 MiB of VMM headroom. A VM boots at its requested
+and the jailer's allocation cgroups, less 1024 MiB of VMM headroom. Daemon-thread
+affinity and daemon-only quotas do not define sandbox capacity. A VM boots at its requested
 memory size, rounded up by at most 1 MiB, with the remaining range unplugged.
 Growth uses `virtio-mem`; a small balloon preserves exact odd-MiB grants.
 Matching Firecracker/jailer 1.17 or newer and guest `CONFIG_VIRTIO_MEM=y`,
@@ -175,6 +176,9 @@ Matching Firecracker/jailer 1.17 or newer and guest `CONFIG_VIRTIO_MEM=y`,
 New memory is automatically onlined with its metadata in the added memory,
 so a large growth range does not consume the initial grant at boot.
 Boot RAM uses transparent huge pages when growth is enabled.
+Only the requested CPUs are online at boot (`maxcpus=<grant>`), while the VM
+reserves its CPU topology for growth; `CONFIG_HOTPLUG_CPU=y` is required.
+Existing VMs and RAM snapshots retain their boot geometry when detected capacity changes.
 
 Call `host_resource_reservation` on the backend before acquisition or growth.
 It returns the full host reservation: guest grant plus 1024 MiB. The cgroup
@@ -184,11 +188,13 @@ the whole headroom; the balloon's page counts are guest-reported.
 See Firecracker's [hotplug](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/memory-hotplug.md)
 and [balloon security guidance](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/ballooning.md#security-disclaimer).
 
-Growth persists the grant and raises host limits before adding guest memory.
-CPU changes, shrinking, and over-capacity requests are rejected. Retain the
-reservation after an error or disconnect until `live_resource_grant` reconciles
-it or terminate the VM; retrying the same target is safe. Filesystem and RAM
-captures retain the grant separately from request identity.
+Growth persists the grant and raises host limits before changing guest resources.
+`SandboxResourceUpdate::Applied` confirms convergence; `Incomplete` carries the
+reservation to retain and the error. CPU changes, shrinking, and over-capacity
+requests are rejected before mutation. Keep the reservation after failure or
+disconnect until `live_resource_grant` reconciles it or terminate the VM;
+retrying the same target is safe. Filesystem and RAM captures retain both grants
+separately from request identity.
 
 Lease renewal updates existing leases without waiting for the lifecycle lock, so
 exec stays responsive during growth. This also applies when live growth is

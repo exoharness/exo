@@ -3,8 +3,8 @@
 use anyhow::Context;
 use exoharness::{
     FirecrackerConfig, FirecrackerNetworkDevicePolicy, FirecrackerSandboxBackend,
-    ManagedSandboxBackend, SandboxCommand, SandboxLifecycleConfig, SandboxNetworkPolicy,
-    SandboxRequest, SandboxResourceShape, SandboxSpec, SnapshotKind,
+    ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxLifecycleConfig,
+    SandboxNetworkPolicy, SandboxRequest, SandboxResourceShape, SandboxSpec, SnapshotKind,
 };
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::Duration;
@@ -17,6 +17,36 @@ fn command(argv: &[&str]) -> SandboxCommand {
         cwd: None,
         display_argv: None,
     }
+}
+
+async fn assert_cpu_grant(handle: &dyn ManagedSandboxHandle, count: u8) -> anyhow::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct ProviderState {
+        machine_id: String,
+    }
+    let state: ProviderState =
+        serde_json::from_value(handle.provider_state().context("missing provider state")?)?;
+    let binary = std::fs::canonicalize(std::env::var("EXO_FIRECRACKER_BINARY")?)?;
+    let quota = std::path::Path::new("/sys/fs/cgroup")
+        .join(binary.file_name().context("invalid Firecracker binary")?)
+        .join(state.machine_id)
+        .join("cpu.max");
+    assert_eq!(
+        std::fs::read_to_string(quota)?.trim(),
+        format!("{} 100000", u32::from(count) * 100_000)
+    );
+    let output = handle
+        .exec(&command(&[
+            "python3",
+            "-c",
+            "import os; print(os.cpu_count()); print(len(os.sched_getaffinity(0)))",
+        ]))
+        .await?;
+    anyhow::ensure!(
+        output.ok && output.stdout == format!("{count}\n{count}\n"),
+        "guest CPU count does not match the grant: {output:?}"
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -55,6 +85,7 @@ async fn firecracker_memory_growth_retries_and_restores() -> anyhow::Result<()> 
     };
     let result = async {
         let mut handle = backend.acquire(request.clone()).await?;
+        assert_cpu_grant(handle.as_ref(), 1).await?;
         let mut process = handle
             .start_process(&command(&[
                 "/bin/sh",
@@ -67,7 +98,8 @@ async fn firecracker_memory_growth_retries_and_restores() -> anyhow::Result<()> 
         assert_eq!(&ready, b"ready");
         let expanded = SandboxResourceShape::new(1, 1024).unwrap();
         for _ in 0..2 {
-            assert_eq!(handle.expand_resources(expanded).await?, expanded);
+            assert!(matches!(handle.expand_resources(expanded).await?,
+                exoharness::SandboxResourceUpdate::Applied { grant } if grant == expanded));
         }
         assert!(
             handle
@@ -76,6 +108,7 @@ async fn firecracker_memory_growth_retries_and_restores() -> anyhow::Result<()> 
                 .is_err()
         );
         assert_eq!(handle.live_resource_grant().await?, Some(expanded));
+        assert_cpu_grant(handle.as_ref(), expanded.vcpu_count.get()).await?;
         process.stdin.write_all(b"retained\n").await?;
         process.stdin.close().await?;
         let mut retained = String::new();
@@ -116,6 +149,7 @@ print('verified-768-MiB')
                 .acquire_from_snapshot(request.clone(), snapshot.clone())
                 .await?;
             assert_eq!(handle.live_resource_grant().await?, Some(expanded));
+            assert_cpu_grant(handle.as_ref(), expanded.vcpu_count.get()).await?;
             let output = handle
                 .exec(&command(&[
                     "/bin/sh",
