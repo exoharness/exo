@@ -9,6 +9,8 @@ pub struct ExternalProxyConfig {
     pub password: String,
     pub ca_pem: String,
     pub environment: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub credential_authorizations: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for ExternalProxyConfig {

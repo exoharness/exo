@@ -52,7 +52,7 @@ use crate::sandbox::{
 use crate::sandbox_provider::process_bridge;
 use crate::{
     FileSystemMountMode, SandboxAttachment, SandboxId, SandboxProcessParts, SandboxResourceShape,
-    SandboxTerminalParts, SandboxTerminalSize,
+    SandboxResult, SandboxTerminalParts, SandboxTerminalSize,
 };
 
 use super::capture_store::{self, allocated_files as snapshot_directory_bytes};
@@ -103,6 +103,7 @@ pub const DEFAULT_FIRECRACKER_STATE_ROOT: &str = "/var/lib/exo/firecracker/state
 pub const DEFAULT_WORKSPACE_SIZE_GIB: u64 = 20;
 pub const DEFAULT_IMAGE_SIZE_GIB: u64 = 8;
 pub const DEFAULT_NETWORK_BYTES_PER_SECOND: u64 = 100 * 1024 * 1024;
+pub const DEFAULT_SNAPSHOT_BUDGET_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 pub const DEFAULT_JAILER_UID_BASE: u32 = 100_000;
 pub const DEFAULT_VCPU_COUNT: u8 = crate::DEFAULT_SANDBOX_VCPU_COUNT;
 pub const DEFAULT_MEMORY_MIB: u32 = crate::DEFAULT_SANDBOX_MEMORY_MIB;
@@ -134,7 +135,6 @@ const FIRECRACKER_API_TIMEOUT: Duration = Duration::from_secs(5);
 const FIRECRACKER_SNAPSHOT_CREATE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SNAPSHOT_DELETE_FILE: &str = "deleted";
 const SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const SNAPSHOT_STATE_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
 const SNAPSHOT_LEASE_FILE: &str = "lease";
 const SNAPSHOT_FORK_TEMPLATE_FILE: &str = "fork-template";
@@ -187,6 +187,10 @@ pub struct FirecrackerConfig {
     pub state_root: PathBuf,
     pub image_size_gib: u64,
     pub workspace_size_gib: u64,
+    /// Shared budget for RAM templates, filesystem captures, and retained snapshot
+    /// memory under `state_root`, in allocated bytes. Defaults to 64 GiB.
+    #[serde(default = "default_snapshot_budget_bytes")]
+    pub snapshot_budget_bytes: u64,
     #[serde(default)]
     pub template_resource_slots: u8,
     pub jailer_uid_base: u32,
@@ -211,6 +215,9 @@ pub struct FirecrackerConfig {
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L23-L24
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L71-L72
     pub max_machines: Option<NonZeroUsize>,
+    /// Host memory overhead as a percentage of guest RAM. Defaults to 10%.
+    #[serde(default = "default_memory_overhead_percent")]
+    pub memory_overhead_percent: u8,
 }
 
 impl Default for FirecrackerConfig {
@@ -224,6 +231,7 @@ impl Default for FirecrackerConfig {
             state_root: PathBuf::from(DEFAULT_FIRECRACKER_STATE_ROOT),
             image_size_gib: DEFAULT_IMAGE_SIZE_GIB,
             workspace_size_gib: DEFAULT_WORKSPACE_SIZE_GIB,
+            snapshot_budget_bytes: DEFAULT_SNAPSHOT_BUDGET_BYTES,
             template_resource_slots: 0,
             jailer_uid_base: DEFAULT_JAILER_UID_BASE,
             dns_server: Ipv4Addr::new(1, 1, 1, 1),
@@ -234,12 +242,40 @@ impl Default for FirecrackerConfig {
             allowed_registries: Vec::new(),
             network_bytes_per_second: DEFAULT_NETWORK_BYTES_PER_SECOND,
             max_machines: None,
+            memory_overhead_percent: default_memory_overhead_percent(),
         }
     }
 }
 
+impl FirecrackerConfig {
+    /// Total host memory required for guest RAM and its configured overhead.
+    pub fn memory_footprint_mib(&self, guest_memory_mib: u32) -> u64 {
+        let guest = u64::from(guest_memory_mib);
+        guest + (guest * u64::from(self.memory_overhead_percent)).div_ceil(100)
+    }
+}
+
+fn default_memory_overhead_percent() -> u8 {
+    10
+}
+
 fn default_allow_guest_root() -> bool {
     true
+}
+
+fn default_snapshot_budget_bytes() -> u64 {
+    DEFAULT_SNAPSHOT_BUDGET_BYTES
+}
+
+/// Snapshot storage exceeded [`FirecrackerConfig::snapshot_budget_bytes`].
+/// Does not imply sandbox termination or acquisition rollback.
+#[derive(Debug, thiserror::Error)]
+#[error("Firecracker snapshot storage budget exhausted; delete unused snapshots")]
+pub struct SnapshotBudgetExhausted {
+    /// Configured snapshot storage limit, in allocated bytes.
+    pub limit_bytes: u64,
+    /// Total allocated bytes accounted at rejection, including staged captures.
+    pub accounted_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,17 +354,27 @@ struct FirecrackerSnapshotManifest {
 }
 
 impl FirecrackerSnapshotManifest {
-    fn from_payload(payload: SnapshotPayload) -> Result<Self> {
+    fn from_payload(payload: SnapshotPayload) -> crate::SandboxResult<Self> {
         if payload.format != SnapshotFormat::FirecrackerHostRef {
-            bail!(
-                "Firecracker sandbox backend can only restore a {} payload, got {}",
-                SnapshotFormat::FirecrackerHostRef,
-                payload.format
-            );
+            return Err(crate::SandboxFailure::InvalidRequest {
+                message: format!(
+                    "Firecracker sandbox backend can only restore a {} payload, got {}",
+                    SnapshotFormat::FirecrackerHostRef,
+                    payload.format
+                ),
+            }
+            .into());
         }
-        let manifest: Self = serde_json::from_slice(&payload.bytes)
-            .context("decoding FirecrackerSnapshot manifest")?;
-        manifest.validate()?;
+        let manifest: Self = serde_json::from_slice(&payload.bytes).map_err(|error| {
+            crate::SandboxFailure::SnapshotUnavailable {
+                message: format!("decoding snapshot manifest: {error}"),
+            }
+        })?;
+        manifest
+            .validate()
+            .map_err(|error| crate::SandboxFailure::SnapshotUnavailable {
+                message: error.to_string(),
+            })?;
         Ok(manifest)
     }
 
@@ -362,7 +408,6 @@ impl FirecrackerSnapshotManifest {
 
 fn template_spec_hash(spec: &SandboxSpec) -> String {
     let mut spec = spec.clone();
-    spec.policy = SandboxNetworkPolicy::Disabled.into();
     spec.mounts.clear();
     sandbox_spec_hash(&spec)
 }
@@ -756,12 +801,15 @@ impl FirecrackerSandboxBackend {
     pub async fn acquire_request(
         &self,
         request: FirecrackerRequest,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         Ok(Arc::new(self.acquire_raw(request).await?))
     }
 
     #[tracing::instrument(name = "firecracker.acquire", skip_all)]
-    async fn acquire_raw(&self, request: FirecrackerRequest) -> Result<FirecrackerSandboxHandle> {
+    async fn acquire_raw(
+        &self,
+        request: FirecrackerRequest,
+    ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         self.reap_stale_machines().await?;
         self.reap_expired_machines().await?;
         self.shared.reap_orphaned_fork_snapshot_templates().await;
@@ -1047,7 +1095,10 @@ impl FirecrackerSandboxBackend {
         Ok(())
     }
 
-    async fn resolve_request(&self, request: FirecrackerRequest) -> Result<FirecrackerRequest> {
+    async fn resolve_request(
+        &self,
+        request: FirecrackerRequest,
+    ) -> crate::SandboxResult<FirecrackerRequest> {
         let mut request = prepare_request(request)?;
         validate_resource_shape(request.spec.resources.unwrap_or_default())?;
         let image = resolve_image(
@@ -1072,14 +1123,15 @@ impl FirecrackerSandboxBackend {
         source_spec_hash: &str,
         template_key: String,
         lifecycle: SnapshotTemplateLifecycle,
-    ) -> Result<CapturedSnapshot> {
+    ) -> crate::SandboxResult<CapturedSnapshot> {
         if request.egress_proxy.is_some() {
-            bail!(PROXIED_SNAPSHOT_UNSUPPORTED);
+            return Err(anyhow::anyhow!(PROXIED_SNAPSHOT_UNSUPPORTED).into());
         }
         if !request.spec.durable_file_systems.is_empty() || !request.spec.mounts.is_empty() {
-            bail!(
+            return Err(anyhow::anyhow!(
                 "Firecracker snapshotting does not support durable filesystems or resource mounts"
             )
+            .into());
         }
         validate_snapshot_key(&template_key)?;
 
@@ -1090,17 +1142,22 @@ impl FirecrackerSandboxBackend {
         if source.spec_hash != source_spec_hash
             || sandbox_spec_hash(&request.spec) != source_spec_hash
         {
-            bail!("Firecracker snapshot source specification changed")
+            return Err(
+                anyhow::anyhow!("Firecracker snapshot source specification changed").into(),
+            );
         }
         if source.runtime
             != shared
                 .host_fingerprint
                 .for_resources(request.spec.resources.unwrap_or_default())
         {
-            bail!("Firecracker snapshot source runtime does not match the configured runtime")
+            return Err(anyhow::anyhow!(
+                "Firecracker snapshot source runtime does not match the configured runtime"
+            )
+            .into());
         }
         if !process_running(&shared.pid_path(&source.machine_id)) {
-            bail!("Firecracker snapshot source is not running")
+            return Err(anyhow::anyhow!("Firecracker snapshot source is not running").into());
         }
 
         let guest = GuestClient::new(
@@ -1145,7 +1202,7 @@ impl FirecrackerSandboxBackend {
         manifest: FirecrackerSnapshotManifest,
         lifecycle: SnapshotTemplateLifecycle,
         captured_lease: Option<File>,
-    ) -> Result<FirecrackerSandboxHandle> {
+    ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         let spec_hash = sandbox_spec_hash(&request.spec);
         let machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
         let _lifecycle_guard = self
@@ -1175,39 +1232,55 @@ impl FirecrackerSandboxBackend {
         captured_lease: Option<File>,
         spec_hash: String,
         machine_id: String,
-    ) -> Result<FirecrackerSandboxHandle> {
+    ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         if request.egress_proxy.is_some() && !manifest.template {
-            bail!(PROXIED_SNAPSHOT_UNSUPPORTED);
+            return Err(anyhow::anyhow!(PROXIED_SNAPSHOT_UNSUPPORTED).into());
         }
         let template_key = manifest.template_key.clone();
         let restore = async {
             manifest.validate()?;
             if request.lifecycle.idle_ttl.is_none() {
-                bail!("Firecracker snapshot restore requires a warm sandbox lifecycle")
+                return Err(crate::SandboxFailure::InvalidRequest {
+                    message: "Firecracker snapshot restore requires a warm sandbox lifecycle"
+                        .into(),
+                }
+                .into());
             }
             if !request.spec.durable_file_systems.is_empty() {
-                bail!("Firecracker snapshot restore does not support durable filesystems")
+                return Err(crate::SandboxFailure::InvalidRequest {
+                    message: "Firecracker snapshot restore does not support durable filesystems"
+                        .into(),
+                }
+                .into());
             }
             let expected_hash = if manifest.template {
-                ensure!(
-                    request.spec.mounts.len()
-                        <= usize::from(self.shared.config.template_resource_slots),
-                    "template has too few resource slots"
-                );
-                ensure!(
-                    request
-                        .spec
-                        .mounts
-                        .iter()
-                        .all(|mount| mount.access == crate::SandboxMountAccess::ReadWrite),
-                    "template resources must be private writable disks"
-                );
+                if request.spec.mounts.len()
+                    > usize::from(self.shared.config.template_resource_slots)
+                {
+                    return Err(anyhow::anyhow!("template has too few resource slots").into());
+                }
+                if !(request
+                    .spec
+                    .mounts
+                    .iter()
+                    .all(|mount| mount.access == crate::SandboxMountAccess::ReadWrite))
+                {
+                    return Err(anyhow::anyhow!(
+                        "template resources must be private writable disks"
+                    )
+                    .into());
+                }
                 template_spec_hash(&request.spec)
             } else {
                 spec_hash.clone()
             };
             if expected_hash != manifest.spec_hash {
-                bail!("Firecracker snapshot specification does not match the requested sandbox")
+                return Err(crate::SandboxFailure::InvalidRequest {
+                    message:
+                        "Firecracker snapshot specification does not match the requested sandbox"
+                            .into(),
+                }
+                .into());
             }
             if manifest.runtime
                 != self
@@ -1215,7 +1288,11 @@ impl FirecrackerSandboxBackend {
                     .host_fingerprint
                     .for_resources(request.spec.resources.unwrap_or_default())
             {
-                bail!("Firecracker snapshot runtime does not match the configured runtime")
+                return Err(crate::SandboxFailure::SnapshotUnavailable {
+                    message: "Firecracker snapshot runtime does not match the configured runtime"
+                        .into(),
+                }
+                .into());
             }
 
             let capacity_reservation = self.shared.reserve_machine_capacity(&machine_id).await?;
@@ -1228,7 +1305,12 @@ impl FirecrackerSandboxBackend {
             .await
             .context("joining Firecracker snapshot template validation")??;
             if !template_ready {
-                bail!("Firecracker snapshot {template_key} is not available on this host")
+                return Err(crate::SandboxFailure::SnapshotUnavailable {
+                    message: format!(
+                        "Firecracker snapshot {template_key} is not available on this host"
+                    ),
+                }
+                .into());
             }
             let snapshot_lease = match captured_lease {
                 Some(lease) => lease,
@@ -1290,9 +1372,9 @@ impl FirecrackerSandboxBackend {
                 if let Err(cleanup_error) =
                     self.shared.remove_snapshot_template(&template_key).await
                 {
-                    return Err(error).context(format!(
+                    return Err(error.context(format!(
                         "cleaning up failed single-use Firecracker snapshot also failed: {cleanup_error:#}"
-                    ));
+                    )));
                 }
                 Err(error)
             }
@@ -1303,7 +1385,7 @@ impl FirecrackerSandboxBackend {
     async fn acquire_resolved(
         &self,
         request: FirecrackerRequest,
-    ) -> Result<FirecrackerSandboxHandle> {
+    ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         let spec_hash = sandbox_spec_hash(&request.spec);
         let one_shot = request.lifecycle.idle_ttl.is_none();
         let machine_id = if one_shot {
@@ -1332,7 +1414,7 @@ impl FirecrackerSandboxBackend {
         one_shot: bool,
         capacity_reservation: Option<MachineCapacityReservation>,
         pre_staged: bool,
-    ) -> Result<FirecrackerSandboxHandle> {
+    ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         let stable_machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
         let machine_key_prefix = format!("fc-{}-", stable_id(request.sandbox_id.as_str()));
 
@@ -1346,7 +1428,10 @@ impl FirecrackerSandboxBackend {
             if !valid_machine_id(&state.machine_id)
                 || !state.machine_id.starts_with(&machine_key_prefix)
             {
-                bail!("Firecracker provider state does not match the requested sandbox key");
+                return Err(anyhow::anyhow!(
+                    "Firecracker provider state does not match the requested sandbox key"
+                )
+                .into());
             }
             self.shared.cleanup_machine(&state.machine_id, true).await?;
         }
@@ -1411,7 +1496,7 @@ impl FirecrackerSandboxBackend {
         &self,
         request: SandboxRequest,
         snapshot: Option<FirecrackerSnapshotManifest>,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> crate::SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         let terminate = self.shutdown_request(request.clone(), ShutdownMode::Terminate);
         self.egress
             .acquire(
@@ -1532,7 +1617,10 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         .context("joining Firecracker image configuration read")?
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         self.acquire_managed(request, None).await
     }
 
@@ -1540,11 +1628,10 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         &self,
         request: SandboxRequest,
         kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        ensure!(
-            kind == crate::SnapshotKind::Filesystem,
-            "Firecracker full suspension is not implemented"
-        );
+    ) -> SandboxResult<SnapshotPayload> {
+        if kind != crate::SnapshotKind::Filesystem {
+            return Err(anyhow!("Firecracker full suspension is not implemented").into());
+        }
         let id = request.sandbox_id.clone();
         self.egress
             .suspend(
@@ -1580,11 +1667,9 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         target: SandboxRequest,
     ) -> Result<Arc<dyn ManagedSandboxHandle>> {
         source
-            .spec
             .policy
             .validate_basic("Firecracker snapshot source")?;
         target
-            .spec
             .policy
             .validate_basic("Firecracker snapshot target")?;
         let mut source = prepare_request(source.into())?;
@@ -1648,7 +1733,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         if payload.format == SnapshotFormat::FirecrackerFilesystemRef {
             return self.acquire_filesystem_snapshot(request, payload).await;
         }
@@ -1843,7 +1928,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         self.shared.delete_snapshot(payload).await
     }
 
-    async fn snapshot(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         if kind == crate::SnapshotKind::Filesystem {
             return filesystem::snapshot_filesystem(
                 Arc::clone(&self.shared),
@@ -1856,7 +1941,7 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         self.capture_snapshot(false).await
     }
 
-    async fn snapshot_template(&self, kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+    async fn snapshot_template(&self, kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         if kind == crate::SnapshotKind::Filesystem {
             return filesystem::snapshot_filesystem(
                 Arc::clone(&self.shared),
@@ -1871,16 +1956,20 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
 }
 
 impl FirecrackerSandboxHandle {
-    async fn capture_snapshot(&self, template: bool) -> Result<SnapshotPayload> {
+    async fn capture_snapshot(&self, template: bool) -> crate::SandboxResult<SnapshotPayload> {
         if template {
-            ensure!(
-                self.request.spec.policy == SandboxNetworkPolicy::Disabled.into(),
-                "template capture requires disabled networking and no credentials"
-            );
-            ensure!(
-                self.machine.record.network_enabled,
-                "template capture requires a network device for restore"
-            );
+            if self.request.policy != SandboxNetworkPolicy::Disabled.into() {
+                return Err(anyhow::anyhow!(
+                    "template capture requires disabled networking and no credentials"
+                )
+                .into());
+            }
+            if !self.machine.record.network_enabled {
+                return Err(anyhow::anyhow!(
+                    "template capture requires a network device for restore"
+                )
+                .into());
+            }
         }
         let _lifecycle_guard = self
             .shared
@@ -1906,7 +1995,7 @@ impl FirecrackerSandboxHandle {
         // disk images through conversation storage would defeat local snapshot
         // restores. The reference is intentionally usable only by a backend
         // sharing this private Firecracker state root.
-        captured.manifest.into_payload()
+        Ok(captured.manifest.into_payload()?)
     }
 }
 
@@ -1996,7 +2085,7 @@ impl Shared {
     async fn reserve_machine_capacity(
         &self,
         machine_id: &str,
-    ) -> Result<MachineCapacityReservation> {
+    ) -> crate::SandboxResult<MachineCapacityReservation> {
         let Some(max_machines) = self.config.max_machines else {
             return Ok(MachineCapacityReservation::inactive(Arc::clone(
                 &self.starting_machines,
@@ -2085,7 +2174,7 @@ impl Shared {
                             .is_none_or(|entry| entry.egress_proxy != Some(proxy))
                     {
                         let network = machine.record.network();
-                        let policy = request.spec.policy.clone();
+                        let policy = request.policy.clone();
                         tokio::task::spawn_blocking(move || {
                             let rules = format!(
                                 "delete table inet {}\n{}",
@@ -2231,7 +2320,8 @@ impl Shared {
         let machine_id = machine_id.to_string();
         let spec_hash = spec_hash.to_string();
         let resolved_image = request.spec.image.clone();
-        let network_enabled = network_device_enabled(&self.config, &request.spec.policy.networking);
+        let network_enabled = request.egress_proxy.is_some()
+            || network_device_enabled(&self.config, &request.policy.networking);
         let workspace_id = if snapshot.is_none() {
             request
                 .spec
@@ -2321,7 +2411,7 @@ impl Shared {
                     prepare_network(
                         &config,
                         &network,
-                        &request.spec.policy,
+                        &request.policy,
                         request.egress_proxy,
                         jailer_uid(&config, &record)?,
                     )?;
@@ -2531,15 +2621,20 @@ impl Shared {
     }
 }
 
-fn prepare_request(mut request: FirecrackerRequest) -> Result<FirecrackerRequest> {
-    if let Some(proxy) = request.egress_proxy {
-        if request.spec.policy.networking == SandboxNetworkPolicy::Disabled {
-            bail!("disabled networking cannot use an egress proxy");
+fn prepare_request(request: FirecrackerRequest) -> crate::SandboxResult<FirecrackerRequest> {
+    validate_request(request).map_err(|error| {
+        crate::SandboxFailure::InvalidRequest {
+            message: error.to_string(),
         }
+        .into()
+    })
+}
+
+fn validate_request(mut request: FirecrackerRequest) -> Result<FirecrackerRequest> {
+    if let Some(proxy) = request.egress_proxy {
         proxy.validate()?;
     } else {
         request
-            .spec
             .policy
             .validate_basic("Firecracker without a configured egress runtime")?;
     }
@@ -3293,14 +3388,15 @@ fn ensure_machine_capacity(
     max_machines: NonZeroUsize,
     live_machines: usize,
     target_already_exists: bool,
-) -> Result<()> {
+) -> crate::SandboxResult<()> {
     if target_already_exists || live_machines < max_machines.get() {
         return Ok(());
     }
-    bail!(
-        "Firecracker host VM capacity exhausted: {live_machines} live, limit {}; stop a VM or raise the host limit",
-        max_machines.get()
-    )
+    Err(crate::SandboxFailure::VmCapacityExhausted {
+        limit: max_machines.get(),
+        occupied: live_machines,
+    }
+    .into())
 }
 
 fn admit_machine_capacity(
@@ -3308,9 +3404,11 @@ fn admit_machine_capacity(
     live_machine_ids: &[String],
     starting_machine_ids: &mut HashSet<String>,
     machine_id: &str,
-) -> Result<()> {
+) -> crate::SandboxResult<()> {
     if starting_machine_ids.contains(machine_id) {
-        bail!("Firecracker machine {machine_id} is already being admitted");
+        return Err(
+            anyhow::anyhow!("Firecracker machine {machine_id} is already being admitted").into(),
+        );
     }
     let occupied_machine_ids = live_machine_ids
         .iter()
@@ -3714,18 +3812,92 @@ pub(super) async fn native_egress_transport(
         policy,
         listen,
         Some(Arc::new(FirecrackerDns {
-            limited: matches!(policy, SandboxNetworkPolicy::Limited { .. }),
+            addresses: StdMutex::new(HashMap::new()),
+            limited: std::sync::atomic::AtomicBool::new(matches!(
+                policy,
+                SandboxNetworkPolicy::Limited { .. }
+            )),
         })),
     )
     .await
 }
 
 struct FirecrackerDns {
-    limited: bool,
+    limited: std::sync::atomic::AtomicBool,
+    addresses: StdMutex<HashMap<String, (Instant, Vec<Ipv4Addr>)>>,
 }
 
 #[async_trait]
 impl crate::egress::NetworkDns for FirecrackerDns {
+    async fn update_policy(
+        &self,
+        source: Ipv4Addr,
+        policy: &crate::EgressPolicy,
+        endpoints: crate::SandboxEgressProxy,
+    ) -> Result<()> {
+        let offset = u32::from(source)
+            .checked_sub(u32::from(NETWORK_BASE))
+            .context("invalid Firecracker DNS source")?;
+        ensure!(offset % 8 == 6, "invalid Firecracker DNS source");
+        let network = network_config(offset / 8);
+        let retained = {
+            let allowed = match &policy.networking {
+                SandboxNetworkPolicy::Limited { allowed_hosts } => {
+                    crate::types::canonical_egress_hosts(allowed_hosts)?
+                }
+                _ => HashSet::new(),
+            };
+            let mut addresses = self
+                .addresses
+                .lock()
+                .expect("Firecracker DNS addresses poisoned");
+            addresses
+                .retain(|host, (expires, _)| allowed.contains(host) && *expires > Instant::now());
+            let mut retained = HashMap::new();
+            for (expires, addresses) in addresses.values() {
+                for address in addresses {
+                    retained
+                        .entry(*address)
+                        .and_modify(|current: &mut Instant| *current = (*current).max(*expires))
+                        .or_insert(*expires);
+                }
+            }
+            retained
+                .into_iter()
+                .map(|(address, expires)| {
+                    format!(
+                        "{address} timeout {}ms",
+                        expires
+                            .saturating_duration_since(Instant::now())
+                            .as_millis()
+                            .max(1)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut rules = format!(
+            "delete table inet {}\n{}",
+            network.nft_table,
+            proxy_network_firewall_rules(&network, policy, endpoints)?
+        );
+        if !retained.is_empty() {
+            writeln!(
+                rules,
+                "add element inet {} allowed_hosts {{ {retained} }}",
+                network.nft_table
+            )?;
+        }
+        tokio::task::spawn_blocking(move || {
+            run_checked_input("nft", &["-f", "-"], rules.as_bytes())
+        })
+        .await??;
+        self.limited.store(
+            matches!(policy.networking, SandboxNetworkPolicy::Limited { .. }),
+            Ordering::SeqCst,
+        );
+        Ok(())
+    }
     async fn resolve(&self, source: Ipv4Addr, host: &str) -> Result<Vec<Ipv4Addr>> {
         use crate::egress::UpstreamResolver;
         let resolved = crate::egress::PublicUpstreamResolver
@@ -3742,7 +3914,7 @@ impl crate::egress::NetworkDns for FirecrackerDns {
         addresses.sort_unstable();
         addresses.dedup();
         ensure!(addresses.len() <= 32, "too many DNS addresses");
-        if self.limited {
+        if self.limited.load(Ordering::SeqCst) {
             // network_config allocates eight addresses per slot; the guest is
             // offset six. Only the bound VM can query this DNS listener.
             let offset = u32::from(source)
@@ -3772,6 +3944,16 @@ impl crate::egress::NetworkDns for FirecrackerDns {
                 "admitting DNS addresses: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            self.addresses
+                .lock()
+                .expect("Firecracker DNS addresses poisoned")
+                .insert(
+                    crate::types::canonical_egress_host(host)?,
+                    (
+                        Instant::now() + Duration::from_secs(3600),
+                        addresses.clone(),
+                    ),
+                );
         }
         Ok(addresses)
     }
@@ -3882,10 +4064,30 @@ fn proxy_network_firewall_rules(
             "add rule inet {table} {chain} iifname {interface} counter reject"
         )?;
     }
-    writeln!(
-        rules,
-        "add rule inet {table} forward oifname {interface} ct state established,related counter accept"
-    )?;
+    if policy.networking_enabled() {
+        let hosts = if policy.networking == SandboxNetworkPolicy::Unrestricted {
+            ""
+        } else {
+            "ip saddr @allowed_hosts "
+        };
+        let ports = policy.allowed_tcp_ports.as_ref().map(|ports| {
+            ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
+        if ports.as_ref().is_none_or(|ports| !ports.is_empty()) {
+            let ports = ports.map_or_else(
+                || "meta l4proto tcp".to_owned(),
+                |ports| format!("tcp sport {{ {ports} }}"),
+            );
+            writeln!(
+                rules,
+                "add rule inet {table} forward oifname {interface} {hosts}{ports} ct state established,related counter accept"
+            )?;
+        }
+    }
     writeln!(
         rules,
         "add rule inet {table} forward oifname {interface} counter drop"
@@ -4256,18 +4458,7 @@ fn spawn_jailed_firecracker(
     firecracker_arguments: &[&str],
 ) -> Result<()> {
     let host_uid = jailer_uid(config, record)?;
-    let memory_max = u64::from(
-        record
-            .runtime
-            .memory_mib
-            .checked_add(1024)
-            .context("Firecracker cgroup memory limit overflow")?,
-    ) * 1024
-        * 1024;
-    // Guest RAM is anonymous memory in the VMM. Block-device page cache and
-    // kernel allocations also count against this cgroup. Start reclaim before
-    // the hard limit, with room for disk writeback to complete at full guest RAM.
-    let memory_high = (u64::from(record.runtime.memory_mib) + 256) * 1024 * 1024;
+    let memory_max = config.memory_footprint_mib(record.runtime.memory_mib) * 1024 * 1024;
     let cpu_max = format!("{} 100000", u32::from(record.runtime.vcpu_count) * 100_000);
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
@@ -4296,7 +4487,7 @@ fn spawn_jailed_firecracker(
         .arg("--cgroup")
         .arg(format!("memory.max={memory_max}"))
         .arg("--cgroup")
-        .arg(format!("memory.high={memory_high}"))
+        .arg("memory.high=max")
         .arg("--cgroup")
         .arg(format!("cpu.max={cpu_max}"));
     // The API socket path is injected here, next to the constant that
@@ -4912,11 +5103,15 @@ fn retained_snapshot_bytes(config: &FirecrackerConfig) -> Result<u64> {
     Ok(retained)
 }
 
-fn enforce_snapshot_budget(config: &FirecrackerConfig) -> Result<()> {
-    ensure!(
-        retained_snapshot_bytes(config)? <= MAX_SNAPSHOT_BYTES,
-        "Firecracker snapshot storage budget exhausted; delete unused snapshots"
-    );
+fn enforce_snapshot_budget(config: &FirecrackerConfig) -> crate::SandboxResult<()> {
+    let accounted_bytes = retained_snapshot_bytes(config)?;
+    if accounted_bytes > config.snapshot_budget_bytes {
+        return Err(SnapshotBudgetExhausted {
+            limit_bytes: config.snapshot_budget_bytes,
+            accounted_bytes,
+        }
+        .into());
+    }
     Ok(())
 }
 
@@ -4924,8 +5119,8 @@ fn with_paused_snapshot_source<T>(
     root: &Path,
     machine_id: &str,
     suspend: bool,
-    capture: impl FnOnce() -> Result<T>,
-) -> Result<T> {
+    capture: impl FnOnce() -> crate::SandboxResult<T>,
+) -> crate::SandboxResult<T> {
     let api = root.join("run/firecracker.socket");
     let pid = root.join("firecracker.pid");
     let running = process_running(&pid);
@@ -4946,7 +5141,10 @@ fn with_paused_snapshot_source<T>(
         ) {
             (Ok(value), Ok(())) => Ok(value),
             (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(error)) => Err(error.context("resuming Firecracker snapshot source")),
+            (Ok(_), Err(error)) => {
+                Err(crate::SandboxError::from(error)
+                    .context("resuming Firecracker snapshot source"))
+            }
             (Err(error), Err(resume)) => {
                 Err(error.context(format!("source resume also failed: {resume:#}")))
             }
@@ -5011,20 +5209,23 @@ fn capture_snapshot_template(
     source: &MachineRecord,
     template_key: &str,
     lifecycle: SnapshotTemplateLifecycle,
-) -> Result<File> {
+) -> crate::SandboxResult<File> {
     let capture_pending = jail_dir(config, &source.machine_id).join("snapshot-pending");
     let memory_base = jail_dir(config, &source.machine_id).join("snapshot-memory");
     if capture_pending.try_exists()? {
-        bail!(
+        return Err(anyhow::anyhow!(
             "a previous Firecracker capture did not complete; restart the sandbox before snapshotting again"
-        );
+        ).into());
     }
     if fs::read_to_string("/proc/swaps")?
         .lines()
         .skip(1)
         .any(|line| !line.trim().is_empty())
     {
-        bail!("sparse Firecracker snapshots require host swap to be disabled");
+        return Err(anyhow::anyhow!(
+            "sparse Firecracker snapshots require host swap to be disabled"
+        )
+        .into());
     }
     let capture_lock = OpenOptions::new()
         .read(true)
@@ -5032,7 +5233,7 @@ fn capture_snapshot_template(
         .create(true)
         .truncate(false)
         .open(config.state_root.join("snapshot-capture.lock"))?;
-    flock(&capture_lock, FlockOperation::LockExclusive)?;
+    flock(&capture_lock, FlockOperation::LockExclusive).map_err(anyhow::Error::from)?;
     reap_orphaned_fork_snapshot_templates_blocking(config)?;
     let (overlay, overlay_metadata) = open_source_overlay(config, source)?;
     let disk_bytes = overlay_metadata.len();
@@ -5046,12 +5247,17 @@ fn capture_snapshot_template(
         let _budget = snapshot_budget_lock(config)?;
         enforce_snapshot_budget(config)?;
     }
-    let filesystem = rustix::fs::statvfs(&config.state_root)?;
+    let filesystem = rustix::fs::statvfs(&config.state_root).map_err(anyhow::Error::from)?;
     let available = filesystem.f_bavail.saturating_mul(filesystem.f_frsize);
     let reserve =
         (filesystem.f_blocks.saturating_mul(filesystem.f_frsize) / 10).max(1024 * 1024 * 1024);
-    if capture_bytes > available.saturating_sub(reserve) {
-        bail!("insufficient free disk space for Firecracker snapshot and host reserve");
+    let available_bytes = available.saturating_sub(reserve);
+    if capture_bytes > available_bytes {
+        return Err(crate::SandboxFailure::DiskSpaceExhausted {
+            required_bytes: capture_bytes,
+            available_bytes,
+        }
+        .into());
     }
     let destination = snapshot_template_dir(config, template_key)?;
     if destination.try_exists()? {
@@ -5077,7 +5283,7 @@ fn capture_snapshot_template(
     let output_dir = open_directory_nofollow(&output)?;
     let uid = jailer_uid(config, source)?;
     fchown(&output_dir, Some(uid), Some(uid))?;
-    rustix::fs::fchmod(&output_dir, rustix::fs::Mode::RWXU)?;
+    rustix::fs::fchmod(&output_dir, rustix::fs::Mode::RWXU).map_err(anyhow::Error::from)?;
 
     let api = wait_for_firecracker_api(&root, &source.machine_id)?;
     let snapshot_path = format!("/{output_name}/state");
@@ -5103,7 +5309,8 @@ fn capture_snapshot_template(
                 &output_dir,
                 "memory",
                 rustix::fs::AtFlags::empty(),
-            )?;
+            )
+            .map_err(anyhow::Error::from)?;
             fs::remove_file(&memory)?;
         }
         // A fresh VM's first sparse snapshot is complete on its own. Subsequent
@@ -5139,7 +5346,7 @@ fn capture_snapshot_template(
         // has to match the memory image byte-for-byte, and the source starts
         // writing to it again the moment it resumes.
         reflink_file(&overlay, &temporary.join("overlay.ext4"))?;
-        Ok::<File, anyhow::Error>(memory)
+        Ok::<File, crate::SandboxError>(memory)
     });
     let result = result.and_then(|memory| {
         // Copy -- never hard-link -- the snapshot out of the source VM's jail.
@@ -5166,11 +5373,12 @@ fn capture_snapshot_template(
     });
     let output_cleanup = remove_directory_if_present(&output);
     let result = match (result, output_cleanup) {
-        (Err(error), Err(cleanup_error)) => Err(error).context(format!(
+        (Err(error), Err(cleanup_error)) => Err(error.context(format!(
             "creating Firecracker snapshot; jail cleanup also failed: {cleanup_error:#}"
-        )),
+        ))),
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error).context("cleaning up Firecracker snapshot jail output"),
+        (Ok(()), Err(error)) => Err(crate::SandboxError::from(error)
+            .context("cleaning up Firecracker snapshot jail output")),
         (Ok(()), Ok(())) => Ok(()),
     };
     let result = result.and_then(|()| {
@@ -5183,16 +5391,16 @@ fn capture_snapshot_template(
     });
     if let Err(error) = result {
         if let Err(cleanup_error) = remove_directory_if_present(&temporary) {
-            return Err(error).context(format!(
+            return Err(error.context(format!(
                 "cleaning up failed Firecracker snapshot also failed: {cleanup_error:#}"
-            ));
+            )));
         }
         return Err(error);
     }
     validate_snapshot_template(config, &destination, source.runtime.memory_mib)?;
     replace_hard_link(&destination.join("memory"), &memory_base)?;
     fs::remove_file(&capture_pending)?;
-    open_snapshot_template_lease(config, template_key)
+    Ok(open_snapshot_template_lease(config, template_key)?)
 }
 
 #[tracing::instrument(name = "firecracker.prepare_snapshot_overlay", skip_all)]

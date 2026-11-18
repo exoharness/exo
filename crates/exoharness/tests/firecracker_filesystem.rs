@@ -38,6 +38,7 @@ async fn firecracker_filesystem_capture_restores_overlay_and_workspace() -> anyh
     })
     .await?;
     let source = SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: "filesystem-source".into(),
         scope: exoharness::ResourceScope::Global,
         provider_state: None,
@@ -48,7 +49,6 @@ async fn firecracker_filesystem_capture_restores_overlay_and_workspace() -> anyh
             image: "docker.io/library/alpine:3.22".into(),
             resources: SandboxResourceShape::new(1, 512),
             default_workdir: "/workspace".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
             tcp_ports: vec![],
             mounts: vec![],
             durable_file_systems: vec![DurableFileSystem {

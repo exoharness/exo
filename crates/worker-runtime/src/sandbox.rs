@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use executor::runtime_host::RuntimeHost;
 use exoharness::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxAttachment, SandboxCommand,
-    SandboxCommandOutput, SandboxProcessParts, SandboxRequest, SnapshotFormat, SnapshotKind,
-    SnapshotPayload,
+    SandboxCommandOutput, SandboxProcessParts, SandboxRequest, SandboxResult, SnapshotFormat,
+    SnapshotKind, SnapshotPayload,
 };
 use futures::future::BoxFuture;
 use futures::io::AsyncWrite;
@@ -146,8 +146,13 @@ impl ManagedSandboxBackend for CloudflareBackend {
     fn consumable_snapshot_formats(&self) -> &[SnapshotFormat] {
         &SNAPSHOT_FORMATS
     }
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        self.acquire(request, None).await
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        self.acquire(request, None)
+            .await
+            .map_err(exoharness::SandboxError::from)
     }
     async fn resolve_existing(
         &self,
@@ -175,20 +180,27 @@ impl ManagedSandboxBackend for CloudflareBackend {
         &self,
         _request: SandboxRequest,
         _kind: SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("Cloudflare sandbox suspension is not supported")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(exoharness::SandboxFailure::InvalidRequest {
+            message: "Cloudflare sandbox suspension is not supported".into(),
+        }
+        .into())
     }
     async fn acquire_from_snapshot(
         &self,
         request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        ensure!(
-            payload.format == SNAPSHOT_FORMAT,
-            "unsupported Cloudflare snapshot format"
-        );
-        self.acquire(request, Some(serde_json::from_slice(&payload.bytes)?))
-            .await
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        let result: anyhow::Result<Arc<dyn ManagedSandboxHandle>> = async {
+            ensure!(
+                payload.format == SNAPSHOT_FORMAT,
+                "unsupported Cloudflare snapshot format"
+            );
+            self.acquire(request, Some(serde_json::from_slice(&payload.bytes)?))
+                .await
+        }
+        .await;
+        result.map_err(exoharness::SandboxError::from)
     }
     async fn terminate(&self, request: SandboxRequest) -> Result<()> {
         self.0
@@ -321,7 +333,15 @@ impl ManagedSandboxHandle for CloudflareHandle {
     async fn detach(&self) -> Result<SandboxAttachment> {
         bail!("Cloudflare sandbox detach is not supported")
     }
-    async fn snapshot(&self, kind: SnapshotKind) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, kind: SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        self.capture_snapshot(kind)
+            .await
+            .map_err(exoharness::SandboxError::from)
+    }
+}
+
+impl CloudflareHandle {
+    async fn capture_snapshot(&self, kind: SnapshotKind) -> Result<SnapshotPayload> {
         ensure!(
             kind == SnapshotKind::Filesystem,
             "Cloudflare does not support the requested snapshot kind"

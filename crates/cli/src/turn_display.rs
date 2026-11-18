@@ -9,6 +9,7 @@ use executor::{
     ConversationHandle, EventData, EventId, EventKind, EventQuery, EventQueryDirection, TurnId,
     UsageRecord,
 };
+use futures::future::BoxFuture;
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 static BACKEND_PROGRESS: Mutex<Option<String>> = Mutex::new(None);
@@ -77,6 +78,8 @@ pub(crate) async fn interruptible<T>(future: impl Future<Output = Result<T>>) ->
 }
 
 pub(crate) struct TurnProgress {
+    // A ready progress event must not discard a queued interrupt.
+    interrupt: BoxFuture<'static, io::Result<()>>,
     enabled: bool,
     status: Option<String>,
     frame: usize,
@@ -87,6 +90,7 @@ impl TurnProgress {
     pub(crate) fn new() -> Self {
         *BACKEND_PROGRESS.lock().expect("backend progress poisoned") = None;
         Self {
+            interrupt: Box::pin(tokio::signal::ctrl_c()),
             enabled: io::stderr().is_terminal(),
             status: Some("Starting turn".to_string()),
             frame: 0,
@@ -105,14 +109,16 @@ impl TurnProgress {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                result = &mut future => {
-                    self.clear()?;
-                    return result;
-                }
-                signal = tokio::signal::ctrl_c() => {
+                biased;
+                signal = &mut self.interrupt => {
+                    self.interrupt = Box::pin(tokio::signal::ctrl_c());
                     self.clear()?;
                     signal?;
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "turn interrupted").into());
+                }
+                result = &mut future => {
+                    self.clear()?;
+                    return result;
                 }
                 _ = interval.tick(), if self.enabled && self.status.is_some() => {
                     if let Some(status) = BACKEND_PROGRESS.lock().expect("backend progress poisoned").take() {
@@ -385,6 +391,26 @@ fn format_duration(value: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_interrupt_survives_between_progress_waits() -> Result<()> {
+        let (signal, received) = tokio::sync::oneshot::channel();
+        let mut progress = TurnProgress::new();
+        progress.interrupt = Box::pin(async move { received.await.map_err(io::Error::other) });
+        progress
+            .wait(async move {
+                signal.send(()).unwrap();
+                Ok(())
+            })
+            .await?;
+        let error = progress.wait(async { Ok(()) }).await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::Interrupted
+        );
+        progress.wait(async { Ok(()) }).await?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn separate_usage_covers_late_records_without_hiding_missing_usage() -> Result<()> {

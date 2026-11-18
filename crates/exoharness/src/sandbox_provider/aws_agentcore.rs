@@ -8,13 +8,13 @@ use aws_sdk_bedrockagentcore::Client;
 use aws_sdk_bedrockagentcore::primitives::Blob;
 use serde::{Deserialize, Serialize};
 
-use crate::SandboxAttachment;
 use crate::sandbox::{
     ManagedSandboxBackend, ManagedSandboxHandle, SandboxCommand, SandboxCommandOutput,
     SandboxNetworkPolicy, SandboxRequest, SandboxSpec, SnapshotFormat, SnapshotPayload,
     sandbox_spec_hash, validate_durable_file_systems,
 };
 use crate::sandbox_provider::process_bridge;
+use crate::{SandboxAttachment, SandboxResult};
 
 pub fn default_aws_agentcore_image() -> String {
     String::new()
@@ -104,8 +104,11 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         &[]
     }
 
-    async fn acquire(&self, request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        request.spec.policy.validate_basic("aws_agentcore")?;
+    async fn acquire(
+        &self,
+        request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        request.policy.validate_basic("aws_agentcore")?;
         reject_unsupported_request(&request, self.session_storage_mount_path.as_deref())?;
         let spec_hash = sandbox_spec_hash(&request.spec);
         let runtime_session_id = agentcore_runtime_session_id(&request, &spec_hash);
@@ -134,16 +137,22 @@ impl ManagedSandboxBackend for AwsAgentCoreSandboxBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("AWS AgentCore sandbox backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "AWS AgentCore sandbox backend does not support suspension".into(),
+        }
+        .into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         _payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
-        bail!("restoring an AgentCore sandbox from a snapshot is not implemented yet");
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "restoring an AgentCore sandbox from a snapshot is not implemented yet".into(),
+        }
+        .into())
     }
 }
 
@@ -217,8 +226,11 @@ impl ManagedSandboxHandle for AwsAgentCoreSandboxHandle {
         bail!("AWS AgentCore sandboxes cannot be detached")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
-        bail!("AgentCore sandbox snapshots are not implemented yet");
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "AgentCore sandbox snapshots are not implemented yet".into(),
+        }
+        .into())
     }
 }
 
@@ -422,10 +434,7 @@ fn reject_unsupported_request(
             bail!("AgentCore sandbox backend supports at most one durable file system");
         }
     }
-    if matches!(
-        request.spec.policy.networking,
-        SandboxNetworkPolicy::Disabled
-    ) {
+    if matches!(request.policy.networking, SandboxNetworkPolicy::Disabled) {
         bail!("AgentCore sandbox backend cannot enforce disabled networking");
     }
     Ok(())
@@ -570,6 +579,7 @@ mod tests {
 
     fn durable_request(mount_path: &str, mode: FileSystemMountMode) -> SandboxRequest {
         SandboxRequest {
+            policy: SandboxNetworkPolicy::Unrestricted.into(),
             sandbox_id: "sandbox".to_string(),
             scope: ResourceScope::Thread {
                 agent_id: crate::Uuid7::now(),
@@ -585,7 +595,6 @@ mod tests {
                     mount_path: mount_path.to_string(),
                     mode,
                 }],
-                policy: SandboxNetworkPolicy::Unrestricted.into(),
                 default_workdir: "/mnt/workspace".to_string(),
             },
             lifecycle: SandboxLifecycleConfig::default(),

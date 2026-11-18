@@ -245,13 +245,15 @@ fn sync_node(root: &Path, count: &mut usize) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn publish(
+pub(super) fn publish<E: From<anyhow::Error>>(
     temporary: &Path,
     destination: &Path,
     budget_file: &Path,
-    check_budget: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    File::open(temporary)?.sync_all()?;
+    check_budget: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    File::open(temporary)
+        .and_then(|file| file.sync_all())
+        .map_err(anyhow::Error::from)?;
     {
         let _budget = exclusive_lock(budget_file)?;
         check_budget()?;
@@ -259,9 +261,13 @@ pub(super) fn publish(
             .with_context(|| format!("publishing capture {}", destination.display()))?;
     }
     let parent = destination.parent().context("missing capture parent")?;
-    File::open(parent)?.sync_all()?;
+    File::open(parent)
+        .and_then(|file| file.sync_all())
+        .map_err(anyhow::Error::from)?;
     if let Some(namespace) = parent.parent().filter(|path| !path.as_os_str().is_empty()) {
-        File::open(namespace)?.sync_all()?;
+        File::open(namespace)
+            .and_then(|file| file.sync_all())
+            .map_err(anyhow::Error::from)?;
     }
     Ok(())
 }
@@ -269,6 +275,40 @@ pub(super) fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_preserves_typed_snapshot_capacity_errors() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let temporary = root.path().join("pending");
+        let destination = root.path().join("published");
+        fs::create_dir(&temporary)?;
+        let result: crate::SandboxResult<()> = publish(
+            &temporary,
+            &destination,
+            &root.path().join("budget.lock"),
+            || {
+                Err(crate::SandboxFailure::SnapshotBudgetExhausted {
+                    limit_bytes: 100,
+                    accounted_bytes: 101,
+                }
+                .into())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(crate::SandboxError::Failure {
+                failure: crate::SandboxFailure::SnapshotBudgetExhausted {
+                    limit_bytes: 100,
+                    accounted_bytes: 101
+                },
+                ..
+            })
+        ));
+        assert!(temporary.exists());
+        assert!(!destination.exists());
+        Ok(())
+    }
+
     #[test]
     fn syncing_a_capture_skips_named_pipes() -> Result<()> {
         let root = tempfile::tempdir()?;

@@ -105,6 +105,12 @@ async fn connection(
             .await?;
         Ok(match upstream? {
             Some(upstream) => Connection::Tcp {
+                destination: SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(
+                        address[0], address[1], address[2], address[3],
+                    )),
+                    port,
+                ),
                 downstream: Box::pin(stream),
                 upstream,
             },

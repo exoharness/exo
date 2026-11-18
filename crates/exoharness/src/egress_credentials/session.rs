@@ -36,7 +36,7 @@ impl EgressSession {
             .await?
             .map(|bytes| serde_json::from_slice::<Self>(&bytes))
             .transpose()?;
-        let policy = request.spec.policy;
+        let policy = request.policy;
         let mut environment =
             CredentialBindings::new(policy.credentials.clone(), None)?.environment();
         if let Some(previous) = previous {

@@ -10,7 +10,7 @@ use crate::resources::{
     MaterializeResourcesRequest, PreparedResource, ResourceDefinition, ResourceSource,
 };
 use crate::test_support::{begin_test_turn, local_test_config};
-use crate::{EnvironmentDefinition, FileSystemMountMode};
+use crate::{EnvironmentDefinition, FileSystemMountMode, SandboxResult};
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
@@ -71,7 +71,10 @@ impl ManagedSandboxBackend for ResourceBackend {
         Ok(())
     }
 
-    async fn acquire(&self, _request: SandboxRequest) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    async fn acquire(
+        &self,
+        _request: SandboxRequest,
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         Ok(Arc::new(CaptureHandle {
             gate: self.capture_gate.lock().unwrap().take(),
         }))
@@ -93,15 +96,15 @@ impl ManagedSandboxBackend for ResourceBackend {
         &self,
         _request: SandboxRequest,
         _kind: crate::SnapshotKind,
-    ) -> Result<SnapshotPayload> {
-        bail!("test resource backend does not support suspension")
+    ) -> SandboxResult<SnapshotPayload> {
+        Err(anyhow::anyhow!("test resource backend does not support suspension").into())
     }
 
     async fn acquire_from_snapshot(
         &self,
         _request: SandboxRequest,
         payload: SnapshotPayload,
-    ) -> Result<Arc<dyn ManagedSandboxHandle>> {
+    ) -> SandboxResult<Arc<dyn ManagedSandboxHandle>> {
         assert_eq!(payload.format, SnapshotFormat::FirecrackerFilesystemRef);
         assert_eq!(payload.bytes, bytes::Bytes::from_static(b"capture"));
         Ok(Arc::new(CaptureHandle { gate: None }))
@@ -142,10 +145,14 @@ impl ManagedSandboxHandle for CaptureHandle {
         bail!("capture test does not attach VMs")
     }
 
-    async fn snapshot(&self, _kind: crate::SnapshotKind) -> Result<SnapshotPayload> {
+    async fn snapshot(&self, _kind: crate::SnapshotKind) -> SandboxResult<SnapshotPayload> {
         if let Some(gate) = &self.gate {
             gate.entered.notify_one();
-            gate.release.acquire().await?.forget();
+            gate.release
+                .acquire()
+                .await
+                .map_err(anyhow::Error::from)?
+                .forget();
         }
         Ok(SnapshotPayload {
             format: SnapshotFormat::FirecrackerFilesystemRef,

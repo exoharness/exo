@@ -15,6 +15,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
+        policy: SandboxNetworkPolicy::Unrestricted.into(),
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),
@@ -26,7 +27,6 @@ fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxReques
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: "/vercel/sandbox".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -535,7 +535,7 @@ async fn limited_policy_pins_each_allowed_host() {
         .mount(&server)
         .await;
     let mut request = make_request(exoharness::Uuid7::now(), "limited");
-    request.spec.policy = SandboxNetworkPolicy::Limited {
+    request.policy = SandboxNetworkPolicy::Limited {
         allowed_hosts: vec!["API.example.com".into()],
     }
     .into();
@@ -548,7 +548,6 @@ async fn unsupported_credentials_fail_before_any_provider_request() {
     let backend = backend_for_mock(&server);
     let mut request = make_request(exoharness::Uuid7::now(), "credentials");
     request
-        .spec
         .policy
         .credentials
         .push(exoharness::EgressCredentialBinding {
@@ -576,7 +575,7 @@ async fn resume_applies_policy_before_starting_the_session() {
     let backend = backend_for_mock(&server);
     mount_named_sandbox_with_status(&server, "resumed", "stopped").await;
     let mut request = make_request(exoharness::Uuid7::now(), "disabled");
-    request.spec.policy = SandboxNetworkPolicy::Disabled.into();
+    request.policy = SandboxNetworkPolicy::Disabled.into();
     backend.acquire(request).await.expect("resume with policy");
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 3);
@@ -624,7 +623,7 @@ async fn invalid_host_fails_before_any_provider_request() {
     let server = MockServer::start().await;
     let backend = backend_for_mock(&server);
     let mut request = make_request(exoharness::Uuid7::now(), "invalid-host");
-    request.spec.policy = SandboxNetworkPolicy::Limited {
+    request.policy = SandboxNetworkPolicy::Limited {
         allowed_hosts: vec!["*.example.com".into()],
     }
     .into();
@@ -659,7 +658,7 @@ async fn redacted_host_pinning_is_reapplied_without_resuming() {
         .mount(&server)
         .await;
     let mut request = make_request(exoharness::Uuid7::now(), "limited-reuse");
-    request.spec.policy = SandboxNetworkPolicy::Limited {
+    request.policy = SandboxNetworkPolicy::Limited {
         allowed_hosts: vec!["api.test".into()],
     }
     .into();

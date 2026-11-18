@@ -86,6 +86,7 @@ fn request(
     idle_ttl: Option<Duration>,
 ) -> SandboxRequest {
     SandboxRequest {
+        policy: network.into(),
         sandbox_id: tag.into(),
         scope: ResourceScope::Agent {
             agent_id: exoharness::Uuid7::now(),
@@ -101,7 +102,6 @@ fn request(
                 internal: false,
             }],
             durable_file_systems: Vec::new(),
-            policy: network.into(),
             default_workdir: "/".into(),
         },
         lifecycle: SandboxLifecycleConfig { idle_ttl },

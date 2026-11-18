@@ -27,6 +27,8 @@ pub mod protocol;
 pub mod resources;
 #[cfg(feature = "store")]
 mod sandbox;
+#[cfg(feature = "store")]
+mod sandbox_error;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod sandbox_process;
 mod sandbox_provider;
@@ -56,6 +58,8 @@ pub use http::*;
 pub use http_client::{AccessTokenProvider, HttpClient, HttpResponseError};
 #[cfg(feature = "store")]
 pub use sandbox::*;
+#[cfg(feature = "store")]
+pub use sandbox_error::*;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use sandbox_process::{CollectedProcessOutput, ProcessTimedOut, collect_process_output};
 pub use sandbox_provider::*;

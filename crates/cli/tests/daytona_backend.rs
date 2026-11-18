@@ -25,6 +25,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// format matches what the find-by-label query expects to see.
 fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxRequest {
     SandboxRequest {
+        policy: SandboxNetworkPolicy::Unrestricted.into(),
         sandbox_id: sandbox_id.into(),
         scope: ResourceScope::Thread {
             agent_id: exoharness::Uuid7::now(),
@@ -36,7 +37,6 @@ fn make_request(thread_id: exoharness::Uuid7, sandbox_id: &str) -> SandboxReques
             resources: Default::default(),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: SandboxNetworkPolicy::Unrestricted.into(),
             default_workdir: "/".into(),
         },
         lifecycle: SandboxLifecycleConfig {

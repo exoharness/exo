@@ -13,6 +13,8 @@ use tokio::sync::RwLock;
 
 #[path = "git_tests.rs"]
 mod git;
+#[path = "redirect_tests.rs"]
+mod redirects;
 
 const GIT_REFS_PATH: &str = "/authorized-repo.git/info/refs?service=git-upload-pack";
 const GIT_RECEIVE_REFS_PATH: &str = "/authorized-repo.git/info/refs?service=git-receive-pack";
@@ -162,6 +164,9 @@ impl Upstream {
                             let service = service_fn(move |request: Request<Incoming>| async move {
                                 if let Some(root) = repository_root {
                                     return Ok::<_, Infallible>(git::respond(root, request).await.unwrap());
+                                }
+                                if request.uri().path().starts_with("/redirect/") || request.uri().path().starts_with("/download/") {
+                                    return Ok::<_, Infallible>(redirects::respond(request).await);
                                 }
                                 if matches!(request.uri().path(), "/refresh" | "/reject" | "/forbidden") {
                                     let path = request.uri().path().to_owned();
@@ -483,6 +488,7 @@ fn client(proxy: &EgressProxy) -> Result<reqwest::Client> {
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .add_root_certificate(reqwest::Certificate::from_pem(proxy.ca_pem().as_bytes())?)
+        .resolve("api.github.com", proxy.endpoints().https.into())
         .resolve("api.test", proxy.endpoints().https.into())
         .resolve("public.test", proxy.endpoints().https.into())
         .timeout(Duration::from_secs(10))
@@ -538,6 +544,101 @@ async fn proxy_requires_a_bound_source_and_closes_on_shutdown() -> Result<()> {
     proxy.bind_source(host_ip()?).await?;
     assert!(proxy.bind_source(host_ip()?).await.is_err());
     let proxy_client = client(&proxy)?;
+    assert!(
+        proxy_client
+            .get("https://api.test/auth")
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    let ca_pem = proxy.ca_pem().to_owned();
+    let mut download = proxy_client.get("https://api.test/sse").send().await?;
+    assert_eq!(download.chunk().await?.unwrap(), "first\n");
+    let mut package = proxy_client.get("https://public.test/sse").send().await?;
+    assert_eq!(package.chunk().await?.unwrap(), "first\n");
+    let resolver = TestResolver::new();
+    let state = State::new(
+        identity("one"),
+        policy(),
+        Some(resolver.clone()),
+        Arc::new(upstream.config.clone()),
+    )?;
+    proxy.update(state, &policy()).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), download.chunk())
+            .await?
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), package.chunk())
+            .await
+            .is_err()
+    );
+    let mut download = proxy_client.get("https://api.test/sse").send().await?;
+    assert_eq!(download.chunk().await?.unwrap(), "first\n");
+    let mut overlap = policy();
+    overlap.networking = SandboxNetworkPolicy::Limited {
+        allowed_hosts: vec!["api.test".into(), "api.github.com".into()],
+    };
+    let state = State::new(
+        identity("one"),
+        overlap.clone(),
+        Some(resolver.clone()),
+        Arc::new(upstream.config.clone()),
+    )?;
+    proxy.update(state, &overlap).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), download.chunk())
+            .await
+            .is_err()
+    );
+    let mut next = policy();
+    next.networking = SandboxNetworkPolicy::Limited {
+        allowed_hosts: vec!["api.github.com".into()],
+    };
+    let state = State::new(
+        identity("one"),
+        next.clone(),
+        Some(resolver),
+        Arc::new(upstream.config.clone()),
+    )?;
+    proxy.update(state, &next).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), download.chunk())
+            .await?
+            .is_err()
+    );
+    assert_eq!(proxy.ca_pem(), ca_pem);
+    assert!(
+        proxy_client
+            .get("https://api.github.com/auth")
+            .send()
+            .await?
+            .status()
+            .is_success()
+    );
+    if let Ok(response) = proxy_client.get("https://api.test/auth").send().await {
+        assert!(!response.status().is_success());
+    }
+    let dns = tokio::net::UdpSocket::bind((host_ip()?, 0)).await?;
+    for (host, expected) in [
+        ("api.test", ResponseCode::NXDomain),
+        ("api.github.com", ResponseCode::NoError),
+    ] {
+        let mut query = Message::new();
+        query.add_query(hickory_proto::op::Query::query(
+            hickory_proto::rr::Name::from_ascii(host)?,
+            RecordType::A,
+        ));
+        dns.send_to(&query.to_vec()?, proxy.endpoints().dns).await?;
+        let mut buffer = [0; 4096];
+        let count = tokio::time::timeout(Duration::from_secs(1), dns.recv(&mut buffer)).await??;
+        assert_eq!(
+            Message::from_vec(&buffer[..count])?.response_code(),
+            expected
+        );
+    }
     proxy.shutdown().await?;
     assert!(
         proxy_client
@@ -1153,6 +1254,7 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
         .proxy(host_ip()?, "live-two", resolver.clone())
         .await?;
     let request = |id: &str| SandboxRequest {
+        policy: policy(),
         sandbox_id: id.into(),
         scope: crate::ResourceScope::Global,
         provider_state: None,
@@ -1162,7 +1264,6 @@ async fn firecracker_transparent_egress_live() -> Result<()> {
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
-            policy: policy(),
             default_workdir: "/home/exo/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -1314,6 +1415,7 @@ async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
         network_policy.networking = SandboxNetworkPolicy::Unrestricted;
     }
     let request = SandboxRequest {
+        policy: network_policy,
         sandbox_id: "managed-egress-live".into(),
         scope: ResourceScope::Thread {
             agent_id: crate::Uuid7::now(),
@@ -1326,7 +1428,6 @@ async fn managed_firecracker_egress(unrestricted: bool) -> Result<()> {
             resources: SandboxResourceShape::new(1, 512),
             mounts: vec![],
             durable_file_systems: vec![],
-            policy: network_policy,
             default_workdir: "/home/exo/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -1384,6 +1485,21 @@ print('PASS automatic placeholders, Python and curl trust, native transport, DNS
 "#)).await?;
         ensure!(check.ok, "managed check failed: {}", check.stderr);
         println!("{}", check.stdout);
+        let process = handle.start_process(&command("import urllib.request; r = urllib.request.build_opener(urllib.request.ProxyHandler({})).open('https://api.test/sse'); print(r.readline().decode().strip(), flush=True); r.read()".into())).await?;
+        let mut output = tokio::io::BufReader::new(process.stdout.compat());
+        let mut line = String::new();
+        tokio::io::AsyncBufReadExt::read_line(&mut output, &mut line).await?;
+        ensure!(line == "first\n", "stream did not start: {line:?}");
+        let mut changed = request.clone();
+        changed.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.test".into()] };
+        ensure!(backend.acquire(changed.clone()).await?.id() == id, "policy update replaced VM");
+        line.clear();
+        ensure!(tokio::time::timeout(Duration::from_millis(50), tokio::io::AsyncBufReadExt::read_line(&mut output, &mut line)).await.is_err(), "overlapping download was interrupted");
+        changed.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["public.test".into()] };
+        backend.acquire(changed).await?;
+        ensure!(tokio::time::timeout(Duration::from_secs(5), process.wait).await?? != 0, "removed host download continued");
+        backend.acquire(request.clone()).await?;
+        println!("PASS overlapping policy retains download; removed host closes it on the same VM");
         *resolver.value.write().await = Some("canary-v2".into());
         let check = handle.exec(&run("assert get() == (200, 'authenticated-v2')\nprint('PASS rotation')")).await?;
         ensure!(check.ok, "rotation failed: {}", check.stderr);
@@ -1420,6 +1536,15 @@ print('PASS reconnect retains VM files and rejects the previous placeholder')
         let check = new_handle.exec(&run("assert get()[0] == 502\nprint('PASS revocation')")).await?;
         ensure!(check.ok, "revocation failed: {}", check.stderr);
         println!("{}", check.stdout);
+        *resolver.value.write().await = Some("canary-v2".into());
+        let snapshot = replacement.suspend(request.clone(), crate::SnapshotKind::Filesystem).await?;
+        let mut restored_request = request.clone();
+        restored_request.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.test".into()] };
+        let restored = replacement.acquire_from_snapshot(restored_request, snapshot.clone()).await?;
+        let check = restored.exec(&run("assert pathlib.Path('egress-retained').read_text() == 'keep this'\nassert get() == (200, 'authenticated-v2')\nprint('PASS suspend/restore retains files and applies changed network permissions')")).await?;
+        ensure!(check.ok, "restore with changed policy failed: {}", check.stderr);
+        println!("{}", check.stdout);
+        replacement.delete_snapshot(snapshot).await?;
         replacement.terminate(request.clone()).await?;
         Ok(())
     }.await;
@@ -2397,6 +2522,7 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
     let backend = make_backend();
     let image = backend.resolve_image(&image).await?.image;
     let request = SandboxRequest {
+        policy: config,
         sandbox_id: format!("smolvm-proxy-{}", uuid::Uuid::new_v4()),
         scope: identity("smolvm-proxy").scope,
         provider_state: None,
@@ -2406,7 +2532,6 @@ async fn smolvm_proxy_live(with_gh: bool) -> Result<()> {
             resources: SandboxResourceShape::new(2, 1024),
             mounts: Vec::new(),
             durable_file_systems: Vec::new(),
-            policy: config,
             default_workdir: "/".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -2456,6 +2581,27 @@ gh api repos/org/repo/pulls/10/reviews --jq '.[0].body'
                 output.stdout,
                 output.stderr
             );
+        }
+        if !with_gh {
+            use futures::io::{AsyncBufReadExt, BufReader};
+            let mut streaming = command.clone();
+            streaming.argv[2] = "curl --noproxy '*' --resolve api.test:443:93.184.216.34 -NfsS --max-time 20 https://api.test/sse".into();
+            let process = handle.start_process(&streaming).await?;
+            let mut stdout = BufReader::new(process.stdout);
+            let mut line = String::new();
+            stdout.read_line(&mut line).await?;
+            ensure!(line == "first\n", "stream did not start: {line:?}");
+            let mut changed = request.clone();
+            changed.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.test".into()] };
+            let retained = backend.acquire(changed.clone()).await?;
+            ensure!(retained.id() == handle.id(), "policy update replaced the VM");
+            line.clear();
+            ensure!(tokio::time::timeout(Duration::from_millis(50), stdout.read_line(&mut line)).await.is_err(), "overlapping download was interrupted");
+            changed.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["public.test".into()] };
+            backend.acquire(changed).await?;
+            ensure!(tokio::time::timeout(Duration::from_secs(5), process.wait).await?? != 0, "removed host download continued");
+            backend.acquire(request.clone()).await?;
+            ensure!(handle.exec(&command).await?.ok, "restored permissions did not apply to the same VM");
         }
         #[cfg(unix)]
         {
@@ -2610,6 +2756,7 @@ async fn firecracker_template_egress_resources(codex_image: Option<String>) -> R
         .await?
         .with_egress(Some(resolver.clone()), Arc::new(upstream.config.clone()));
     let request = SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: "pristine-template".into(),
         scope: ResourceScope::Global,
         provider_state: None,
@@ -2619,7 +2766,6 @@ async fn firecracker_template_egress_resources(codex_image: Option<String>) -> R
             mounts: vec![],
             durable_file_systems: vec![],
             tcp_ports: vec![8765],
-            policy: SandboxNetworkPolicy::Disabled.into(),
             default_workdir: "/home/exo/workspace".into(),
         },
         lifecycle: SandboxLifecycleConfig {
@@ -2684,9 +2830,9 @@ if os.environ['EXO_TEST_CODEX'] == 'true':
             let mut allocation = request.clone();
             allocation.sandbox_id = format!("template-clone-{index}");
             allocation.scope = ResourceScope::Thread { agent_id: agent, thread_id: thread };
-            allocation.spec.policy = policy();
-            allocation.spec.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
-            allocation.spec.policy.credentials[0].networking = CredentialNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.policy = policy();
+            allocation.policy.networking = SandboxNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
+            allocation.policy.credentials[0].networking = CredentialNetworkPolicy::Limited { allowed_hosts: vec!["api.github.com".into()] };
             allocation.spec.mounts = mounts.into_iter().map(|mount| SandboxMount {
                 host_path: mount.host_path.into(), guest_path: mount.mount_path, internal: true,
                 access: SandboxMountAccess::ReadWrite,
@@ -2814,12 +2960,13 @@ async fn native_tls_uses_the_external_proxys_identity_and_credential_resolver() 
             password: password.into(),
             ca_pem: authorizer.ca_pem.clone(),
             environment: HashMap::from([("TEST_API_KEY".into(), placeholder.clone())]),
+            credential_authorizations: HashMap::new(),
         };
         let mut policy = policy();
         if !credentials {
             policy.credentials.clear();
         }
-        let state = State::with_external_proxy(identity("worker"), policy, config)?;
+        let state = State::with_external_proxy(identity("worker"), policy.clone(), config.clone())?;
         assert!(state.resolver.is_none());
         let transport = Arc::new(
             LocalEgressTransport::with_config(
@@ -2838,10 +2985,7 @@ async fn native_tls_uses_the_external_proxys_identity_and_credential_resolver() 
             EgressProxy::start_with_transport(transport, state, CancellationToken::new()).await?;
         proxy.bind_source(host_ip()?).await?;
         assert_eq!(proxy.ca_pem(), authorizer.ca_pem);
-        assert_eq!(
-            proxy.environment().contains_key("TEST_API_KEY"),
-            credentials
-        );
+        assert_eq!(proxy.environment().get("TEST_API_KEY"), Some(&placeholder));
         let mut request = client(&proxy)?
             .get("https://api.test/auth")
             .header("connection", "close");
@@ -2854,9 +2998,45 @@ async fn native_tls_uses_the_external_proxys_identity_and_credential_resolver() 
         } else {
             assert!(response.is_err());
         }
+        if password == "first" && credentials {
+            assert_eq!(upstream.connections.load(Ordering::SeqCst), 1);
+            let client = client(&proxy)?;
+            let mut authenticated = client
+                .get("https://api.test/sse")
+                .bearer_auth(&placeholder)
+                .send()
+                .await?;
+            let mut package = client.get("https://public.test/sse").send().await?;
+            assert_eq!(authenticated.chunk().await?.unwrap(), "first\n");
+            assert_eq!(package.chunk().await?.unwrap(), "first\n");
+            let mut next = config;
+            next.credential_authorizations
+                .insert("test-credential".into(), "next-user".into());
+            let state = State::with_external_proxy(identity("worker"), policy.clone(), next)?;
+            proxy.update(state, &policy).await?;
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), authenticated.chunk())
+                    .await?
+                    .is_err()
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), package.chunk())
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                client
+                    .get("https://api.test/auth")
+                    .bearer_auth(&placeholder)
+                    .send()
+                    .await?
+                    .text()
+                    .await?,
+                "authenticated-v1"
+            );
+        }
         proxy.shutdown().await?;
     }
-    assert_eq!(upstream.connections.load(Ordering::SeqCst), 1);
     cancel.cancel();
     server.await??;
     Ok(())

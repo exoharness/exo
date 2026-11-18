@@ -1,6 +1,7 @@
 use super::super::capture_store;
 use super::super::snapshot_lease::SnapshotLease;
 use super::*;
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 
 const MAX_ALLOCATED: u64 = 64 * 1024 * 1024 * 1024;

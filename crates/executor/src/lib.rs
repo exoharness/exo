@@ -52,8 +52,8 @@ pub use exoharness::{
     DEFAULT_FIRECRACKER_BINARY, DEFAULT_FIRECRACKER_INITRAMFS, DEFAULT_FIRECRACKER_JAILER,
     DEFAULT_FIRECRACKER_KERNEL, DEFAULT_FIRECRACKER_STATE_ROOT, DEFAULT_IMAGE_SIZE_GIB,
     DEFAULT_JAILER_UID_BASE, DEFAULT_MEMORY_MIB, DEFAULT_NETWORK_BYTES_PER_SECOND,
-    DEFAULT_VCPU_COUNT, DEFAULT_WORKSPACE_SIZE_GIB, FirecrackerConfig, FirecrackerLimaConfig,
-    run_firecracker_bridge,
+    DEFAULT_SNAPSHOT_BUDGET_BYTES, DEFAULT_VCPU_COUNT, DEFAULT_WORKSPACE_SIZE_GIB,
+    FirecrackerConfig, FirecrackerLimaConfig, run_firecracker_bridge,
 };
 pub use harness_config::{find_agent_config, load_agent_config, load_conversation_config};
 pub use harness_executor::{ExecutorStreamMode, HarnessExecutor, Runtime};

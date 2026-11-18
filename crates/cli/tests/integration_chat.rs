@@ -170,7 +170,7 @@ async fn conversation_send_round_trips_through_real_sandbox_and_mocked_openai() 
             "run",
             "test-agent",
             "first",
-            "uname -s; uname -r",
+            "file=$(mktemp /var/tmp/exo-io.XXXXXX) && dd if=/dev/zero of=\"$file\" bs=1M count=1024 conv=fsync >/dev/null && rm \"$file\" && uname -s && uname -r",
         ],
         &root,
         &xdg,

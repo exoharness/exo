@@ -21,32 +21,34 @@ case "$sandbox_backend" in
     printf 'SMOLVM_BIN=%s/smolvm\n' "$runtime_dir" >> "$GITHUB_ENV"
     ;;
   firecracker)
-    # Pinned bundle documented in support/firecracker/README.md. Build the guest
-    # from this checkout so the host/guest protocol versions always match.
+    # Pinned bundle from support/firecracker/bundle.env. Build the guest from
+    # this checkout so the host/guest protocol versions always match.
+    source support/firecracker/bundle.env
     sudo apt-get update
     sudo apt-get install -y --no-install-recommends cpio e2fsprogs iproute2 iptables nftables xfsprogs
     sudo swapoff --all
     sudo modprobe vhost_vsock
     sudo sysctl -w net.ipv4.ip_forward=1
+    release="v${FIRECRACKER_VERSION}-x86_64"
     archive="$artifact_dir/firecracker.tgz"
     curl --fail --location --retry 3 --max-time 120 \
-      https://github.com/firecracker-microvm/firecracker/releases/download/v1.16.2/firecracker-v1.16.2-x86_64.tgz \
+      "https://github.com/firecracker-microvm/firecracker/releases/download/v${FIRECRACKER_VERSION}/firecracker-${release}.tgz" \
       --output "$archive"
-    printf '32e3cdcd4081f91fe2b024a266f57dcb3b4e5fec5033e0cb22467ad7f7820bda  %s\n' "$archive" | sha256sum --check --strict
+    printf '%s  %s\n' "$FIRECRACKER_X86_64_SHA256" "$archive" | sha256sum --check --strict
     tar -xzf "$archive" -C "$artifact_dir"
     # Hosted runners allow user writes under /usr/local/bin. Firecracker's
     # trusted artifacts require root ownership all the way to the filesystem root.
     runtime_dir=/var/lib/exo/firecracker/bin
     sudo install -d -o root -g root -m 0755 "$runtime_dir"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.16.2-x86_64/firecracker-v1.16.2-x86_64" "$runtime_dir/firecracker"
+      "$artifact_dir/release-${release}/firecracker-${release}" "$runtime_dir/firecracker"
     sudo install -o root -g root -m 0755 \
-      "$artifact_dir/release-v1.16.2-x86_64/jailer-v1.16.2-x86_64" "$runtime_dir/jailer"
+      "$artifact_dir/release-${release}/jailer-${release}" "$runtime_dir/jailer"
     kernel="$artifact_dir/vmlinux"
     curl --fail --location --retry 3 --max-time 120 \
-      https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260812-48f1b9fb52e9-0/x86_64/vmlinux-6.18.39 \
+      "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/${FIRECRACKER_KERNEL_BUILD}/x86_64/vmlinux-${FIRECRACKER_KERNEL_VERSION}" \
       --output "$kernel"
-    printf '3fde810177aaf9d9a465d00e915924a7a6e2bdd34869d7fcd33c6af73b45e12d  %s\n' "$kernel" | sha256sum --check --strict
+    printf '%s  %s\n' "$FIRECRACKER_KERNEL_X86_64_SHA256" "$kernel" | sha256sum --check --strict
     sudo install -d -o root -g root -m 0755 /var/lib/exo/firecracker
     sudo truncate -s 16G /var/lib/exo/firecracker/test-state.img
     sudo mkfs.xfs -f /var/lib/exo/firecracker/test-state.img

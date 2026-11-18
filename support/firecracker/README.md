@@ -18,22 +18,19 @@ as a release archive. No registry service is required beyond wherever that
 immutable image or archive is already published.
 
 Build the initramfs from the exact Exo source revision used by the host's
-`exoharness` dependency. Pin the Firecracker release and kernel build for each
-architecture, verify downloaded files before installing them, and record the
-resulting initramfs checksum after building it. For example, this is a concrete
-bundle known to work:
-
-| Asset                                                  | Version or build                         | x86_64 SHA-256                                                     | aarch64 SHA-256                                                    |
-| ------------------------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| Firecracker release archive (includes matching jailer) | 1.16.2                                   | `32e3cdcd4081f91fe2b024a266f57dcb3b4e5fec5033e0cb22467ad7f7820bda` | `751365040ca3dde7616c5a1d97cc1304674fae469ce02993104eab22f5961950` |
-| Firecracker CI kernel                                  | 6.18.39, build `20260812-48f1b9fb52e9-0` | `3fde810177aaf9d9a465d00e915924a7a6e2bdd34869d7fcd33c6af73b45e12d` | `92b6c36b3ea25328f32f7b09509989a0f653aa692afa745fde5274c349b6405e` |
-| Exo guest initramfs                                    | same Exo revision as the host            | record after building                                              | record after building                                              |
+`exoharness` dependency. [`bundle.env`](bundle.env) pins the Firecracker
+release and CI kernel build known to work with that revision, with SHA-256s for
+the release archive (which includes the matching jailer) and `vmlinux` on
+x86_64 and aarch64. It is plain `KEY=value` lines, so CI and deployment images
+can source it from the same Exo checkout they build the initramfs from. Verify
+downloaded files against it before installing them, and record the resulting
+initramfs checksum after building it.
 
 Filesystem capture requires Firecracker 1.16.2 or newer because
 [upstream #6100](https://github.com/firecracker-microvm/firecracker/pull/6100)
-fixes vsock connections hanging after bare pause/resume. Upgrading from
-1.16.1 also changes the RAM snapshot format; existing full snapshots must
-be recreated under the new runtime. Filesystem captures cold-boot and do
+fixes vsock connections hanging after bare pause/resume. Firecracker 1.16.2
+and 1.17.0 each change the RAM snapshot format, so existing full snapshots
+must be recreated after either upgrade. Filesystem captures cold-boot and do
 not depend on the RAM snapshot format.
 
 The host verifies that Firecracker and jailer report the same version, and the
@@ -129,10 +126,14 @@ Cgroup v2 and a writable `/dev/shm` tmpfs are mounted inside the guest.
 Standard `/dev/fd` and stdio links are provided. Boot moves the
 merged filesystem over the initramfs root so container exec joins the correct
 mount namespace. The guest also gets a hostname and localhost mappings.
-The host cgroup allows 1 GiB above guest RAM for VMM, kernel, and block-device
-cache memory, with reclaim starting at guest RAM plus 256 MiB. OCI images do
-not need Python, a shell, `ip`, `mount`, `setpriv`, or other boot-time
-utilities.
+The host cgroup limits each VM to guest RAM plus 10%, rounded up to whole
+MiB, including VMM, kernel, and block-device cache memory. Configure the
+percentage with `FirecrackerConfig.memory_overhead_percent`,
+`--firecracker-memory-overhead-percent`, or
+`EXO_FIRECRACKER_MEMORY_OVERHEAD_PERCENT`. Host admission can use
+`FirecrackerConfig::memory_footprint_mib` to apply the same calculation.
+OCI images do not need Python, a shell, `ip`, `mount`, `setpriv`, or other
+boot-time utilities.
 
 Registry credentials come from the Docker credential configuration and helper
 for the user running Exo. Credentials are selected for the exact registry
