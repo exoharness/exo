@@ -215,6 +215,9 @@ pub struct FirecrackerConfig {
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L23-L24
     /// https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md#L71-L72
     pub max_machines: Option<NonZeroUsize>,
+    /// Host memory overhead as a percentage of guest RAM. Defaults to 10%.
+    #[serde(default = "default_memory_overhead_percent")]
+    pub memory_overhead_percent: u8,
 }
 
 impl Default for FirecrackerConfig {
@@ -239,8 +242,21 @@ impl Default for FirecrackerConfig {
             allowed_registries: Vec::new(),
             network_bytes_per_second: DEFAULT_NETWORK_BYTES_PER_SECOND,
             max_machines: None,
+            memory_overhead_percent: default_memory_overhead_percent(),
         }
     }
+}
+
+impl FirecrackerConfig {
+    /// Total host memory required for guest RAM and its configured overhead.
+    pub fn memory_footprint_mib(&self, guest_memory_mib: u32) -> u64 {
+        let guest = u64::from(guest_memory_mib);
+        guest + (guest * u64::from(self.memory_overhead_percent)).div_ceil(100)
+    }
+}
+
+fn default_memory_overhead_percent() -> u8 {
+    10
 }
 
 fn default_allow_guest_root() -> bool {
@@ -4343,18 +4359,7 @@ fn spawn_jailed_firecracker(
     firecracker_arguments: &[&str],
 ) -> Result<()> {
     let host_uid = jailer_uid(config, record)?;
-    let memory_max = u64::from(
-        record
-            .runtime
-            .memory_mib
-            .checked_add(1024)
-            .context("Firecracker cgroup memory limit overflow")?,
-    ) * 1024
-        * 1024;
-    // Guest RAM is anonymous memory in the VMM. Block-device page cache and
-    // kernel allocations also count against this cgroup. Start reclaim before
-    // the hard limit, with room for disk writeback to complete at full guest RAM.
-    let memory_high = (u64::from(record.runtime.memory_mib) + 256) * 1024 * 1024;
+    let memory_max = config.memory_footprint_mib(record.runtime.memory_mib) * 1024 * 1024;
     let cpu_max = format!("{} 100000", u32::from(record.runtime.vcpu_count) * 100_000);
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
@@ -4383,7 +4388,7 @@ fn spawn_jailed_firecracker(
         .arg("--cgroup")
         .arg(format!("memory.max={memory_max}"))
         .arg("--cgroup")
-        .arg(format!("memory.high={memory_high}"))
+        .arg("memory.high=max")
         .arg("--cgroup")
         .arg(format!("cpu.max={cpu_max}"));
     // The API socket path is injected here, next to the constant that
