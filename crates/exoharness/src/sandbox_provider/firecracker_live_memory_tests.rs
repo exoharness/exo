@@ -867,7 +867,8 @@ print("verified")'
                 .parse::<u64>()?;
             let events = fs::read_to_string(cgroup.join("memory.events"))?;
             assert!(current < hard, "balloon memory exceeds host reservation");
-            let reservation = backend.host_resource_reservation(request.spec.resources.unwrap())?;
+            let reservation =
+                backend.host_resource_reservation(request.spec.resources.unwrap(), None)?;
             assert_eq!(hard, u64::from(reservation.memory_mib.get()) * 1024 * 1024);
             assert_eq!(
                 fs::read_to_string(cgroup.join("memory.swap.max"))?.trim(),

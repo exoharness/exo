@@ -182,7 +182,7 @@ async fn live_cpu_and_memory_grow_from_small_request_to_node_capacity() -> Resul
             fs::read_to_string(cgroup.join("cpu.max"))?.trim(),
             balloon::cpu_quota(capacity.vcpu_count.get())
         );
-        let reservation = backend.host_resource_reservation(capacity)?;
+        let reservation = backend.host_resource_reservation(capacity, None)?;
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.max"))?.trim(),
             (u64::from(reservation.memory_mib.get()) * 1024 * 1024).to_string()

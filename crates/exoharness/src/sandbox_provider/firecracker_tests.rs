@@ -1206,10 +1206,78 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
     assert_eq!(persisted.runtime.memory_mib, 4096);
     assert_eq!(persisted.spec_hash, "spec");
     assert_eq!(balloon::grant(&persisted)?, 8192);
+    let payload = FirecrackerSnapshotManifest {
+        format_version: SNAPSHOT_FORMAT_VERSION,
+        resource_grant: persisted.resource_grant,
+        template: false,
+        template_key: "a".repeat(64),
+        spec_hash: persisted.spec_hash.clone(),
+        source_network_slot: persisted.slot,
+        runtime: persisted.runtime.clone(),
+    }
+    .into_payload()?;
+    let backend = FirecrackerSandboxBackend {
+        external_proxy: None,
+        shared,
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    assert_eq!(
+        backend.host_resource_reservation(request.spec.resources.unwrap(), Some(&payload))?,
+        backend.host_resource_reservation(balloon::resources(&persisted)?, None)?,
+    );
     assert_eq!(
         fs::metadata(manifest_path(directory.path(), &record.machine_id))?.mode() & 0o777,
         0o600
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reapers_skip_busy_families_and_revisit_them_after_release() -> Result<()> {
+    for stale in [false, true] {
+        let directory = tempfile::tempdir()?;
+        for name in ["manifests", "leases", "slots"] {
+            fs::create_dir(directory.path().join(name))?;
+        }
+        let shared = test_shared(
+            FirecrackerConfig {
+                state_root: directory.path().into(),
+                max_machines: NonZeroUsize::new(4),
+                ..Default::default()
+            },
+            HashMap::new(),
+        )?;
+        let mut ids = Vec::new();
+        for sandbox in ["busy", "idle"] {
+            let mut request = FirecrackerRequest::from(test_request(sandbox, 512));
+            request.lifecycle.idle_ttl = Some(Duration::ZERO);
+            let hash = sandbox_spec_hash(&request.spec);
+            let id = machine_id(sandbox, &hash);
+            shared
+                .new_machine_record(&request, &id, &hash, None, None)
+                .await?;
+            ids.push(id);
+        }
+        let backend = FirecrackerSandboxBackend {
+            external_proxy: None,
+            shared,
+            egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+        };
+        let busy = backend.shared.lifecycle_locks.lock_sandbox("busy").await;
+        let reap = || async {
+            if stale {
+                backend.reap_stale_machines().await
+            } else {
+                backend.reap_expired_machines().await
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), reap()).await??;
+        assert!(backend.shared.load_machine_record(&ids[0]).await?.is_some());
+        assert!(backend.shared.load_machine_record(&ids[1]).await?.is_none());
+        drop(busy);
+        reap().await?;
+        assert!(backend.shared.load_machine_record(&ids[0]).await?.is_none());
+    }
     Ok(())
 }
 

@@ -101,6 +101,10 @@ struct FilesystemManifest {
     disk_sizes: Vec<u64>,
 }
 
+pub(super) fn resource_grant(payload: &SnapshotPayload) -> Result<Option<SandboxResourceShape>> {
+    Ok(FilesystemManifest::from_payload(payload)?.resource_grant)
+}
+
 impl FilesystemManifest {
     fn from_payload(payload: &SnapshotPayload) -> Result<Self> {
         ensure!(

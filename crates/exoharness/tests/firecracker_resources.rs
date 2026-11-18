@@ -97,6 +97,13 @@ async fn firecracker_memory_growth_retries_and_restores() -> anyhow::Result<()> 
         process.stdout.read_exact(&mut ready).await?;
         assert_eq!(&ready, b"ready");
         let expanded = SandboxResourceShape::new(2, 1024).unwrap();
+        let expanded_reservation = backend.host_resource_reservation(expanded, None)?;
+        assert!(
+            expanded_reservation.memory_mib
+                > backend
+                    .host_resource_reservation(request.spec.resources.unwrap(), None)?
+                    .memory_mib
+        );
         for _ in 0..2 {
             assert!(matches!(handle.expand_resources(expanded).await?,
                 exoharness::SandboxResourceUpdate::Applied { grant } if grant == expanded));
@@ -145,6 +152,12 @@ print('verified-768-MiB')
             } else {
                 backend.suspend(request.clone(), kind).await?
             };
+            assert_eq!(
+                backend
+                    .host_resource_reservation(request.spec.resources.unwrap(), Some(&snapshot))?,
+                expanded_reservation,
+                "{kind:?} restore must reserve the saved grant before boot"
+            );
             handle = backend
                 .acquire_from_snapshot(request.clone(), snapshot.clone())
                 .await?;

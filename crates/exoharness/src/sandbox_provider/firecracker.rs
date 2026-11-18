@@ -751,6 +751,12 @@ impl MachineLifecycleLocks {
         self.lock_key(machine_lifecycle_key(machine_id)).await
     }
 
+    fn try_lock_machine(&self, machine_id: &str) -> Option<OwnedMutexGuard<()>> {
+        self.mutex_for_key(machine_lifecycle_key(machine_id))
+            .try_lock_owned()
+            .ok()
+    }
+
     async fn lock_sandbox(&self, sandbox_id: &str) -> OwnedMutexGuard<()> {
         self.lock_key(sandbox_lifecycle_key(sandbox_id)).await
     }
@@ -776,21 +782,22 @@ impl MachineLifecycleLocks {
     }
 
     async fn lock_key(&self, key: String) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self
-                .locks
-                .lock()
-                .expect("Firecracker lifecycle lock map must not be poisoned");
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-                lock
-            } else {
-                let lock = Arc::new(Mutex::new(()));
-                locks.insert(key, Arc::downgrade(&lock));
-                lock
-            }
-        };
-        lock.lock_owned().await
+        self.mutex_for_key(key).lock_owned().await
+    }
+
+    fn mutex_for_key(&self, key: String) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .locks
+            .lock()
+            .expect("Firecracker lifecycle lock map must not be poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(key, Arc::downgrade(&lock));
+            lock
+        }
     }
 }
 
@@ -1168,7 +1175,10 @@ impl FirecrackerSandboxBackend {
         .await
         .context("joining Firecracker stale-machine scan")??;
         for machine_id in capacity.dead_machine_ids {
-            let _lifecycle_guard = self.shared.lifecycle_locks.lock_machine(&machine_id).await;
+            let Some(_lifecycle_guard) = self.shared.lifecycle_locks.try_lock_machine(&machine_id)
+            else {
+                continue;
+            };
             self.shared.cleanup_stale_machine(&machine_id).await?;
         }
         Ok(())
@@ -1198,7 +1208,10 @@ impl FirecrackerSandboxBackend {
 
         let expired = expired.into_iter().collect::<HashSet<_>>();
         for machine_id in expired {
-            let _lifecycle_guard = self.shared.lifecycle_locks.lock_machine(&machine_id).await;
+            let Some(_lifecycle_guard) = self.shared.lifecycle_locks.try_lock_machine(&machine_id)
+            else {
+                continue;
+            };
             let state_root = self.shared.config.state_root.clone();
             let machine_id_for_check = machine_id.clone();
             let still_expired = tokio::task::spawn_blocking(move || {
@@ -1704,7 +1717,25 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     fn host_resource_reservation(
         &self,
         resources: SandboxResourceShape,
+        snapshot: Option<&SnapshotPayload>,
     ) -> Result<SandboxResourceShape> {
+        let saved = match snapshot {
+            Some(payload) if payload.format == SnapshotFormat::FirecrackerFilesystemRef => {
+                filesystem::resource_grant(payload)?
+            }
+            Some(payload) => {
+                let manifest = FirecrackerSnapshotManifest::from_payload(payload.clone())?;
+                Some(balloon::validate_grant(
+                    &manifest.runtime,
+                    manifest.resource_grant,
+                )?)
+            }
+            None => None,
+        };
+        let resources = saved.map_or(resources, |grant| SandboxResourceShape {
+            vcpu_count: grant.vcpu_count.max(resources.vcpu_count),
+            memory_mib: grant.memory_mib.max(resources.memory_mib),
+        });
         SandboxResourceShape::new(
             resources.vcpu_count.get(),
             u32::try_from(
@@ -2415,12 +2446,6 @@ impl Shared {
         let reusing_existing_machine = existing
             .as_ref()
             .is_some_and(|record| record.spec_hash == spec_hash && record.runtime == runtime);
-        let memory = if reusing_existing_machine {
-            balloon::grant(existing.as_ref().context("missing existing allocation")?)?
-        } else {
-            runtime.memory_mib
-        };
-        let deadline = balloon::deadline(memory);
         if let Some(record) = existing.as_ref() {
             if record.spec_hash != spec_hash || record.runtime != runtime {
                 self.cleanup_machine(machine_id, true).await?;
@@ -2456,7 +2481,7 @@ impl Shared {
                     // TODO: Reapply memory limits on warm adoption even when nothing grew.
                     // Changing memory_overhead_percent across restarts can leave memory.max
                     // inconsistent with host_resource_reservation.
-                    self.initialize_resources(&machine.record, deadline).await?;
+                    self.initialize_resources(&machine.record).await?;
                     return Ok(machine);
                 }
                 self.host_fingerprint
@@ -2495,7 +2520,7 @@ impl Shared {
             GuestClient::new(Arc::clone(self), machine.vsock_path.clone())
                 .sync_clock()
                 .await?;
-            self.initialize_resources(&machine.record, deadline).await?;
+            self.initialize_resources(&machine.record).await?;
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -2546,13 +2571,10 @@ impl Shared {
         Ok(machine)
     }
 
-    async fn initialize_resources(
-        self: &Arc<Self>,
-        record: &MachineRecord,
-        deadline: Instant,
-    ) -> Result<()> {
+    async fn initialize_resources(self: &Arc<Self>, record: &MachineRecord) -> Result<()> {
         if record.runtime.growth_capacity.is_some() {
             let resources = balloon::resources(record)?;
+            let deadline = balloon::deadline(resources.memory_mib.get());
             let config = self.config.clone();
             let record_for_limits = record.clone();
             let span = tracing::Span::current();

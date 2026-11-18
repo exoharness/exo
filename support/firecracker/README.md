@@ -183,8 +183,11 @@ and completes only after the guest confirms the requested online count.
 Capacity is bounded by the jailer allocation, KVM, and Firecracker's 32-vCPU maximum.
 Existing VMs and RAM snapshots retain their boot geometry when detected capacity changes.
 
-Call `host_resource_reservation` on the backend before acquisition or growth.
+Call `host_resource_reservation(resources, None)` before acquisition or growth.
 It returns the full host reservation using `memory_overhead_percent` (10% by default).
+Before restore, pass `Some(&snapshot)` to reserve at least its saved CPU and memory
+grant, even when the original request was smaller. Keep that original request
+shape when restoring; the quote does not change snapshot identity or resize it.
 The cgroup hard limit enforces that reservation, `memory.high` remains unlimited,
 and swap and automatic OOM balloon deflation are disabled. A guest can consume
 the whole headroom; the balloon's page counts are guest-reported.
@@ -203,8 +206,10 @@ Lease renewal updates existing leases without waiting for the lifecycle lock, so
 exec stays responsive during growth. This also applies when live growth is
 disabled; a deleted lease is never recreated by an exec.
 
-One convergence deadline covers hotplug and balloon adjustment: 30 seconds plus
-one second per 128 MiB of the target grant. Each API wait is capped at the lesser
+After boot and clock synchronization, one convergence deadline covers memory
+adjustment and CPU onlining: 30 seconds plus one second per 128 MiB of the target
+grant, capped at two minutes. The reaper skips busy VMs so one stalled guest does
+not delay cleanup of others. Each API wait is capped at the lesser
 of five seconds and the remaining budget; convergence is polled every 100 ms.
 Device page counts are read on demand; guest statistics are polled once an hour.
 

@@ -219,7 +219,9 @@ pub(super) fn configuration(record: &MachineRecord) -> Result<Option<Configurati
 }
 
 pub(super) fn deadline(memory_mib: u32) -> Instant {
-    Instant::now() + Duration::from_secs(30 + u64::from(memory_mib).div_ceil(128))
+    // Bound how long an unresponsive guest can delay other lifecycle operations.
+    let seconds = (30 + u64::from(memory_mib).div_ceil(128)).min(120);
+    Instant::now() + Duration::from_secs(seconds)
 }
 
 pub(super) fn api_timeout(deadline: Instant) -> Result<Duration> {

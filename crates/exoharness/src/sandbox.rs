@@ -438,10 +438,13 @@ pub struct ResolvedSandboxImage {
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
     /// Host capacity to reserve for a requested guest grant, including provider
-    /// overhead. Query this before acquisition or increasing a live grant.
+    /// overhead. Query this before acquisition, restore or increasing a live
+    /// grant. For restore, pass the snapshot to include its saved grant without
+    /// changing the request's original resource shape.
     fn host_resource_reservation(
         &self,
         _resources: crate::SandboxResourceShape,
+        _snapshot: Option<&SnapshotPayload>,
     ) -> Result<crate::SandboxResourceShape> {
         bail!("sandbox backend does not report host resource reservations")
     }
