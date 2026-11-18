@@ -2219,6 +2219,9 @@ impl FirecrackerSandboxHandle {
                 .into());
             }
         }
+        // TODO: Retain lifecycle ownership through blocking capture after cancellation.
+        // A queued capture can outlive this guard, letting growth make its saved grant
+        // and disk-space estimate stale.
         let _lifecycle_guard = self
             .shared
             .lifecycle_locks
@@ -2448,6 +2451,9 @@ impl Shared {
                         .await??;
                     }
 
+                    // TODO: Reapply memory limits on warm adoption even when nothing grew.
+                    // Changing memory_overhead_percent across restarts can leave memory.max
+                    // inconsistent with host_resource_reservation.
                     self.initialize_resources(&machine.record, deadline).await?;
                     return Ok(machine);
                 }

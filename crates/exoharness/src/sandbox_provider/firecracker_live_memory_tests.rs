@@ -767,30 +767,40 @@ print("wrote-and-verified-6-GiB")'
 }
 
 #[tokio::test]
-#[ignore = "requires root, KVM, Python guest image, XFS TMPDIR"]
+#[ignore = "requires root, KVM, Python guest image, and XFS TMPDIR"]
 async fn live_memory_small_grant_is_writable() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("mem-").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
     let mut config = config(temp.path(), &image);
     config.network_device_policy = FirecrackerNetworkDevicePolicy::EnabledSandboxes;
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
-    let mut request = native_request(&config, "small-grant", &image)?;
-    request.spec.resources = SandboxResourceShape::new(1, 512);
     let result: Result<()> = async {
-        let handle = backend.acquire(request.clone()).await?;
-        let record = allocation(&backend, &request).await?;
-        let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
-            .await?
-            .trim()
-            .parse::<u64>()?;
-        assert!(
-            available >= 256 * 1024,
-            "insufficient usable memory: {available} KiB"
-        );
-
-        let mut workload = handle
-            .start_process(&command(
-                r#"python3 -u -c '
+        for memory in [384, 512, 2051] {
+            let mut request = native_request(&config, &format!("shape-{memory}"), &image)?;
+            request.spec.resources = SandboxResourceShape::new(1, memory);
+            let handle = backend.acquire(request.clone()).await?;
+            let record = allocation(&backend, &request).await?;
+            assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
+            let mut capacity = backend
+                .shared
+                .host_fingerprint
+                .growth_capacity
+                .unwrap()
+                .resources;
+            capacity.vcpu_count = request.spec.resources.unwrap().vcpu_count;
+            assert_eq!(handle.live_resource_ceiling(), Some(capacity));
+            assert_balloon(&config, &record, memory % 2)?;
+            let available = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
+                .await?
+                .trim()
+                .parse::<u64>()?;
+            assert!(
+                available >= u64::from(memory) * 512,
+                "insufficient usable memory for {memory} MiB grant: {available} KiB"
+            );
+            let mut workload = handle
+                .start_process(&command(
+                    r#"python3 -u -c '
 import mmap,sys
 m=mmap.mmap(-1,192*1024**2)
 m[::4096]=bytes([173])*(len(m)//4096)
@@ -799,52 +809,44 @@ sys.stdin.readline()
 assert m[::4096]==bytes([173])*(len(m)//4096)
 print("verified")'
 "#,
-            ))
-            .await?;
-        let mut ready = [0; 6];
-        workload.stdout.read_exact(&mut ready).await?;
-        assert_eq!(&ready, b"ready\n");
-        let cgroup = firecracker_cgroup_dir(&config, &record.machine_id);
-        assert_eq!(
-            fs::read_to_string(cgroup.join("memory.high"))?.trim(),
-            "max"
-        );
-        let hard = fs::read_to_string(cgroup.join("memory.max"))?
-            .trim()
-            .parse::<u64>()?;
-        let current = fs::read_to_string(cgroup.join("memory.current"))?
-            .trim()
-            .parse::<u64>()?;
-        let events = fs::read_to_string(cgroup.join("memory.events"))?;
-        assert!(current < hard, "balloon memory exceeds host reservation");
-        assert_eq!(
-            fs::read_to_string(cgroup.join("memory.max"))?
-                .trim()
-                .parse::<u64>()?,
-            u64::from(
-                backend
-                    .host_resource_reservation(request.spec.resources.unwrap())?
-                    .memory_mib
-                    .get()
-            ) * 1024
-                * 1024
-        );
-        assert_eq!(
-            fs::read_to_string(cgroup.join("memory.swap.max"))?.trim(),
-            "0"
-        );
-        for key in ["high", "max", "oom", "oom_kill"] {
-            assert!(
-                events.lines().any(|line| line == format!("{key} 0")),
-                "{events}"
+                ))
+                .await?;
+            let mut ready = [0; 6];
+            workload.stdout.read_exact(&mut ready).await?;
+            assert_eq!(&ready, b"ready\n");
+            let cgroup = firecracker_cgroup_dir(&config, &record.machine_id);
+            assert_eq!(
+                fs::read_to_string(cgroup.join("memory.high"))?.trim(),
+                "max"
             );
+            let hard = fs::read_to_string(cgroup.join("memory.max"))?
+                .trim()
+                .parse::<u64>()?;
+            let current = fs::read_to_string(cgroup.join("memory.current"))?
+                .trim()
+                .parse::<u64>()?;
+            let events = fs::read_to_string(cgroup.join("memory.events"))?;
+            assert!(current < hard, "balloon memory exceeds host reservation");
+            let reservation = backend.host_resource_reservation(request.spec.resources.unwrap())?;
+            assert_eq!(hard, u64::from(reservation.memory_mib.get()) * 1024 * 1024);
+            assert_eq!(
+                fs::read_to_string(cgroup.join("memory.swap.max"))?.trim(),
+                "0"
+            );
+            for key in ["high", "max", "oom", "oom_kill"] {
+                assert!(
+                    events.lines().any(|line| line == format!("{key} 0")),
+                    "{events}"
+                );
+            }
+            workload.stdin.write_all(b"verify\n").await?;
+            workload.stdin.close().await?;
+            let mut output = String::new();
+            workload.stdout.read_to_string(&mut output).await?;
+            assert_eq!(output, "verified\n");
+            assert_eq!(workload.wait.await?, 0);
+            handle.stop().await?;
         }
-        workload.stdin.write_all(b"verify\n").await?;
-        workload.stdin.close().await?;
-        let mut output = String::new();
-        workload.stdout.read_to_string(&mut output).await?;
-        assert_eq!(output, "verified\n");
-        assert_eq!(workload.wait.await?, 0);
         Ok(())
     }
     .await;
@@ -852,43 +854,4 @@ print("verified")'
     result?;
     cleanup?;
     Ok(())
-}
-
-#[tokio::test]
-#[ignore = "requires root, KVM, Firecracker artifacts, and TMPDIR on XFS"]
-async fn live_memory_shared_ceiling_accepts_small_and_odd_sized_requests() -> Result<()> {
-    let temp = tempfile::Builder::new().prefix("shapes-").tempdir()?;
-    let image = std::env::var("FIRECRACKER_IMAGE")?;
-    let config = config(temp.path(), &image);
-    let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
-    let result: Result<()> = async {
-        for memory in [384, 2051] {
-            let mut request = native_request(&config, &format!("shape-{memory}"), &image)?;
-            request.spec.resources = SandboxResourceShape::new(1, memory);
-            let handle = backend.acquire(request.clone()).await?;
-            let record = allocation(&backend, &request).await?;
-            assert_eq!(handle.live_resource_grant().await?, request.spec.resources);
-            assert_eq!(
-                handle.live_resource_ceiling(),
-                SandboxResourceShape::new(
-                    1,
-                    backend
-                        .shared
-                        .host_fingerprint
-                        .growth_capacity
-                        .unwrap()
-                        .resources
-                        .memory_mib
-                        .get()
-                )
-            );
-            assert_balloon(&config, &record, memory % 2)?;
-            assert_eq!(shell(&handle, "printf usable-shape").await?, "usable-shape");
-            handle.stop().await?;
-        }
-        Ok(())
-    }
-    .await;
-    backend.terminate_all().await?;
-    result
 }
