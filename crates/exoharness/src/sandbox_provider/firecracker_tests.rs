@@ -909,7 +909,7 @@ fn persistent_snapshot_expiry_reclaims_files() {
 }
 
 #[test]
-fn snapshot_budget_config_preserves_default_and_serializes_overrides() {
+fn firecracker_config_preserves_defaults_and_serializes_overrides() {
     let json = r#"{
         "firecracker_bin": "/usr/local/bin/firecracker",
         "jailer_bin": "/usr/local/bin/jailer",
@@ -931,6 +931,8 @@ fn snapshot_budget_config_preserves_default_and_serializes_overrides() {
         config.snapshot_budget_bytes,
         FirecrackerConfig::default().snapshot_budget_bytes
     );
+    assert_eq!(config.memory_footprint_mib(2048), 2253);
+    config.memory_overhead_percent = 20;
     config.snapshot_budget_bytes = 128 * 1024 * 1024 * 1024;
     let round_trip: FirecrackerConfig =
         serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();

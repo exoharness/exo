@@ -148,6 +148,13 @@ struct FirecrackerArgs {
     /// Maximum number of Firecracker VMs this Exo process may own.
     #[arg(long = "firecracker-max-machines", value_name = "COUNT")]
     max_machines: Option<NonZeroUsize>,
+    /// Host memory overhead as a percentage of guest RAM.
+    #[arg(
+        long = "firecracker-memory-overhead-percent",
+        env = "EXO_FIRECRACKER_MEMORY_OVERHEAD_PERCENT",
+        default_value_t = FirecrackerConfig::default().memory_overhead_percent
+    )]
+    memory_overhead_percent: u8,
     /// Disable sudo and other privilege elevation inside Firecracker guests.
     #[arg(
         long = "firecracker-disable-guest-root",
@@ -299,6 +306,7 @@ impl FirecrackerArgs {
             allowed_registries: self.allowed_registries.clone(),
             network_bytes_per_second: self.network_bytes_per_second,
             max_machines: self.max_machines,
+            memory_overhead_percent: self.memory_overhead_percent,
         };
         #[cfg(target_os = "macos")]
         let lima = FirecrackerLimaConfig {

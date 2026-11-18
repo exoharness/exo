@@ -126,10 +126,14 @@ Cgroup v2 and a writable `/dev/shm` tmpfs are mounted inside the guest.
 Standard `/dev/fd` and stdio links are provided. Boot moves the
 merged filesystem over the initramfs root so container exec joins the correct
 mount namespace. The guest also gets a hostname and localhost mappings.
-The host cgroup allows 1 GiB above guest RAM for VMM, kernel, and block-device
-cache memory, with reclaim starting at guest RAM plus 256 MiB. OCI images do
-not need Python, a shell, `ip`, `mount`, `setpriv`, or other boot-time
-utilities.
+The host cgroup limits each VM to guest RAM plus 10%, rounded up to whole
+MiB, including VMM, kernel, and block-device cache memory. Configure the
+percentage with `FirecrackerConfig.memory_overhead_percent`,
+`--firecracker-memory-overhead-percent`, or
+`EXO_FIRECRACKER_MEMORY_OVERHEAD_PERCENT`. Host admission can use
+`FirecrackerConfig::memory_footprint_mib` to apply the same calculation.
+OCI images do not need Python, a shell, `ip`, `mount`, `setpriv`, or other
+boot-time utilities.
 
 Registry credentials come from the Docker credential configuration and helper
 for the user running Exo. Credentials are selected for the exact registry
