@@ -137,7 +137,13 @@ pub(super) fn host_growth_capacity(
             .context("invalid Firecracker binary")?,
     );
     let max_vcpus = u8::try_from(kvm_capability(KVM_CAP_MAX_VCPUS)?.min(32))?;
-    let resources = allocation_capacity(bytes, online_cpu_ids()?, &[root, &parent], max_vcpus)?;
+    let resources = allocation_capacity(
+        bytes,
+        online_cpu_ids()?,
+        &[root, &parent],
+        max_vcpus,
+        config.memory_overhead_percent,
+    )?;
     let slots = kvm_capability(KVM_CAP_NR_MEMSLOTS)?
         .checked_sub(8)
         .filter(|slots| *slots > 0)
@@ -158,6 +164,7 @@ fn allocation_capacity(
     mut cpus: Vec<usize>,
     groups: &[&Path],
     max_vcpus: u8,
+    memory_overhead_percent: u8,
 ) -> Result<SandboxResourceShape> {
     // Jailer places VMMs below its allocation root, outside the daemon's cgroup.
     let mut cpu_limit = u64::from(max_vcpus);
@@ -182,9 +189,8 @@ fn allocation_capacity(
         }
     }
     let cpu = u8::try_from(cpu_limit.min(cpus.len() as u64))?;
-    let memory = u32::try_from(bytes / (1024 * 1024))?
-        .checked_sub(FIRECRACKER_MEMORY_HEADROOM_MIB as u32)
-        .context("sandbox memory allocation cannot cover Firecracker overhead")?;
+    let memory =
+        u32::try_from((bytes / (1024 * 1024)) * 100 / (100 + u64::from(memory_overhead_percent)))?;
     SandboxResourceShape::new(cpu, memory).context("sandbox allocation capacity is empty")
 }
 
@@ -333,12 +339,13 @@ pub(super) fn expand(
 }
 
 pub(super) fn apply_host_memory_limits(
+    config: &FirecrackerConfig,
     cgroup: &Path,
     resources: SandboxResourceShape,
 ) -> Result<()> {
-    let (memory_max, memory_high) = firecracker_memory_limits(resources)?;
+    let memory_max = config.memory_footprint_mib(resources.memory_mib.get()) * 1024 * 1024;
     fs::write(cgroup.join("memory.max"), memory_max.to_string())?;
-    fs::write(cgroup.join("memory.high"), memory_high.to_string())?;
+    fs::write(cgroup.join("memory.high"), "max")?;
     Ok(())
 }
 
@@ -354,7 +361,7 @@ fn apply_grant(
     // Journal the reservation before changing any host or guest limit.
     let applied = (|| -> Result<()> {
         replace_manifest(&config.state_root, &record)?;
-        apply_host_memory_limits(cgroup, target)?;
+        apply_host_memory_limits(config, cgroup, target)?;
         fs::write(cgroup.join("cpu.max"), cpu_quota(target.vcpu_count.get()))?;
         initialize_until(config, &record, deadline)
     })();
@@ -387,16 +394,16 @@ mod tests {
         let groups = [root.path(), parent.as_path()];
         let physical = 16_u64 * 1024 * 1024 * 1024;
         assert_eq!(
-            allocation_capacity(physical, (0..8).collect(), &groups, 32)?,
+            allocation_capacity(physical, (0..8).collect(), &groups, 32, 20)?,
             SandboxResourceShape::new(2, 5120).unwrap()
         );
         fs::write(parent.join("cpu.max"), "max 100000")?;
         assert_eq!(
-            allocation_capacity(physical, (0..8).collect(), &groups, 32)?,
+            allocation_capacity(physical, (0..8).collect(), &groups, 32, 20)?,
             SandboxResourceShape::new(4, 5120).unwrap()
         );
         fs::write(parent.join("cpuset.cpus.effective"), "8-9")?;
-        assert!(allocation_capacity(physical, (0..8).collect(), &groups, 32).is_err());
+        assert!(allocation_capacity(physical, (0..8).collect(), &groups, 32, 20).is_err());
         Ok(())
     }
 
@@ -547,6 +554,7 @@ mod tests {
         let root = tempfile::tempdir_in("/tmp").unwrap();
         let config = FirecrackerConfig {
             state_root: root.path().to_owned(),
+            memory_overhead_percent: 25,
             ..Default::default()
         };
         let record = record();
@@ -618,11 +626,11 @@ mod tests {
                 );
                 assert_eq!(
                     fs::read_to_string(cgroup_for_peer.join("memory.max")).unwrap(),
-                    ((8192_u64 + 1024) * 1024 * 1024).to_string()
+                    (10240_u64 * 1024 * 1024).to_string()
                 );
                 assert_eq!(
                     fs::read_to_string(cgroup_for_peer.join("memory.high")).unwrap(),
-                    ((8192_u64 + 256) * 1024 * 1024).to_string()
+                    "max"
                 );
                 if path == "PATCH /hotplug/memory " {
                     assert_eq!(

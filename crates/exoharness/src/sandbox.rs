@@ -306,8 +306,7 @@ pub trait ManagedSandboxHandle: Send + Sync {
     }
 
     /// Increase to an absolute target after reserving host capacity,
-    /// including backend overhead (Firecracker requires an additional 1024 MiB). A backend
-    /// can reject unsupported targets. Applied confirms the limits are installed
+    /// including configured backend overhead. A backend can reject unsupported targets. Applied confirms the limits are installed
     /// and ballooning has converged. Incomplete reports the reservation to retain
     /// until live_resource_grant reconciles it, or the sandbox is terminated.
     /// Growth may continue after cancellation. Retrying the same target is safe.

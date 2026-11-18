@@ -67,6 +67,7 @@ async fn firecracker_memory_growth_retries_and_restores() -> anyhow::Result<()> 
     })
     .await?;
     let mut request = SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: "resource-growth".into(),
         scope: exoharness::ResourceScope::Global,
         provider_state: None,
@@ -77,7 +78,6 @@ async fn firecracker_memory_growth_retries_and_restores() -> anyhow::Result<()> 
             image: "docker.io/library/python:3.14-alpine".into(),
             resources: SandboxResourceShape::new(1, 512),
             default_workdir: "/workspace".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
             tcp_ports: vec![],
             mounts: vec![],
             durable_file_systems: vec![],

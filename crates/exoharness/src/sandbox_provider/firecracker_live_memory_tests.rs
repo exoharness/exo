@@ -180,7 +180,8 @@ async fn live_memory_capacity_changes_preserve_reattach_and_ram_restore() -> Res
 async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> {
     let temp = tempfile::Builder::new().prefix("m").tempdir()?;
     let image = std::env::var("FIRECRACKER_IMAGE")?;
-    let config = config(temp.path(), &image);
+    let mut config = config(temp.path(), &image);
+    config.memory_overhead_percent = 50;
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
     let mut request = native_request(&config, "growth", &image)?;
     request.spec.resources = SandboxResourceShape::new(1, 4096);
@@ -207,6 +208,13 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
             fs::read(cgroup.join("memory.max"))?,
             fs::read(cgroup.join("memory.high"))?,
         );
+        assert_eq!(
+            original_limits.0,
+            (config.memory_footprint_mib(4096) * 1024 * 1024)
+                .to_string()
+                .into_bytes()
+        );
+        let expected_memory_max = config.memory_footprint_mib(8192) * 1024 * 1024;
         for shape in [
             (capacity.vcpu_count.get() + 1, 4096),
             (1, 2048),
@@ -293,7 +301,7 @@ while True:
             let (mut stream, _) = listener.accept()?;
             let (request, _) = read_api_request(&mut stream)?;
             assert!(request.starts_with("PATCH /hotplug/memory "));
-            let (max, high) = firecracker_memory_limits(grown)?;
+            let max = expected_memory_max;
             ensure!(
                 fs::read_to_string(cgroup_for_peer.join("cpu.max"))?.trim() == "100000 100000",
                 "warm acquire did not replay cpu.max"
@@ -304,7 +312,7 @@ while True:
                 "warm acquire reached guest growth with memory.max={actual}, expected {max}"
             );
             ensure!(
-                fs::read_to_string(cgroup_for_peer.join("memory.high"))?.trim() == high.to_string(),
+                fs::read_to_string(cgroup_for_peer.join("memory.high"))?.trim() == "max",
                 "warm acquire did not replay memory.high"
             );
             stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")?;
@@ -798,14 +806,18 @@ print("verified")'
         workload.stdout.read_exact(&mut ready).await?;
         assert_eq!(&ready, b"ready\n");
         let cgroup = firecracker_cgroup_dir(&config, &record.machine_id);
-        let high = fs::read_to_string(cgroup.join("memory.high"))?
+        assert_eq!(
+            fs::read_to_string(cgroup.join("memory.high"))?.trim(),
+            "max"
+        );
+        let hard = fs::read_to_string(cgroup.join("memory.max"))?
             .trim()
             .parse::<u64>()?;
         let current = fs::read_to_string(cgroup.join("memory.current"))?
             .trim()
             .parse::<u64>()?;
         let events = fs::read_to_string(cgroup.join("memory.events"))?;
-        assert!(current < high, "balloon memory exceeds grant headroom");
+        assert!(current < hard, "balloon memory exceeds host reservation");
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.max"))?
                 .trim()

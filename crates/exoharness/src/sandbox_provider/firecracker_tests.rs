@@ -58,6 +58,7 @@ pub(super) fn test_runtime() -> FirecrackerRuntimeFingerprint {
 
 pub(super) fn test_request(id: &str, memory_mib: u32) -> SandboxRequest {
     SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: id.into(),
         scope: crate::ResourceScope::Global,
         provider_state: None,
@@ -69,7 +70,6 @@ pub(super) fn test_request(id: &str, memory_mib: u32) -> SandboxRequest {
             durable_file_systems: vec![],
             tcp_ports: vec![],
             default_workdir: "/".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
         },
     }
 }

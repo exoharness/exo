@@ -167,7 +167,7 @@ attached virtio-rng device.
 
 Live growth is opt-in through `FirecrackerConfig.live_resource_growth`.
 The request remains the initial grant; memory capacity is detected from host RAM
-and the jailer's allocation cgroups, less 1024 MiB of VMM headroom. Daemon-thread
+and the jailer's allocation cgroups, accounting for the configured memory overhead. Daemon-thread
 affinity and daemon-only quotas do not define sandbox capacity. A VM boots at its requested
 memory size, rounded up by at most 1 MiB, with the remaining range unplugged.
 Growth uses `virtio-mem`; a small balloon preserves exact odd-MiB grants.
@@ -181,8 +181,8 @@ reserves its CPU topology for growth; `CONFIG_HOTPLUG_CPU=y` is required.
 Existing VMs and RAM snapshots retain their boot geometry when detected capacity changes.
 
 Call `host_resource_reservation` on the backend before acquisition or growth.
-It returns the full host reservation: guest grant plus 1024 MiB. The cgroup
-hard limit enforces that reservation, reclaim starts at grant plus 256 MiB,
+It returns the full host reservation using `memory_overhead_percent` (10% by default).
+The cgroup hard limit enforces that reservation, `memory.high` remains unlimited,
 and swap and automatic OOM balloon deflation are disabled. A guest can consume
 the whole headroom; the balloon's page counts are guest-reported.
 See Firecracker's [hotplug](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/memory-hotplug.md)

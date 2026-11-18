@@ -99,9 +99,6 @@ const GUEST_READY_HOST_PORT: u32 = 10_053;
 const MAX_RESOURCE_SLOTS: u32 = 32_768;
 const NETWORK_BASE: Ipv4Addr = Ipv4Addr::new(10, 240, 0, 0);
 const EXO_NETWORK_CIDR: &str = "10.240.0.0/14";
-/// Host capacity to reserve in addition to each Firecracker guest memory grant.
-/// The cgroup hard limit includes this headroom; a hostile guest can consume it.
-pub const FIRECRACKER_MEMORY_HEADROOM_MIB: u64 = 1024;
 pub const DEFAULT_FIRECRACKER_BINARY: &str = "/usr/local/bin/firecracker";
 pub const DEFAULT_FIRECRACKER_JAILER: &str = "/usr/local/bin/jailer";
 pub const DEFAULT_FIRECRACKER_KERNEL: &str = "/var/lib/exo/firecracker/vmlinux";
@@ -1708,7 +1705,15 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         &self,
         resources: SandboxResourceShape,
     ) -> Result<SandboxResourceShape> {
-        firecracker_host_reservation(resources)
+        SandboxResourceShape::new(
+            resources.vcpu_count.get(),
+            u32::try_from(
+                self.shared
+                    .config
+                    .memory_footprint_mib(resources.memory_mib.get()),
+            )?,
+        )
+        .context("Firecracker host memory reservation overflow")
     }
 
     fn with_external_proxy(
@@ -2549,7 +2554,7 @@ impl Shared {
                     let cgroup = firecracker_cgroup_dir(&config, &record.machine_id);
                     if resources.memory_mib.get() > record.runtime.memory_mib {
                         // A journaled expansion can precede the host-limit writes.
-                        balloon::apply_host_memory_limits(&cgroup, resources)?;
+                        balloon::apply_host_memory_limits(&config, &cgroup, resources)?;
                     }
                     if resources.vcpu_count.get() > record.runtime.vcpu_count {
                         fs::write(
@@ -4702,24 +4707,6 @@ fn resource_disk(
     Ok(disk)
 }
 
-fn firecracker_host_reservation(resources: SandboxResourceShape) -> Result<SandboxResourceShape> {
-    Ok(SandboxResourceShape {
-        memory_mib: resources
-            .memory_mib
-            .checked_add(FIRECRACKER_MEMORY_HEADROOM_MIB as u32)
-            .context("Firecracker host memory reservation overflow")?,
-        ..resources
-    })
-}
-
-fn firecracker_memory_limits(resources: SandboxResourceShape) -> Result<(u64, u64)> {
-    let hard = u64::from(firecracker_host_reservation(resources)?.memory_mib.get()) * 1024 * 1024;
-    // Guest RAM, block-device page cache, and kernel allocations share the cgroup.
-    // Start reclaim before the hard limit to leave room for disk writeback.
-    let reclaim = (u64::from(resources.memory_mib.get()) + 256) * 1024 * 1024;
-    Ok((hard, reclaim))
-}
-
 #[tracing::instrument(name = "firecracker.launch_vmm", skip_all)]
 fn spawn_jailed_firecracker(
     config: &FirecrackerConfig,
@@ -4729,7 +4716,7 @@ fn spawn_jailed_firecracker(
 ) -> Result<()> {
     let host_uid = jailer_uid(config, record)?;
     let resources = balloon::resources(record)?;
-    let (memory_max, memory_high) = firecracker_memory_limits(resources)?;
+    let memory_max = config.memory_footprint_mib(resources.memory_mib.get()) * 1024 * 1024;
     let cpu_max = balloon::cpu_quota(resources.vcpu_count.get());
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
