@@ -1,4 +1,4 @@
-use super::tests::{native_request, read_api_request, shell};
+use super::tests::{native_request, read_api_request, shell, test_request};
 use super::*;
 use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -341,23 +341,10 @@ async fn live_memory_ram_fork_and_restore_retain_grant_and_identity() -> Result<
     let mut config = config(temp.path(), &image);
     config.max_machines = NonZeroUsize::new(2);
     let backend = FirecrackerSandboxBackend::new(config.clone()).await?;
-    let source = SandboxRequest {
-        sandbox_id: "ram-source".into(),
-        scope: crate::ResourceScope::Global,
-        provider_state: None,
-        lifecycle: crate::SandboxLifecycleConfig {
-            idle_ttl: Some(Duration::from_secs(600)),
-        },
-        spec: SandboxSpec {
-            image,
-            resources: SandboxResourceShape::new(1, 512),
-            default_workdir: "/workspace".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
-            tcp_ports: vec![],
-            mounts: vec![],
-            durable_file_systems: vec![],
-        },
-    };
+    let mut source = test_request("ram-source", 512);
+    source.spec.image = image;
+    source.spec.default_workdir = "/workspace".into();
+    source.lifecycle.idle_ttl = Some(Duration::from_secs(600));
     let mut target = source.clone();
     target.sandbox_id = "ram-target".into();
     let exercise = async {

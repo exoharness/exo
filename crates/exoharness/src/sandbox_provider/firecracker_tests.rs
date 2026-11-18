@@ -50,6 +50,24 @@ pub(super) fn test_runtime() -> FirecrackerRuntimeFingerprint {
     test_host_runtime().for_resources(SandboxResourceShape::default())
 }
 
+pub(super) fn test_request(id: &str, memory_mib: u32) -> SandboxRequest {
+    SandboxRequest {
+        sandbox_id: id.into(),
+        scope: crate::ResourceScope::Global,
+        provider_state: None,
+        lifecycle: Default::default(),
+        spec: SandboxSpec {
+            image: "/unused.ext4".into(),
+            resources: SandboxResourceShape::new(1, memory_mib),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            tcp_ports: vec![],
+            default_workdir: "/".into(),
+            policy: SandboxNetworkPolicy::Disabled.into(),
+        },
+    }
+}
+
 #[test]
 fn ordinary_launch_relinks_durable_disks_after_an_uncommitted_restore() -> Result<()> {
     let root = tempfile::tempdir()?;
@@ -1141,21 +1159,7 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
         .unwrap()
         .host_fingerprint
         .memory_ceiling_mib = std::num::NonZeroU32::new(8192);
-    let request = FirecrackerRequest::from(SandboxRequest {
-        sandbox_id: "grant".into(),
-        scope: crate::ResourceScope::Global,
-        provider_state: None,
-        lifecycle: Default::default(),
-        spec: SandboxSpec {
-            image: "/unused.ext4".into(),
-            resources: SandboxResourceShape::new(1, 4096),
-            mounts: vec![],
-            durable_file_systems: vec![],
-            tcp_ports: vec![],
-            default_workdir: "/".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
-        },
-    });
+    let request = FirecrackerRequest::from(test_request("grant", 4096));
     let error = shared
         .new_machine_record(
             &request,
@@ -2073,23 +2077,8 @@ async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
         .unwrap()
         .host_fingerprint
         .memory_ceiling_mib = std::num::NonZeroU32::new(1024);
-    let request = FirecrackerRequest::from(SandboxRequest {
-        sandbox_id: "initial-balloon".into(),
-        scope: crate::ResourceScope::Global,
-        provider_state: None,
-        lifecycle: crate::SandboxLifecycleConfig {
-            idle_ttl: Some(Duration::from_secs(600)),
-        },
-        spec: SandboxSpec {
-            image: "/unused.ext4".into(),
-            resources: SandboxResourceShape::new(1, 512),
-            mounts: vec![],
-            durable_file_systems: vec![],
-            tcp_ports: vec![],
-            default_workdir: "/".into(),
-            policy: SandboxNetworkPolicy::Disabled.into(),
-        },
-    });
+    let mut request = FirecrackerRequest::from(test_request("initial-balloon", 512));
+    request.lifecycle.idle_ttl = Some(Duration::from_secs(600));
     let spec_hash = sandbox_spec_hash(&request.spec);
     let id = machine_id(&request.sandbox_id, &spec_hash);
     let record = shared

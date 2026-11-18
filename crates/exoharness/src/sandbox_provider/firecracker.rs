@@ -5204,6 +5204,23 @@ impl FirecrackerApiStream {
         }
     }
 
+    fn retry_io(
+        &mut self,
+        events: rustix::event::PollFlags,
+        mut operation: impl FnMut(&mut StdUnixStream) -> std::io::Result<usize>,
+    ) -> std::io::Result<usize> {
+        loop {
+            self.remaining()?;
+            match operation(&mut self.stream) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.wait(events)?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+
     fn remaining(&self) -> std::io::Result<Duration> {
         self.deadline
             .checked_duration_since(Instant::now())
@@ -5219,31 +5236,13 @@ impl FirecrackerApiStream {
 
 impl Read for FirecrackerApiStream {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        loop {
-            self.remaining()?;
-            match self.stream.read(buffer) {
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.wait(rustix::event::PollFlags::IN)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                result => return result,
-            }
-        }
+        self.retry_io(rustix::event::PollFlags::IN, |stream| stream.read(buffer))
     }
 }
 
 impl Write for FirecrackerApiStream {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        loop {
-            self.remaining()?;
-            match self.stream.write(buffer) {
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    self.wait(rustix::event::PollFlags::OUT)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                result => return result,
-            }
-        }
+        self.retry_io(rustix::event::PollFlags::OUT, |stream| stream.write(buffer))
     }
 
     fn flush(&mut self) -> std::io::Result<()> {

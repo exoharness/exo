@@ -112,18 +112,15 @@ pub(super) fn hotplug_configuration(
 }
 
 pub(super) fn configuration(record: &MachineRecord) -> Result<Option<Configuration>> {
-    record
-        .runtime
-        .memory_ceiling_mib
-        .map(|_| {
-            let grant = grant(record)?;
-            Ok(Configuration {
-                amount_mib: record.runtime.physical_memory_mib(grant) - grant,
-                deflate_on_oom: false,
-                stats_polling_interval_s: 3600,
-            })
-        })
-        .transpose()
+    if record.runtime.memory_ceiling_mib.is_none() {
+        return Ok(None);
+    }
+    let grant = grant(record)?;
+    Ok(Some(Configuration {
+        amount_mib: record.runtime.physical_memory_mib(grant) - grant,
+        deflate_on_oom: false,
+        stats_polling_interval_s: 3600,
+    }))
 }
 
 pub(super) fn deadline(memory_mib: u32) -> Instant {
