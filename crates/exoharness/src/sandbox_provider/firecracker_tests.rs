@@ -832,7 +832,7 @@ fn ram_capture_rejects_external_disks_before_touching_the_source() -> Result<()>
         machine_id: "fc-0123456789abcdef-01234567".into(),
         spec_hash: "spec".into(),
         runtime: test_runtime(),
-        memory_grant_mib: None,
+        resource_grant: None,
         external_disks: true,
         resolved_image: "image".into(),
         slot: 1,
