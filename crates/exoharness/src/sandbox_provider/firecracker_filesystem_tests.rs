@@ -282,6 +282,7 @@ pub(in super::super) fn native_request(
         )?;
     }
     Ok(SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
         sandbox_id: id.into(),
         scope: crate::ResourceScope::Thread {
             agent_id,
@@ -304,7 +305,6 @@ pub(in super::super) fn native_request(
                 mount_path: "/workspace".into(),
                 mode: FileSystemMountMode::ReadWrite,
             }],
-            policy: SandboxNetworkPolicy::Disabled.into(),
             tcp_ports: vec![],
         },
         lifecycle: crate::SandboxLifecycleConfig {

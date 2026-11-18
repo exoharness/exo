@@ -208,11 +208,10 @@ async fn live_memory_growth_preserves_io_and_filesystem_restore() -> Result<()> 
             fs::read(cgroup.join("memory.max"))?,
             fs::read(cgroup.join("memory.high"))?,
         );
-        assert_eq!(
-            original_limits.0,
-            (config.memory_footprint_mib(4096) * 1024 * 1024)
-                .to_string()
-                .into_bytes()
+        ensure!(
+            std::str::from_utf8(&original_limits.0)?.trim()
+                == (config.memory_footprint_mib(4096) * 1024 * 1024).to_string(),
+            "boot cgroup does not use configured memory overhead"
         );
         let expected_memory_max = config.memory_footprint_mib(8192) * 1024 * 1024;
         for shape in [
@@ -372,7 +371,7 @@ while True:
         assert_balloon(&config, &record, 0)?;
         assert_eq!(
             fs::read_to_string(cgroup.join("memory.max"))?.trim(),
-            (9216_u64 * 1024 * 1024).to_string()
+            expected_memory_max.to_string()
         );
         let after = shell(&handle, "awk '/MemAvailable:/ {print $2}' /proc/meminfo")
             .await?
