@@ -44,7 +44,7 @@ Options:
 Environment overrides:
   EXO_REPO_URL, EXO_REPO_REF, EXO_INSTALL_DIR, EXO_MODEL_PROVIDER, EXO_MODEL,
   EXO_UPSTREAM_MODEL, EXO_AGENT_NAME, EXO_USER_NAME, EXO_CHAT_BASE_URL,
-  EXO_LOCAL_PROMPT_FILE, EXO_SETUP_FORCE, EXO_SETUP_INSTALL_DEPS,
+  EXO_LOCAL_PROMPT_FILE, EXO_PROVIDER, EXO_SETUP_FORCE, EXO_SETUP_INSTALL_DEPS,
   OPENAI_API_KEY, OPENROUTER_API_KEY
 EOF
 }
@@ -92,9 +92,13 @@ source_cargo_env() {
   fi
 }
 
-# git, docker, and (on Linux) a C toolchain must be installed by the system
-# package manager. node, pnpm, and rust are installed by mise after clone,
+# git, optionally Docker, and (on Linux) C build tools are installed by the
+# system package manager. node, pnpm, and rust are installed by mise after clone,
 # pinned to the versions in mise.toml, when not already present.
+is_docker_setup() {
+  [[ "${EXO_PROVIDER:-smolvm}" == docker ]]
+}
+
 collect_missing_dependencies() {
   MISSING_DEPS=()
   SYSTEM_MISSING=()
@@ -103,7 +107,7 @@ collect_missing_dependencies() {
     MISSING_DEPS+=("git")
     SYSTEM_MISSING+=("git")
   fi
-  if ! command -v docker >/dev/null 2>&1; then
+  if is_docker_setup && ! command -v docker >/dev/null 2>&1; then
     MISSING_DEPS+=("docker")
     SYSTEM_MISSING+=("docker")
   fi
@@ -123,13 +127,20 @@ collect_missing_dependencies() {
 print_dependency_status() {
   local dep
   echo "Exo uses these dependencies:"
-  for dep in git node pnpm rust docker; do
+  for dep in git node pnpm rust; do
     if missing_has "$dep" "${MISSING_DEPS[@]}"; then
       echo "  - $dep (missing)"
     else
       echo "  - $dep (installed)"
     fi
   done
+  if is_docker_setup; then
+    if missing_has docker "${MISSING_DEPS[@]}"; then
+      echo "  - docker (missing)"
+    else
+      echo "  - docker (installed)"
+    fi
+  fi
   if missing_has build-tools "${MISSING_DEPS[@]}"; then
     echo "  - C build tools (missing)"
   fi
@@ -175,7 +186,9 @@ check_dependencies() {
     missing_has rust "${MISSING_DEPS[@]}"; then
     echo "node, pnpm, and rust will be installed with mise once the repository is in place."
   fi
-  maybe_reexec_for_docker_group
+  if is_docker_setup; then
+    maybe_reexec_for_docker_group
+  fi
 }
 
 can_auto_install_dependencies() {
@@ -196,7 +209,11 @@ choose_dependency_install_mode() {
     return
   fi
   echo "How should the missing dependencies be installed?" >&2
-  echo "1) Automatically (recommended): the system package manager installs git and Docker; mise (https://mise.jdx.dev) installs pinned node, pnpm, and rust" >&2
+  if is_docker_setup; then
+    echo "1) Automatically (recommended): install git and Docker; mise installs pinned node, pnpm, and rust" >&2
+  else
+    echo "1) Automatically (recommended): the system package manager installs git; mise (https://mise.jdx.dev) installs pinned node, pnpm, and rust" >&2
+  fi
   echo "2) Manually: print the install commands for each and exit" >&2
   local choice
   while true; do
@@ -309,7 +326,7 @@ maybe_reexec_for_docker_group() {
   # Group membership from usermod does not apply to the current shell.
   if command -v sg >/dev/null 2>&1; then
     echo "Re-running setup with the docker group applied..."
-    exec sg docker -c "EXO_SETUP_INSTALL_DEPS=true bash '$0' ${SETUP_ARGS[*]:-}"
+    exec sg docker -c "EXO_SETUP_INSTALL_DEPS=true bash $(printf '%q ' "$0" "${SETUP_ARGS[@]}")"
   fi
   echo "You were added to the docker group, but it requires a new login session." >&2
   echo "Log out and back in (or run: newgrp docker), then rerun this script." >&2
@@ -385,9 +402,11 @@ print_linux_dependency_install_help() {
 
 print_generic_dependency_install_help() {
   echo >&2
-  echo "Install Git and Docker Desktop/Engine (node, pnpm, and rust are handled by mise during setup)." >&2
+  echo "Install Git (and Docker if selected); node, pnpm, and rust are handled by mise." >&2
   echo "  Git: https://git-scm.com/downloads" >&2
-  echo "  Docker: https://www.docker.com/products/docker-desktop/" >&2
+  if is_docker_setup; then
+    echo "  Docker: https://www.docker.com/products/docker-desktop/" >&2
+  fi
 }
 
 missing_has() {
@@ -593,6 +612,7 @@ prompt_env_secret() {
   fi
 }
 
+
 ensure_docker_running() {
   require_command docker "Install Docker Desktop: https://www.docker.com/products/docker-desktop/"
   if docker info >/dev/null 2>&1; then
@@ -759,6 +779,20 @@ clone_or_reuse_repo() {
   rmdir "$tmp_checkout" "$tmp_parent"
 }
 
+check_hypervisor() {
+  case "$(uname -s)" in
+    Linux)
+      [[ -r /dev/kvm && -w /dev/kvm ]] ||
+        die "SmolVM needs access to /dev/kvm. Enable KVM and grant this user access before running setup."
+      ;;
+    Darwin)
+      [[ "$(uname -m)" == arm64 ]] ||
+        die "SmolVM's default local sandbox requires Apple Silicon on macOS."
+      ;;
+    *) die "SmolVM's default local sandbox requires Linux with KVM or macOS on Apple Silicon." ;;
+  esac
+}
+
 main() {
   SETUP_ARGS=("$@")
   parse_args "$@"
@@ -769,7 +803,10 @@ main() {
   echo "Git ref: $REPO_REF"
 
   check_dependencies
-  ensure_docker_running
+  case "${EXO_PROVIDER:-smolvm}" in
+    smolvm) check_hypervisor ;;
+    docker) ensure_docker_running ;;
+  esac
 
   local install_dir launch_dir="$PWD"
   install_dir="$(choose_install_dir)"

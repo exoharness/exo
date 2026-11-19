@@ -67,7 +67,10 @@ automatically restore its sandbox to the fork event.
 
 Firecracker supports full VM snapshots, but currently rejects ordinary
 snapshot capture with an egress proxy or mounted resource/durable
-filesystems. SmolVM also rejects snapshots with an egress proxy. A sandbox
+filesystems. SmolVM full snapshots and forks are live copy-on-write branches
+of the running machine; they include memory and processes and do not survive a
+host reboot. SmolVM filesystem snapshots stop and restart the machine and
+reject an egress proxy. A sandbox
 using credential substitution therefore cannot currently use these
 snapshot paths. Snapshot support doesn't imply that every sandbox
 configuration can be restored.
