@@ -1233,6 +1233,10 @@ async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity(
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "Firecracker sandbox execution is only supported on Linux"
+)]
 async fn reapers_skip_busy_families_and_revisit_them_after_release() -> Result<()> {
     for stale in [false, true] {
         let directory = tempfile::tempdir()?;
