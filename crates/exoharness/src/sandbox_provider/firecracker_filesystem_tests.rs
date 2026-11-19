@@ -2,6 +2,7 @@ use super::*;
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
+        partial: false,
         resource_grant: None,
         template: false,
         key: "a".repeat(64),
@@ -60,24 +61,27 @@ fn restore_reservation_reads_the_saved_grant_before_admission() -> Result<()> {
     };
     let mut manifest = FilesystemManifest::from_payload(&fixture(&config)?)?;
     manifest.resource_grant = SandboxResourceShape::new(2, 8192);
-    let payload = manifest.payload()?;
     let backend = FirecrackerSandboxBackend {
         external_proxy: None,
         shared: super::super::tests::test_shared(config, HashMap::new())?,
         egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
     };
-    for (request, expected) in [
-        ((1, 512), (2, 10240)),
-        ((4, 4096), (4, 10240)),
-        ((1, 16384), (2, 20480)),
-    ] {
-        assert_eq!(
-            backend.host_resource_reservation(
-                SandboxResourceShape::new(request.0, request.1).unwrap(),
-                Some(&payload),
-            )?,
-            SandboxResourceShape::new(expected.0, expected.1).unwrap()
-        );
+    for partial in [false, true] {
+        manifest.partial = partial;
+        let payload = manifest.payload()?;
+        for (request, expected) in [
+            ((1, 512), (2, 10240)),
+            ((4, 4096), (4, 10240)),
+            ((1, 16384), (2, 20480)),
+        ] {
+            assert_eq!(
+                backend.host_resource_reservation(
+                    SandboxResourceShape::new(request.0, request.1).unwrap(),
+                    Some(&payload),
+                )?,
+                SandboxResourceShape::new(expected.0, expected.1).unwrap()
+            );
+        }
     }
     Ok(())
 }
@@ -162,7 +166,7 @@ fn imported_base_cache_hit_does_not_read_the_supplied_image() -> Result<()> {
     let cached = cache_base_image(&config, &source, &digest)?;
     fs::remove_file(&source)?;
     let imported = root.path().join("imported.ext4");
-    prepare_imported_base(&config, &source, &digest, &imported)?;
+    prepare_imported_base(&config, &source, &digest, &imported, ImportMode::Verify)?;
     assert_eq!(fs::metadata(&cached)?.ino(), fs::metadata(&imported)?.ino());
     Ok(())
 }
@@ -461,8 +465,14 @@ async fn filesystem_snapshot_suspend_restart_and_import_round_trip() -> Result<(
     let worker_b = FirecrackerSandboxBackend::new(config_b.clone()).await?;
     let mismatched = config_b.state_root.join("mismatched-base.ext4");
     let wrong_digest = "0".repeat(64);
-    let error = prepare_imported_base(&config_b, &files.base_image, &wrong_digest, &mismatched)
-        .unwrap_err();
+    let error = prepare_imported_base(
+        &config_b,
+        &files.base_image,
+        &wrong_digest,
+        &mismatched,
+        ImportMode::Verify,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("base image does not match"));
     assert!(!base_image_cache_path(&config_b, &wrong_digest).exists());
     fs::remove_file(mismatched)?;
@@ -647,5 +657,26 @@ fn filesystem_and_memory_captures_share_a_budget_without_charging_external_base_
     );
     fs::remove_file(cache)?;
     assert_eq!(retained_snapshot_bytes(&config)?, pool_bytes + memory_bytes);
+    Ok(())
+}
+
+#[test]
+fn partial_capture_format_and_completeness_round_trip() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: root.path().into(),
+        ..Default::default()
+    };
+    let payload = fixture(&config)?;
+    let mut manifest = FilesystemManifest::from_payload(&payload)?;
+    assert!(open_capture(&config, payload)?.complete);
+    manifest.partial = true;
+    fs::write(
+        manifest.directory(&config).join("manifest.json"),
+        serde_json::to_vec(&manifest)?,
+    )?;
+    let partial = manifest.payload()?;
+    assert_eq!(partial.format, SnapshotFormat::FirecrackerLazyFilesystemRef);
+    assert!(!open_capture(&config, partial)?.complete);
     Ok(())
 }
