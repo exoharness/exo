@@ -210,6 +210,22 @@ impl std::str::FromStr for SnapshotFormat {
     }
 }
 
+/// The result of a live resource update. Grants include guest/kernel overhead;
+/// reserve backend host overhead separately. They do not promise free application
+/// memory or a particular guest CPU topology.
+#[derive(Debug)]
+#[must_use = "inspect incomplete updates and retain their reservation until reconciliation"]
+pub enum SandboxResourceUpdate {
+    /// All requested limits are applied and memory ballooning has converged.
+    Applied { grant: crate::SandboxResourceShape },
+    /// Some limits may have changed. Retain this guest reservation plus backend
+    /// overhead and retry the target; this does not confirm usable capacity.
+    Incomplete {
+        reservation: crate::SandboxResourceShape,
+        error: crate::SandboxError,
+    },
+}
+
 #[async_trait]
 pub trait ManagedSandboxHandle: Send + Sync {
     fn id(&self) -> &str;
@@ -274,6 +290,34 @@ pub trait ManagedSandboxHandle: Send + Sync {
             return Ok(None);
         };
         Ok(Some(websocket_over(stream, port, path).await?))
+    }
+
+    /// The largest resource shape this running sandbox can reach without restart.
+    /// None means live expansion is unsupported or was not enabled at boot.
+    fn live_resource_ceiling(&self) -> Option<crate::SandboxResourceShape> {
+        None
+    }
+
+    /// The committed resource grant, if the backend supports querying it.
+    /// This waits for pending growth and includes grants retained after a failed
+    /// expansion; it does not report the ceiling or actual resident memory.
+    async fn live_resource_grant(&self) -> Result<Option<crate::SandboxResourceShape>> {
+        Ok(None)
+    }
+
+    /// Increase to an absolute target after reserving host capacity,
+    /// including configured backend overhead. A backend can reject unsupported targets. Applied confirms the limits are installed
+    /// and ballooning has converged. Incomplete reports the reservation to retain
+    /// until live_resource_grant reconciles it, or the sandbox is terminated.
+    /// Growth may continue after cancellation. Retrying the same target is safe.
+    async fn expand_resources(
+        &self,
+        _resources: crate::SandboxResourceShape,
+    ) -> SandboxResult<SandboxResourceUpdate> {
+        Err(crate::SandboxFailure::InvalidRequest {
+            message: "sandbox handle does not support live resource expansion".into(),
+        }
+        .into())
     }
 
     async fn stop(&self) -> Result<()>;
@@ -393,6 +437,18 @@ pub struct ResolvedSandboxImage {
 
 #[async_trait]
 pub trait ManagedSandboxBackend: Send + Sync {
+    /// Host capacity to reserve for a requested guest grant, including provider
+    /// overhead. Query this before acquisition, restore or increasing a live
+    /// grant. For restore, pass the snapshot to include its saved grant without
+    /// changing the request's original resource shape.
+    fn host_resource_reservation(
+        &self,
+        _resources: crate::SandboxResourceShape,
+        _snapshot: Option<&SnapshotPayload>,
+    ) -> Result<crate::SandboxResourceShape> {
+        bail!("sandbox backend does not report host resource reservations")
+    }
+
     #[cfg(feature = "basic-backend")]
     fn with_external_proxy(
         &self,

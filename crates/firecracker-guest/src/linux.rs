@@ -466,6 +466,13 @@ impl AgentState {
                 unix_seconds,
                 nanoseconds,
             } => sync_clock(unix_seconds, nanoseconds),
+            Request::EnsureOnlineCpus { vcpu_count } => match ensure_online_cpus(vcpu_count) {
+                Ok(online) => Response {
+                    online_vcpu_count: Some(online),
+                    ..Response::ok()
+                },
+                Err(error) => Response::error(error),
+            },
             Request::Exec {
                 argv,
                 env,
@@ -937,6 +944,32 @@ fn sync_filesystem(path: &str) -> Response {
     } else {
         Response::error(std::io::Error::last_os_error().to_string())
     }
+}
+
+fn ensure_online_cpus(vcpu_count: u8) -> Result<u8, String> {
+    if vcpu_count == 0 {
+        return Err("CPU count must be positive".into());
+    }
+    // Only online CPUs: a timed-out request can finish after a larger retry.
+    for cpu in 1..vcpu_count {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/online");
+        let value =
+            fs::read_to_string(&path).map_err(|error| format!("reading {path}: {error}"))?;
+        if value.trim() != "1" {
+            fs::write(&path, "1").map_err(|error| {
+                format!("onlining CPU {cpu}: {error}; verify CONFIG_HOTPLUG_CPU")
+            })?;
+        }
+    }
+    // SAFETY: sysconf takes an integer selector and reports the guest's online CPUs.
+    let online = u8::try_from(unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) })
+        .map_err(|error| format!("reading online CPU count: {error}"))?;
+    if online < vcpu_count {
+        return Err(format!(
+            "requested {vcpu_count} online CPUs, observed {online}"
+        ));
+    }
+    Ok(online)
 }
 
 fn sync_clock(unix_seconds: u64, nanoseconds: u32) -> Response {

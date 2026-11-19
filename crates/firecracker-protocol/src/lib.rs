@@ -37,6 +37,9 @@ pub enum GuestRequest<B> {
         unix_seconds: u64,
         nanoseconds: u32,
     },
+    EnsureOnlineCpus {
+        vcpu_count: u8,
+    },
     Exec {
         argv: Vec<String>,
         env: HashMap<String, String>,
@@ -93,6 +96,8 @@ pub struct TerminalSize {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GuestResponse {
     pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub online_vcpu_count: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity: Option<GuestIdentity>,
     #[serde(skip_serializing_if = "Option::is_none")]
