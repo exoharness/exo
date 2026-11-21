@@ -1,6 +1,6 @@
 //! Loads the LiteLLM price database. Resolution: explicit path -> fresh cache
-//! -> fetch (cached on success) -> stale cache -> empty. Never fails: any error
-//! degrades to an empty table (cost stays unset, tokens still persist).
+//! -> fetch (cached on success) -> stale cache -> embedded `llm-prices` snapshot.
+//! Never fails: with no network and no cache, cost still resolves for known models.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -40,8 +40,8 @@ pub async fn load(path: Option<PathBuf>, url: Option<String>, cache: &Path) -> P
             parse_or_empty(&body)
         }
         Ok(_) => {
-            tracing::error!("fetched pricing was unparseable; cost unavailable");
-            PricingTable::empty()
+            tracing::error!("fetched pricing was unparseable; using embedded prices");
+            PricingTable::embedded()
         }
         Err(err) => match cached {
             Some((body, _)) => {
@@ -49,8 +49,8 @@ pub async fn load(path: Option<PathBuf>, url: Option<String>, cache: &Path) -> P
                 parse_or_empty(&body)
             }
             None => {
-                tracing::error!(%err, "pricing fetch failed; cost unavailable");
-                PricingTable::empty()
+                tracing::error!(%err, "pricing fetch failed; using embedded prices");
+                PricingTable::embedded()
             }
         },
     }
@@ -120,6 +120,18 @@ mod tests {
         let cache = dir.path().join("prices.json");
         std::fs::write(&cache, FIXTURE).unwrap();
         let table = load(None, Some("invalid://unused".into()), &cache).await;
+        assert!(table.lookup("claude-sonnet-4-6").is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_fetch_without_cache_uses_embedded_prices() {
+        let dir = TempDir::new().unwrap();
+        let table = load(
+            None,
+            Some("invalid://unreachable".into()),
+            &dir.path().join("prices.json"),
+        )
+        .await;
         assert!(table.lookup("claude-sonnet-4-6").is_some());
     }
 

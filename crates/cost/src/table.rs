@@ -37,6 +37,27 @@ impl PricingTable {
         Self::default()
     }
 
+    /// Offline fallback built from the `llm-prices` snapshot compiled into the
+    /// binary (per-1M rates converted to LiteLLM's per-token shape).
+    pub fn embedded() -> Self {
+        let mut entries = HashMap::new();
+        for p in llm_prices::all() {
+            let entry = ModelEntry {
+                litellm_provider: Some(p.provider.to_string()),
+                input_cost_per_token: p.input.map(|v| v / 1e6),
+                output_cost_per_token: p.output.map(|v| v / 1e6),
+                cache_read_input_token_cost: p.cache_read.map(|v| v / 1e6),
+                cache_creation_input_token_cost: p.cache_write.first().map(|(_, v)| v / 1e6),
+            };
+            for key in std::iter::once(p.model).chain(p.aliases.iter().copied()) {
+                entries
+                    .entry(key.to_string())
+                    .or_insert_with(|| entry.clone());
+            }
+        }
+        Self { entries }
+    }
+
     /// Parse a LiteLLM `model_prices_and_context_window.json` document. The
     /// `sample_spec` doc entry and any entry without per-token rates are skipped.
     pub fn from_json_str(s: &str) -> anyhow::Result<Self> {
@@ -162,6 +183,16 @@ mod tests {
             PricingTable::empty()
                 .compute_cost_usd("claude-sonnet-4-6", counts(100, 50, 0, 0))
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn embedded_prices_cost_without_network() {
+        approx(
+            PricingTable::embedded()
+                .compute_cost_usd("claude-sonnet-4-6-20251022", counts(500, 200, 10_000, 0))
+                .unwrap(),
+            0.0075,
         );
     }
 
