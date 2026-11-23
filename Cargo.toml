@@ -45,7 +45,7 @@ object_store = { version = "0.12.5", features = [
   "azure",
   "http",
 ] }
-oci-client = { version = "0.17.0", default-features = false, features = [
+oci-client = { version = "0.18.0", default-features = false, features = [
   "rustls-tls",
 ] }
 reqwest = { version = "0.12.23", default-features = false, features = [
