@@ -283,12 +283,9 @@ impl FirecrackerSandboxBackend {
         disks: Vec<PathBuf>,
     ) -> crate::SandboxResult<SnapshotPayload> {
         let config = self.shared.config.clone();
-        let image_lease = super::super::firecracker_image::prepare_image_cache(
-            &config.state_root,
-            config.image_size_gib,
-            Some(base_image.clone()),
-        )
-        .await?;
+        let image_lease =
+            super::super::firecracker_image::prepare_image_cache(&config, base_image.to_str())
+                .await?;
         tokio::task::spawn_blocking(move || {
             let _image_lease = image_lease;
             let mut manifest = FilesystemManifest::from_payload(&payload)?;
@@ -391,9 +388,8 @@ impl FirecrackerSandboxBackend {
         }
         let capture = Arc::new(self.filesystem_snapshot_files(payload).await?);
         let _image_lease = super::super::firecracker_image::prepare_image_cache(
-            &self.shared.config.state_root,
-            self.shared.config.image_size_gib,
-            Some(capture.base_image.clone()),
+            &self.shared.config,
+            capture.base_image.to_str(),
         )
         .await?;
         let mut resolved = prepare_request(request)?;

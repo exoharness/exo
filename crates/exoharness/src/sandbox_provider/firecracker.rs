@@ -58,7 +58,7 @@ use crate::{
 use super::capture_store::{self, allocated_files as snapshot_directory_bytes};
 #[cfg(test)]
 use super::firecracker_image::validate_ext4_image;
-use super::firecracker_image::{ResolvedImage, resolve_image};
+use super::firecracker_image::{prepare_image_cache, resolve_image};
 use super::snapshot_lease::SnapshotLease;
 
 #[cfg(target_os = "linux")]
@@ -813,7 +813,9 @@ impl FirecrackerSandboxBackend {
         self.reap_stale_machines().await?;
         self.reap_expired_machines().await?;
         self.shared.reap_orphaned_fork_snapshot_templates().await;
-        let (request, _image_lease) = self.resolve_request(request).await?;
+        let _image_lease =
+            prepare_image_cache(&self.shared.config, Some(&request.spec.image)).await?;
+        let request = self.resolve_request(request).await?;
         self.acquire_resolved(request).await
     }
 
@@ -1098,10 +1100,10 @@ impl FirecrackerSandboxBackend {
     async fn resolve_request(
         &self,
         request: FirecrackerRequest,
-    ) -> crate::SandboxResult<(FirecrackerRequest, SnapshotLease)> {
+    ) -> crate::SandboxResult<FirecrackerRequest> {
         let mut request = prepare_request(request)?;
         validate_resource_shape(request.spec.resources.unwrap_or_default())?;
-        let ResolvedImage { path, lease } = resolve_image(
+        let image = resolve_image(
             &self.shared.config.state_root,
             &request.spec.image,
             self.shared.config.image_size_gib,
@@ -1109,8 +1111,8 @@ impl FirecrackerSandboxBackend {
             &self.shared.config.allowed_registries,
         )
         .await?;
-        request.spec.image = path.to_string_lossy().into_owned();
-        Ok((request, lease))
+        request.spec.image = image.to_string_lossy().into_owned();
+        Ok(request)
     }
 
     // The caller holds the source machine's lifecycle lock until capture has
@@ -1511,9 +1513,11 @@ impl FirecrackerSandboxBackend {
                     };
                     let mut handle = match snapshot {
                         Some(snapshot) => {
-                            let (request, _image_lease) = self.resolve_request(request).await?;
+                            let _image_lease =
+                                prepare_image_cache(&self.shared.config, Some(&request.spec.image))
+                                    .await?;
                             self.restore_snapshot(
-                                request,
+                                self.resolve_request(request).await?,
                                 snapshot,
                                 SnapshotTemplateLifecycle::Snapshot,
                                 None,
@@ -1598,7 +1602,8 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     }
 
     async fn resolve_image(&self, image: &str) -> Result<crate::ResolvedSandboxImage> {
-        let ResolvedImage { path, lease } = resolve_image(
+        let image_lease = prepare_image_cache(&self.shared.config, Some(image)).await?;
+        let path = resolve_image(
             &self.shared.config.state_root,
             image,
             self.shared.config.image_size_gib,
@@ -1607,7 +1612,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         )
         .await?;
         tokio::task::spawn_blocking(move || {
-            let _image_lease = lease;
+            let _image_lease = image_lease;
             let file = File::open(path.with_extension("config.json"))?;
             let configuration = serde_json::from_reader(std::io::Read::take(file, 65_536))?;
             Ok(crate::ResolvedSandboxImage {
@@ -1675,7 +1680,9 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             .policy
             .validate_basic("Firecracker snapshot target")?;
         let mut source = prepare_request(source.into())?;
-        let (target, _image_lease) = self.resolve_request(target.into()).await?;
+        let _image_lease =
+            prepare_image_cache(&self.shared.config, Some(&target.spec.image)).await?;
+        let target = self.resolve_request(target.into()).await?;
         if source.sandbox_id == target.sandbox_id {
             bail!("Firecracker fork source and target must be different sandboxes")
         }

@@ -18,7 +18,6 @@ use std::process::{Command, Stdio};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime};
 
-use super::capture_store;
 use super::snapshot_lease::SnapshotLease;
 use crate::SandboxImageConfiguration;
 use anyhow::{Context, Result, anyhow, bail};
@@ -115,53 +114,28 @@ enum Whiteout {
     Opaque(PathBuf),
 }
 
-pub(super) struct ResolvedImage {
-    pub path: PathBuf,
-    pub lease: SnapshotLease,
-}
-
-pub(super) async fn resolve_image(
-    state_root: &Path,
-    source: &str,
-    image_size_gib: u64,
-    allowed_local_images: &[PathBuf],
-    allowed_registries: &[String],
-) -> Result<ResolvedImage> {
-    let cache_root = state_root.join("images");
-    let keep = if looks_like_local_image(source) {
-        Some(PathBuf::from(source))
-    } else {
-        let reference = source.parse::<Reference>()?;
-        immutable_reference_digest(&reference)?
-            .map(|digest| cache_image_dir(&cache_root, &current_platform()?, digest))
-            .transpose()?
-            .map(|directory| directory.join("rootfs.ext4"))
-    };
-    let lease = prepare_image_cache(state_root, image_size_gib, keep).await?;
-    let original_source = cached_image_source(state_root, source)?;
-    let source = original_source.as_deref().unwrap_or(source);
-    let path = resolve_image_path(
-        state_root,
-        source,
-        image_size_gib,
-        allowed_local_images,
-        allowed_registries,
-    )
-    .await?;
-    Ok(ResolvedImage { path, lease })
-}
-
 pub(super) async fn prepare_image_cache(
-    state_root: &Path,
-    image_size_gib: u64,
-    keep: Option<PathBuf>,
+    config: &super::firecracker::FirecrackerConfig,
+    source: Option<&str>,
 ) -> Result<SnapshotLease> {
-    let root = state_root.to_path_buf();
+    let root = config.state_root.clone();
+    let required_bytes = config
+        .image_size_gib
+        .checked_mul(1024 * 1024 * 1024)
+        .context("Firecracker image size overflow")?;
+    let keep = match source.filter(|source| !source.trim().is_empty()) {
+        Some(source) if looks_like_local_image(source) => Some(PathBuf::from(source)),
+        Some(source) => {
+            let reference = source.parse::<Reference>()?;
+            immutable_reference_digest(&reference)?
+                .map(|digest| cache_image_dir(&root.join("images"), &current_platform()?, digest))
+                .transpose()?
+                .map(|directory| directory.join("rootfs.ext4"))
+        }
+        None => None,
+    };
     tokio::task::spawn_blocking(move || {
         fs::create_dir_all(root.join("images"))?;
-        let required_bytes = image_size_gib
-            .checked_mul(1024 * 1024 * 1024)
-            .context("Firecracker image size overflow")?;
         evict_image_cache(&root, keep.as_deref(), || {
             Ok(super::firecracker::available_disk_bytes(&root)? >= required_bytes)
         })?;
@@ -176,15 +150,10 @@ fn cached_image_source(state_root: &Path, source: &str) -> Result<Option<String>
     if path.file_name() != Some(OsStr::new("rootfs.ext4")) || path.try_exists()? {
         return Ok(None);
     }
-    let Some(directory) = path.parent() else {
+    let directory = fs::canonicalize(path.parent().context("image cache parent missing")?)?;
+    if !is_cached_local_image(state_root, &directory) {
         return Ok(None);
-    };
-    let directory = match fs::canonicalize(directory) {
-        Ok(directory) if is_cached_local_image(state_root, &directory) => directory,
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
+    }
     let metadata: CachedImageMetadata =
         serde_json::from_reader(File::open(directory.join("metadata.json"))?.take(1_048_576))?;
     let reference = metadata.source.parse::<Reference>()?;
@@ -202,13 +171,15 @@ fn cached_image_source(state_root: &Path, source: &str) -> Result<Option<String>
     skip_all,
     fields(cache_hit = tracing::field::Empty, registry_lookup = false)
 )]
-async fn resolve_image_path(
+pub(super) async fn resolve_image(
     state_root: &Path,
     source: &str,
     image_size_gib: u64,
     allowed_local_images: &[PathBuf],
     allowed_registries: &[String],
 ) -> Result<PathBuf> {
+    let original_source = cached_image_source(state_root, source)?;
+    let source = original_source.as_deref().unwrap_or(source);
     if looks_like_local_image(source) {
         let state_root = state_root.to_path_buf();
         let source_path = source.to_string();
@@ -1457,48 +1428,32 @@ pub(super) fn evict_image_cache(
         modified: SystemTime,
     }
     let mut candidates = Vec::new();
-    let mut add_candidate = |path: PathBuf| -> Result<()> {
-        let metadata = fs::symlink_metadata(&path)?;
-        if metadata.is_file() && metadata.nlink() == 1 && keep != Some(path.as_path()) {
-            candidates.push(Candidate {
-                path,
-                modified: metadata.modified()?,
-            });
-        }
-        Ok(())
-    };
-    for cache in ["blobs/sha256", "filesystem"] {
-        match fs::read_dir(images.join(cache)) {
-            Ok(entries) => {
-                for entry in entries {
-                    let entry = entry?;
-                    if !entry.file_name().as_bytes().starts_with(b".") {
-                        add_candidate(entry.path())?;
-                    }
-                }
+    let mut directories = vec![images];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.as_bytes().starts_with(b".")
+                || name.as_bytes().starts_with(b"image-build-")
+                || name == "local"
+            {
+                continue;
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    for version in capture_store::directories(&images)? {
-        let version = version?;
-        if !version
-            .file_name()
-            .is_some_and(|name| name.as_bytes().starts_with(b"v"))
-        {
-            continue;
-        }
-        for platform in capture_store::directories(&version)? {
-            for directory in capture_store::directories(&platform?)? {
-                let directory = directory?;
-                if !directory.join("metadata.json").try_exists()? {
-                    continue;
-                }
-                let image = directory.join("rootfs.ext4");
-                if image.try_exists()? {
-                    add_candidate(image)?;
-                }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                directories.push(path);
+            } else if metadata.is_file()
+                && metadata.nlink() == 1
+                && keep != Some(path.as_path())
+                && (directory.ends_with("blobs/sha256")
+                    || directory.ends_with("images/filesystem")
+                    || (name == "rootfs.ext4" && directory.join("metadata.json").try_exists()?))
+            {
+                candidates.push(Candidate {
+                    path,
+                    modified: metadata.modified()?,
+                });
             }
         }
     }
@@ -2024,14 +1979,12 @@ mod tests {
     // images or racing an in-flight image resolution.
     #[test]
     fn image_cache_pressure_reclaims_unused_files_and_preserves_shared_images() -> Result<()> {
-        use super::super::snapshot_lease::SnapshotLease;
-
         let root = tempfile::tempdir()?;
         let images = root.path().join("images");
         let platform = images.join(format!("v{MATERIALIZER_VERSION}/linux-arm64"));
-        let old = platform.join("a".repeat(64));
-        let shared = platform.join("b".repeat(64));
-        let recent = platform.join("c".repeat(64));
+        let old = platform.join("a".repeat(64)).join("rootfs.ext4");
+        let shared = platform.join("b".repeat(64)).join("rootfs.ext4");
+        let recent = platform.join("c".repeat(64)).join("rootfs.ext4");
         let blob = images.join("blobs/sha256").join("d".repeat(64));
         let imported = images
             .join("filesystem")
@@ -2040,9 +1993,10 @@ mod tests {
         fs::write(&imported, b"unused imported base")?;
         fs::create_dir_all(blob.parent().unwrap())?;
         fs::write(&blob, b"compressed layer")?;
-        for directory in [&old, &shared, &recent] {
+        for image in [&old, &shared, &recent] {
+            let directory = image.parent().unwrap();
             fs::create_dir_all(directory)?;
-            fs::write(directory.join("rootfs.ext4"), b"image")?;
+            fs::write(image, b"image")?;
             fs::write(
                 directory.join("metadata.json"),
                 serde_json::to_vec(&CachedImageMetadata {
@@ -2060,35 +2014,32 @@ mod tests {
         }
         let now = SystemTime::now();
         File::open(&blob)?.set_modified(now - Duration::from_secs(3))?;
-        File::open(old.join("rootfs.ext4"))?.set_modified(now - Duration::from_secs(2))?;
-        fs::hard_link(
-            shared.join("rootfs.ext4"),
-            root.path().join("checkpoint-base.ext4"),
-        )?;
+        File::open(&old)?.set_modified(now - Duration::from_secs(2))?;
+        fs::hard_link(&shared, root.path().join("checkpoint-base.ext4"))?;
         let inflight = images.join("image-build-active");
         fs::create_dir(&inflight)?;
         fs::write(inflight.join("rootfs.ext4"), b"building")?;
         let lease = SnapshotLease::shared(File::open(&images)?)?;
         evict_image_cache(root.path(), None, || Ok(false))?;
         assert!(blob.exists());
-        assert!(old.join("rootfs.ext4").exists());
+        assert!(old.exists());
         drop(lease);
 
-        evict_image_cache(root.path(), None, || Ok(!old.join("rootfs.ext4").exists()))?;
+        evict_image_cache(root.path(), None, || Ok(!old.exists()))?;
         assert!(!blob.exists());
-        assert!(!old.join("rootfs.ext4").exists());
-        assert!(old.join("metadata.json").exists());
-        assert!(shared.join("rootfs.ext4").exists());
-        assert!(recent.join("rootfs.ext4").exists());
+        assert!(!old.exists());
+        assert!(old.with_file_name("metadata.json").exists());
+        assert!(shared.exists());
+        assert!(recent.exists());
         assert!(inflight.join("rootfs.ext4").exists());
         assert_eq!(
-            cached_image_source(root.path(), old.join("rootfs.ext4").to_str().unwrap())?,
+            cached_image_source(root.path(), old.to_str().unwrap())?,
             Some(format!("registry.example/image@sha256:{}", "a".repeat(64)))
         );
-        evict_image_cache(root.path(), Some(&recent.join("rootfs.ext4")), || Ok(false))?;
+        evict_image_cache(root.path(), Some(&recent), || Ok(false))?;
         assert!(!imported.exists());
-        assert!(recent.join("rootfs.ext4").exists());
-        assert!(shared.join("rootfs.ext4").exists());
+        assert!(recent.exists());
+        assert!(shared.exists());
         Ok(())
     }
 
