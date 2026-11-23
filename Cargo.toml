@@ -92,8 +92,8 @@ url = "2.5.7"
 uuid = { version = "1.18.1", features = ["serde", "v4", "v7"] }
 zstd = "0.13.3"
 
-lingua = { git = "https://github.com/braintrustdata/lingua.git", rev = "3ab9bcc9b58688be37216e9ab0b3d8362d185cfb" }
-braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", package = "braintrust-llm-router", rev = "3ab9bcc9b58688be37216e9ab0b3d8362d185cfb", default-features = false, features = [
+lingua = { git = "https://github.com/braintrustdata/lingua.git", rev = "142e25c54d45fa5cdd95b155283c68b6ea18fa71" }
+braintrust-llm-router = { git = "https://github.com/braintrustdata/lingua.git", package = "braintrust-llm-router", rev = "142e25c54d45fa5cdd95b155283c68b6ea18fa71", default-features = false, features = [
   "provider-openai",
   "provider-anthropic",
   "provider-google",

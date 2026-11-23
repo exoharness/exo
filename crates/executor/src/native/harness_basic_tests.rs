@@ -3502,7 +3502,9 @@ async fn basic_and_rlm_models_receive_mcp_errors_and_can_continue() -> Result<()
             .iter()
             .find_map(|message| {
                 if let Message::Tool { content } = message {
-                    let lingua::universal::ToolContentPart::ToolResult(result) = &content[0];
+                    let lingua::universal::ToolContentPart::ToolResult(result) = &content[0] else {
+                        panic!("expected tool result");
+                    };
                     Some(&result.output)
                 } else {
                     None

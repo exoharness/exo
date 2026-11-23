@@ -56,7 +56,9 @@ impl ModelClient for RouterModelClient {
         let universal_request = build_universal_request(&request, false)?;
         let payload = serialize_request(format, &universal_request)?;
         let route = resolve_provider_route(&router, &request.model, format)?;
-        let (prepared, _router_metadata) = router.create_request(payload, format, &route).await?;
+        let (prepared, _router_metadata) = router
+            .create_request(payload, format, &route, false)
+            .await?;
         let body = router.complete(prepared, &ClientHeaders::new()).await?;
         let provider_cost_usd = extract_provider_cost(&body);
         let response = lingua::response_to_universal(body)?;
@@ -73,7 +75,7 @@ impl ModelClient for RouterModelClient {
         let payload = serialize_request(format, &universal_request)?;
         let route = resolve_provider_route(&router, &request.model, format)?;
         let (prepared, _router_metadata) = router
-            .create_stream_request(payload, format, &route)
+            .create_stream_request(payload, format, &route, false)
             .await?;
         let raw_stream = router
             .complete_stream(prepared, &ClientHeaders::new(), None)
@@ -290,6 +292,10 @@ fn build_router(
             input_cost_per_mil_tokens: None,
             output_cost_per_mil_tokens: None,
             input_cache_read_cost_per_mil_tokens: None,
+            input_cache_write_cost_per_mil_tokens: None,
+            input_cache_write_5m_cost_per_mil_tokens: None,
+            input_cache_write_1h_cost_per_mil_tokens: None,
+            pricing: None,
             multimodal: None,
             reasoning: None,
             max_input_tokens: None,
@@ -750,6 +756,8 @@ impl UniversalResponseAccumulator {
                 tool_call_id: id,
                 tool_name: name,
                 arguments: ToolCallArguments::from(function.arguments.unwrap_or_default()),
+                status: None,
+                caller: None,
                 encrypted_content: None,
                 provider_options: None,
                 provider_executed: None,
@@ -783,6 +791,10 @@ impl UniversalResponseAccumulator {
             messages: assistant_message.into_iter().collect(),
             usage: self.usage.clone(),
             finish_reason: None,
+            finish_reasons: Vec::new(),
+            served_service_tier: None,
+            served_speed: None,
+            inference_geo: None,
         }
     }
 }
