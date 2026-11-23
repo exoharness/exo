@@ -109,7 +109,8 @@ async fn restored_base_stays_resolvable_after_capture_deletion_and_is_deduplicat
             &[],
             &[],
         )
-        .await?,
+        .await?
+        .path,
         cached
     );
     Ok(())
