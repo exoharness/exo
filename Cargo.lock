@@ -6904,27 +6904,35 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smol-cloud"
-version = "1.20.0"
+version = "1.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02ef40e6d712b866345050750b9500ae33245837eeb56c08d0e9a3ab8d212e16"
+checksum = "926e914330993312b459f77c8e6ecc31f997a3290d6e9648e9aa8f7b7bdc7d54"
 dependencies = [
  "base64 0.22.1",
+ "futures-util",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
 name = "smolmachines"
-version = "1.20.0"
+version = "1.36.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bae58382ff3070eb71816363626528717352bbd070b19aba1d4287d5268f84e"
+checksum = "8e9514b862c94c49743e9f62512a888a733ba686cb87b793331ae305e64b64ca"
 dependencies = [
  "flate2",
  "futures-util",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "log",
  "reqwest 0.12.28",
  "rustls 0.23.37",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "smol-cloud",
