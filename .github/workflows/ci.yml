@@ -234,6 +234,34 @@ jobs:
           else
             "$test_binary" --ignored --nocapture
           fi
+      - name: Run Firecracker memory growth regression
+        if: matrix.sandbox-backend == 'firecracker'
+        run: |
+          cargo test --locked --package exoharness --features firecracker \
+            --test firecracker_resources --no-run --message-format=json-render-diagnostics \
+            > "$RUNNER_TEMP/resources-build.jsonl"
+          test_binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "firecracker_resources") | .executable // empty' "$RUNNER_TEMP/resources-build.jsonl")"
+          test -x "$test_binary"
+          sudo -n env TMPDIR=/exo-test \
+            EXO_FIRECRACKER_BINARY="$EXO_FIRECRACKER_BINARY" \
+            EXO_FIRECRACKER_JAILER="$EXO_FIRECRACKER_JAILER" \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            "$test_binary" --ignored --nocapture
+      - name: Run Firecracker CPU topology and capacity recovery regression
+        if: matrix.sandbox-backend == 'firecracker'
+        run: |
+          cargo test --locked --package exoharness --features firecracker --lib \
+            --no-run --message-format=json-render-diagnostics \
+            > "$RUNNER_TEMP/capacity-build.jsonl"
+          test_binary="$(jq -r 'select(.reason == "compiler-artifact" and .target.name == "exoharness") | .executable // empty' "$RUNNER_TEMP/capacity-build.jsonl")"
+          test -x "$test_binary"
+          sudo -n env TMPDIR=/exo-test \
+            FIRECRACKER_IMAGE=docker.io/library/python:3.14-alpine \
+            EXO_FIRECRACKER_BINARY="$EXO_FIRECRACKER_BINARY" \
+            EXO_FIRECRACKER_JAILER="$EXO_FIRECRACKER_JAILER" \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            "$test_binary" --ignored --exact --nocapture \
+            sandbox_provider::firecracker::live_memory_tests::live_memory_capacity_changes_preserve_reattach_and_ram_restore
       - name: Run Firecracker clock regression
         if: matrix.sandbox-backend == 'firecracker'
         run: |

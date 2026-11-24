@@ -2,8 +2,43 @@ use super::*;
 use crate::egress::{EgressTransport, LocalEgressTransport};
 use tokio::net::UnixListener;
 
+#[cfg(target_os = "linux")]
+pub(super) use super::filesystem::tests::{native_request, shell};
+
+pub(super) fn read_api_request(stream: &mut StdUnixStream) -> Result<(String, Vec<u8>)> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut reader = StdBufReader::new(stream);
+    let mut request = String::new();
+    reader.read_line(&mut request)?;
+    let mut length = 0;
+    loop {
+        let mut header = String::new();
+        ensure!(
+            reader.read_line(&mut header)? > 0,
+            "missing API request headers"
+        );
+        if header == "\r\n" {
+            break;
+        }
+        if let Some(value) = header.strip_prefix("Content-Length: ") {
+            length = value.trim().parse::<usize>()?;
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    Ok((request, body))
+}
+
+pub(super) fn test_growth_capacity(vcpu_count: u8, memory_mib: u32) -> FirecrackerGrowthCapacity {
+    FirecrackerGrowthCapacity {
+        resources: SandboxResourceShape::new(vcpu_count, memory_mib).unwrap(),
+        memory_slot_size_mib: 128,
+    }
+}
+
 fn test_host_runtime() -> FirecrackerHostFingerprint {
     FirecrackerHostFingerprint {
+        growth_capacity: None,
         architecture: "x86_64".to_string(),
         protocol_version: PROTOCOL_VERSION,
         firecracker_version: "v1.16.1".to_string(),
@@ -17,8 +52,26 @@ fn test_host_runtime() -> FirecrackerHostFingerprint {
     }
 }
 
-fn test_runtime() -> FirecrackerRuntimeFingerprint {
+pub(super) fn test_runtime() -> FirecrackerRuntimeFingerprint {
     test_host_runtime().for_resources(SandboxResourceShape::default())
+}
+
+pub(super) fn test_request(id: &str, memory_mib: u32) -> SandboxRequest {
+    SandboxRequest {
+        policy: SandboxNetworkPolicy::Disabled.into(),
+        sandbox_id: id.into(),
+        scope: crate::ResourceScope::Global,
+        provider_state: None,
+        lifecycle: Default::default(),
+        spec: SandboxSpec {
+            image: "/unused.ext4".into(),
+            resources: SandboxResourceShape::new(1, memory_mib),
+            mounts: vec![],
+            durable_file_systems: vec![],
+            tcp_ports: vec![],
+            default_workdir: "/".into(),
+        },
+    }
 }
 
 #[test]
@@ -45,6 +98,12 @@ fn runtime_fingerprint_uses_requested_resources() {
     let runtime = test_host_runtime().for_resources(resources);
     assert_eq!(runtime.vcpu_count, 8);
     assert_eq!(runtime.memory_mib, 16_384);
+}
+
+#[test]
+fn ordinary_odd_memory_is_not_rounded_for_capture() {
+    let runtime = test_host_runtime().for_resources(SandboxResourceShape::new(1, 513).unwrap());
+    assert_eq!(runtime.physical_memory_mib(513), 513);
 }
 
 #[test]
@@ -405,6 +464,7 @@ fn capacity_scan_counts_processes_instead_of_manifests() {
         machine_id: "fc-live".to_string(),
         spec_hash: "live".to_string(),
         runtime: test_runtime(),
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -451,6 +511,7 @@ fn manifest_publish_does_not_replace_an_existing_machine() {
         machine_id: "fc-machine".to_string(),
         spec_hash: "first".to_string(),
         runtime: test_runtime(),
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -482,6 +543,7 @@ fn persisted_lease_expires_machine_after_idle_ttl() {
         machine_id: "fc-machine".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -573,6 +635,7 @@ fn snapshot_gc_reaps_only_unreferenced_fork_templates() {
             machine_id: "fc-0123456789abcdef-01234567".to_string(),
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
+            resource_grant: None,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -639,6 +702,7 @@ fn snapshot_gc_does_not_delete_fork_between_capture_and_manifest_publish() {
             machine_id: "fc-0123456789abcdef-01234567".to_string(),
             spec_hash: "spec".to_string(),
             runtime: test_runtime(),
+            resource_grant: None,
             resolved_image: "/images/base.ext4".to_string(),
             slot: 1,
             network_enabled: false,
@@ -686,6 +750,7 @@ fn fork_snapshots_are_unique_per_target() {
         machine_id: "fc-source".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 1,
         network_enabled: false,
@@ -717,6 +782,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
         machine_id: "fc-source".to_string(),
         spec_hash: "spec".to_string(),
         runtime: test_runtime(),
+        resource_grant: None,
         resolved_image: "/images/base.ext4".to_string(),
         slot: 7,
         network_enabled: true,
@@ -734,6 +800,7 @@ fn explicit_snapshots_are_unique_and_reusable() {
 
     let manifest = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
+        resource_grant: None,
         template: false,
         template_key: first,
         spec_hash: source.spec_hash,
@@ -1082,6 +1149,143 @@ pub(super) fn test_shared(
 }
 
 #[tokio::test]
+async fn snapshot_grant_is_part_of_the_allocation_without_changing_its_identity() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    for name in ["manifests", "slots"] {
+        fs::create_dir(directory.path().join(name))?;
+    }
+    let mut shared = test_shared(
+        FirecrackerConfig {
+            state_root: directory.path().into(),
+            ..Default::default()
+        },
+        HashMap::new(),
+    )?;
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .host_fingerprint
+        .growth_capacity = Some(test_growth_capacity(8, 8192));
+    let request = FirecrackerRequest::from(test_request("grant", 4096));
+    let error = shared
+        .new_machine_record(
+            &request,
+            "fc-grant",
+            "spec",
+            None,
+            SandboxResourceShape::new(1, 8193),
+        )
+        .await
+        .unwrap_err();
+    let error = error.to_string();
+    assert!(error.contains("8193 MiB"), "{error}");
+    assert!(error.contains("capacity 8192 MiB"), "{error}");
+    assert!(error.contains("restore"), "{error}");
+    let mut oversized = request.clone();
+    oversized.spec.resources = SandboxResourceShape::new(1, 8193);
+    assert!(
+        shared
+            .new_machine_record(&oversized, "fc-oversized", "spec", None, None)
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read_dir(directory.path().join("manifests"))?.count(), 0);
+    assert_eq!(fs::read_dir(directory.path().join("slots"))?.count(), 0);
+    let record = shared
+        .new_machine_record(
+            &request,
+            "fc-grant",
+            "spec",
+            None,
+            SandboxResourceShape::new(1, 8192),
+        )
+        .await?;
+    let persisted = shared
+        .load_machine_record(&record.machine_id)
+        .await?
+        .unwrap();
+    assert_eq!(persisted.runtime.memory_mib, 4096);
+    assert_eq!(persisted.spec_hash, "spec");
+    assert_eq!(balloon::grant(&persisted)?, 8192);
+    let payload = FirecrackerSnapshotManifest {
+        format_version: SNAPSHOT_FORMAT_VERSION,
+        resource_grant: persisted.resource_grant,
+        template: false,
+        template_key: "a".repeat(64),
+        spec_hash: persisted.spec_hash.clone(),
+        source_network_slot: persisted.slot,
+        runtime: persisted.runtime.clone(),
+    }
+    .into_payload()?;
+    let backend = FirecrackerSandboxBackend {
+        external_proxy: None,
+        shared,
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    assert_eq!(
+        backend.host_resource_reservation(request.spec.resources.unwrap(), Some(&payload))?,
+        backend.host_resource_reservation(balloon::resources(&persisted)?, None)?,
+    );
+    assert_eq!(
+        fs::metadata(manifest_path(directory.path(), &record.machine_id))?.mode() & 0o777,
+        0o600
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "Firecracker sandbox execution is only supported on Linux"
+)]
+async fn reapers_skip_busy_families_and_revisit_them_after_release() -> Result<()> {
+    for stale in [false, true] {
+        let directory = tempfile::tempdir()?;
+        for name in ["manifests", "leases", "slots"] {
+            fs::create_dir(directory.path().join(name))?;
+        }
+        let shared = test_shared(
+            FirecrackerConfig {
+                state_root: directory.path().into(),
+                max_machines: NonZeroUsize::new(4),
+                ..Default::default()
+            },
+            HashMap::new(),
+        )?;
+        let mut ids = Vec::new();
+        for sandbox in ["busy", "idle"] {
+            let mut request = FirecrackerRequest::from(test_request(sandbox, 512));
+            request.lifecycle.idle_ttl = Some(Duration::ZERO);
+            let hash = sandbox_spec_hash(&request.spec);
+            let id = machine_id(sandbox, &hash);
+            shared
+                .new_machine_record(&request, &id, &hash, None, None)
+                .await?;
+            ids.push(id);
+        }
+        let backend = FirecrackerSandboxBackend {
+            external_proxy: None,
+            shared,
+            egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+        };
+        let busy = backend.shared.lifecycle_locks.lock_sandbox("busy").await;
+        let reap = || async {
+            if stale {
+                backend.reap_stale_machines().await
+            } else {
+                backend.reap_expired_machines().await
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(2), reap()).await??;
+        assert!(backend.shared.load_machine_record(&ids[0]).await?.is_some());
+        assert!(backend.shared.load_machine_record(&ids[1]).await?.is_none());
+        drop(busy);
+        reap().await?;
+        assert!(backend.shared.load_machine_record(&ids[0]).await?.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn guest_clock_sync_uses_host_time_and_propagates_errors() -> Result<()> {
     for succeeds in [true, false] {
         let directory = tempfile::tempdir()?;
@@ -1194,6 +1398,7 @@ async fn template_restore_with_restricted_egress_still_validates_mounts() -> Res
     };
     let payload = FirecrackerSnapshotManifest {
         format_version: SNAPSHOT_FORMAT_VERSION,
+        resource_grant: None,
         template: true,
         template_key: "a".repeat(64),
         spec_hash: template_spec_hash(&request.spec),
@@ -1230,6 +1435,7 @@ async fn idle_reap_closes_egress_before_machine_cleanup_can_fail() -> Result<()>
         machine_id: "fc-egress-reaped".into(),
         spec_hash: "test".into(),
         runtime: test_runtime(),
+        resource_grant: None,
         resolved_image: "/images/test.ext4".into(),
         slot: 1,
         network_enabled: false,
@@ -1319,6 +1525,7 @@ impl DurableStopFixture {
             machine_id: machine_id(&request.sandbox_id, &sandbox_spec_hash(&request.spec)),
             spec_hash: sandbox_spec_hash(&request.spec),
             runtime: test_runtime(),
+            resource_grant: None,
             resolved_image: request.spec.image.clone(),
             slot: 1,
             network_enabled: false,
@@ -1636,6 +1843,7 @@ fn resource_disks_have_independent_guest_mounts_and_read_only_drives() -> Result
         machine_id: "fc-resources".into(),
         spec_hash: "resources".into(),
         runtime: test_runtime(),
+        resource_grant: None,
         resolved_image: "/base.ext4".into(),
         slot: 1,
         network_enabled: false,
@@ -1926,5 +2134,247 @@ fn resource_backing_disks_are_private_to_the_thread() -> Result<()> {
     fs::remove_file(&disk)?;
     std::os::unix::fs::symlink(temp.path().join("outside"), &disk)?;
     assert!(resource_disk(&config, scope, &directory).is_err());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cancelled_acquisition_retains_balloon_readiness_lock() -> Result<()> {
+    let directory = tempfile::tempdir_in("/tmp")?;
+    for name in ["manifests", "leases", "slots"] {
+        fs::create_dir(directory.path().join(name))?;
+    }
+    let mut shared = test_shared(
+        FirecrackerConfig {
+            state_root: directory.path().into(),
+            ..Default::default()
+        },
+        HashMap::new(),
+    )?;
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .host_fingerprint
+        .growth_capacity = Some(test_growth_capacity(1, 1024));
+    let mut request = FirecrackerRequest::from(test_request("initial-balloon", 512));
+    request.lifecycle.idle_ttl = Some(Duration::from_secs(600));
+    let spec_hash = sandbox_spec_hash(&request.spec);
+    let id = machine_id(&request.sandbox_id, &spec_hash);
+    let record = shared
+        .new_machine_record(&request, &id, &spec_hash, None, None)
+        .await?;
+    let machine = machine_from_record(&shared.config, record);
+    fs::create_dir_all(machine.vsock_path.parent().unwrap())?;
+    fs::write(shared.pid_path(&id), std::process::id().to_string())?;
+    let guest = UnixListener::bind(&machine.vsock_path)?;
+    let guest_peer = tokio::spawn(async move {
+        for _ in 0..4 {
+            let (stream, _) = guest.accept().await?;
+            let mut reader = AsyncBufReader::new(stream);
+            let mut handshake = String::new();
+            reader.read_line(&mut handshake).await?;
+            assert_eq!(handshake, "CONNECT 10052\n");
+            reader.get_mut().write_all(b"OK 1073741824\n").await?;
+            let mut stream = reader.into_inner();
+            let length = stream.read_u32().await? as usize;
+            let mut payload = vec![0; length];
+            stream.read_exact(&mut payload).await?;
+            let request: Message<ProtocolGuestRequest<()>> = serde_json::from_slice(&payload)?;
+            let online_vcpu_count = match request.payload {
+                ProtocolGuestRequest::Ping => None,
+                ProtocolGuestRequest::EnsureOnlineCpus { vcpu_count } => Some(vcpu_count),
+                other => panic!("unexpected readiness request: {other:?}"),
+            };
+            let response = GuestResponse {
+                online_vcpu_count,
+                identity: Some(exo_firecracker_protocol::GuestIdentity {
+                    implementation_version: "test".into(),
+                    build_id: "test".into(),
+                }),
+                ..GuestResponse::ok()
+            };
+            let payload = serde_json::to_vec(&Message::new(response))?;
+            stream.write_u32(payload.len() as u32).await?;
+            stream.write_all(&payload).await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let api = StdUnixListener::bind(jail_root(&shared.config, &id).join("run/firecracker.socket"))?;
+    let (waiting, inflation_waiting) = tokio::sync::oneshot::channel();
+    let (release, inflated) = tokio::sync::oneshot::channel();
+    let api_peer = std::thread::spawn(move || {
+        let mut waiting = Some(waiting);
+        let mut inflated = Some(inflated);
+        for index in 0..8 {
+            let (mut stream, _) = api.accept()?;
+            let (request, _) = read_api_request(&mut stream)?;
+            let path = match index % 4 {
+                0 => "PATCH /hotplug/memory ",
+                1 => "GET /hotplug/memory ",
+                2 => "PATCH /balloon ",
+                _ => "GET /balloon/statistics ",
+            };
+            assert!(request.starts_with(path), "{request}");
+            if index == 3 {
+                waiting.take().unwrap().send(()).unwrap();
+                inflated.take().unwrap().blocking_recv()?;
+            }
+            let body = match index % 4 {
+                1 => r#"{"requested_size_mib":0,"plugged_size_mib":0}"#,
+                3 => r#"{"target_pages":0,"actual_pages":0}"#,
+                _ => "",
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes())?;
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    let backend = FirecrackerSandboxBackend {
+        external_proxy: None,
+        shared,
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    let acquiring = {
+        let backend = backend.clone();
+        let request = request.clone();
+        tokio::spawn(async move { backend.acquire_resolved(request).await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), inflation_waiting).await??;
+    acquiring.abort();
+    assert!(matches!(acquiring.await, Err(error) if error.is_cancelled()));
+    let mut ownership = Box::pin(backend.shared.lifecycle_locks.lock_machine(&id));
+    assert!(futures::poll!(&mut ownership).is_pending());
+    drop(ownership);
+    let mut retry = Box::pin(backend.acquire_resolved(request));
+    assert!(futures::poll!(&mut retry).is_pending());
+    release.send(()).unwrap();
+    let handle = tokio::time::timeout(Duration::from_secs(2), retry).await??;
+    assert_eq!(
+        handle.live_resource_grant().await?,
+        SandboxResourceShape::new(1, 512)
+    );
+    guest_peer.await??;
+    api_peer.join().unwrap()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn lease_renewal_does_not_wait_for_growth_or_recreate_deleted_leases() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    fs::create_dir(directory.path().join("leases"))?;
+    let id = "fc-0123456789abcdef-01234567";
+    let shared = test_shared(
+        FirecrackerConfig {
+            state_root: directory.path().into(),
+            ..Default::default()
+        },
+        HashMap::from([(
+            "lease".into(),
+            WarmMachineEntry {
+                machine_id: id.into(),
+                spec_hash: "spec".into(),
+                egress_proxy: None,
+                idle_ttl: Some(Duration::from_secs(60)),
+                last_used_at: Instant::now(),
+            },
+        )]),
+    )?;
+    touch_machine_lease(directory.path(), id)?;
+    let path = lease_path(directory.path(), id);
+    let old = SystemTime::now() - Duration::from_secs(60);
+    File::open(&path)?.set_modified(old)?;
+    let _growth = shared.lifecycle_locks.lock_machine(id).await;
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        touch_machine(&shared, &shared.warm_machines, "lease", id),
+    )
+    .await??;
+    assert!(fs::metadata(&path)?.modified()? > old);
+    fs::remove_file(&path)?;
+    touch_machine(&shared, &shared.warm_machines, "lease", id).await?;
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[test]
+fn api_deadline_covers_partial_response_progress() -> Result<()> {
+    let root = tempfile::tempdir_in("/tmp")?;
+    let path = root.path().join("api");
+    let listener = StdUnixListener::bind(&path)?;
+    let peer = std::thread::spawn(move || -> Result<()> {
+        let (mut stream, _) = listener.accept()?;
+        read_api_request(&mut stream)?;
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n")?;
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(50));
+            if let Err(error) = stream.write_all(b"x") {
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ));
+                break;
+            }
+        }
+        Ok(())
+    });
+    let started = Instant::now();
+    assert!(
+        firecracker_api_response(
+            &path,
+            "GET",
+            "/balloon/statistics",
+            &[],
+            Duration::from_millis(250)
+        )
+        .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_millis(900));
+    peer.join().unwrap()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn api_deadline_bounds_a_full_unix_socket_backlog() -> Result<()> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    let root = tempfile::tempdir_in("/tmp")?;
+    let path = root.path().join("api");
+    let fd = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )?;
+    rustix::net::bind(&fd, &SocketAddrUnix::new(&path)?)?;
+    rustix::net::listen(&fd, 0)?;
+    let listener = StdUnixListener::from(fd);
+    let queued = StdUnixStream::connect(&path)?;
+    let peer = std::thread::spawn(move || -> Result<()> {
+        std::thread::sleep(Duration::from_millis(1500));
+        let (stream, _) = listener.accept()?;
+        drop(stream);
+        Ok(())
+    });
+    let started = Instant::now();
+    assert!(
+        firecracker_api_response(
+            &path,
+            "GET",
+            "/balloon/statistics",
+            &[],
+            Duration::from_millis(250)
+        )
+        .is_err()
+    );
+    let elapsed = started.elapsed();
+    drop(queued);
+    peer.join().unwrap()?;
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "connect ignored the API deadline: {elapsed:?}"
+    );
     Ok(())
 }

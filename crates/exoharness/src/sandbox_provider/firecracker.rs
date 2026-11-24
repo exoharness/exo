@@ -13,6 +13,8 @@ use std::num::NonZeroUsize;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, chown};
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Command, Stdio};
@@ -40,6 +42,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{Mutex, OwnedMutexGuard};
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::egress::{EgressCredentialResolver, UpstreamResolver};
@@ -65,6 +68,8 @@ use super::snapshot_lease::SnapshotLease;
 #[path = "firecracker_lima_storage.rs"]
 pub(super) mod lima_storage;
 
+#[path = "firecracker_balloon.rs"]
+mod balloon;
 #[path = "firecracker_filesystem.rs"]
 mod filesystem;
 pub use filesystem::FirecrackerFilesystemCapture;
@@ -218,6 +223,11 @@ pub struct FirecrackerConfig {
     /// Host memory overhead as a percentage of guest RAM. Defaults to 10%.
     #[serde(default = "default_memory_overhead_percent")]
     pub memory_overhead_percent: u8,
+    /// Opt in to live CPU and memory growth up to the host's capacity.
+    /// The requested shape remains the initial grant. Reserve backend host
+    /// overhead as well as the grant before requesting growth.
+    #[serde(default)]
+    pub live_resource_growth: bool,
 }
 
 impl Default for FirecrackerConfig {
@@ -243,6 +253,7 @@ impl Default for FirecrackerConfig {
             network_bytes_per_second: DEFAULT_NETWORK_BYTES_PER_SECOND,
             max_machines: None,
             memory_overhead_percent: default_memory_overhead_percent(),
+            live_resource_growth: false,
         }
     }
 }
@@ -290,6 +301,12 @@ struct FirecrackerProviderState {
     guest_ip: Option<Ipv4Addr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct FirecrackerGrowthCapacity {
+    resources: SandboxResourceShape,
+    memory_slot_size_mib: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FirecrackerRuntimeFingerprint {
     architecture: String,
@@ -301,6 +318,8 @@ struct FirecrackerRuntimeFingerprint {
     initramfs_sha256: String,
     vcpu_count: u8,
     memory_mib: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    growth_capacity: Option<FirecrackerGrowthCapacity>,
     #[serde(default)]
     network_device_policy: FirecrackerNetworkDevicePolicy,
     #[serde(default)]
@@ -309,8 +328,71 @@ struct FirecrackerRuntimeFingerprint {
     allow_guest_root: bool,
 }
 
+impl FirecrackerRuntimeFingerprint {
+    fn boot_memory_mib(&self) -> u32 {
+        if self.growth_capacity.is_some() {
+            self.memory_mib.div_ceil(2) * 2
+        } else {
+            self.memory_mib
+        }
+    }
+
+    fn hotplug_memory_mib(&self) -> u32 {
+        self.growth_capacity.map_or(0, |capacity| {
+            let slot = capacity.memory_slot_size_mib;
+            capacity
+                .resources
+                .memory_mib
+                .get()
+                .saturating_sub(self.boot_memory_mib())
+                .div_ceil(slot)
+                * slot
+        })
+    }
+
+    fn mapped_memory_mib(&self) -> u32 {
+        self.boot_memory_mib() + self.hotplug_memory_mib()
+    }
+
+    fn physical_memory_mib(&self, grant: u32) -> u32 {
+        if self.growth_capacity.is_some() {
+            self.boot_memory_mib().max(grant.div_ceil(2) * 2)
+        } else {
+            self.memory_mib
+        }
+    }
+
+    fn validate_memory_grant(&self, grant: u32) -> Result<()> {
+        let capacity = self.growth_capacity.map_or(self.memory_mib, |capacity| {
+            capacity.resources.memory_mib.get()
+        });
+        ensure!(
+            grant > 0 && grant >= self.memory_mib && grant <= capacity,
+            "Firecracker memory grant {grant} MiB must be within the initial {} MiB and capacity {capacity} MiB; restore requires capacity for the saved grant",
+            self.memory_mib
+        );
+        let slot = self
+            .growth_capacity
+            .map_or(128, |capacity| capacity.memory_slot_size_mib);
+        ensure!(
+            slot >= 128 && slot.is_power_of_two(),
+            "invalid Firecracker hotplug slot size"
+        );
+        let boot = u64::from(self.memory_mib).div_ceil(2) * 2;
+        let ceiling = u64::from(capacity);
+        let mapped =
+            boot + ceiling.saturating_sub(boot).div_ceil(u64::from(slot)) * u64::from(slot);
+        ensure!(
+            mapped <= u64::from(u32::MAX),
+            "Firecracker memory range overflow"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FirecrackerHostFingerprint {
+    growth_capacity: Option<FirecrackerGrowthCapacity>,
     architecture: String,
     protocol_version: u32,
     firecracker_version: String,
@@ -324,6 +406,36 @@ struct FirecrackerHostFingerprint {
 }
 
 impl FirecrackerHostFingerprint {
+    fn matches_runtime(
+        &self,
+        runtime: &FirecrackerRuntimeFingerprint,
+        resources: SandboxResourceShape,
+    ) -> bool {
+        let mut expected = self.for_resources(resources);
+        if expected.growth_capacity.is_some() != runtime.growth_capacity.is_some() {
+            return false;
+        }
+        // Detection admits new VMs; existing VMs retain their immutable boot geometry.
+        expected.growth_capacity = runtime.growth_capacity;
+        expected == *runtime
+    }
+
+    fn validate_resources(&self, resources: SandboxResourceShape) -> Result<()> {
+        if let Some(capacity) = self.growth_capacity {
+            ensure!(
+                resources.vcpu_count <= capacity.resources.vcpu_count,
+                "requested CPUs exceed sandbox allocation capacity {}",
+                capacity.resources.vcpu_count
+            );
+            ensure!(
+                resources.memory_mib <= capacity.resources.memory_mib,
+                "requested memory exceeds sandbox allocation capacity {} MiB",
+                capacity.resources.memory_mib
+            );
+        }
+        Ok(())
+    }
+
     fn for_resources(&self, resources: SandboxResourceShape) -> FirecrackerRuntimeFingerprint {
         FirecrackerRuntimeFingerprint {
             architecture: self.architecture.clone(),
@@ -335,6 +447,7 @@ impl FirecrackerHostFingerprint {
             initramfs_sha256: self.initramfs_sha256.clone(),
             vcpu_count: resources.vcpu_count.get(),
             memory_mib: resources.memory_mib.get(),
+            growth_capacity: self.growth_capacity,
             network_device_policy: self.network_device_policy.clone(),
             template_resource_slots: self.template_resource_slots,
             allow_guest_root: self.allow_guest_root,
@@ -345,6 +458,8 @@ impl FirecrackerHostFingerprint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct FirecrackerSnapshotManifest {
     format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resource_grant: Option<SandboxResourceShape>,
     #[serde(default)]
     template: bool,
     template_key: String,
@@ -396,6 +511,7 @@ impl FirecrackerSnapshotManifest {
             );
         }
         validate_snapshot_key(&self.template_key)?;
+        balloon::validate_grant(&self.runtime, self.resource_grant)?;
         if self.source_network_slot >= MAX_RESOURCE_SLOTS {
             bail!(
                 "invalid Firecracker snapshot source network slot: {}",
@@ -442,13 +558,15 @@ struct MachineRecord {
     machine_id: String,
     spec_hash: String,
     runtime: FirecrackerRuntimeFingerprint,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resource_grant: Option<SandboxResourceShape>,
     resolved_image: String,
     slot: u32,
     network_enabled: bool,
     workspace_id: Option<String>,
     #[serde(default)]
     resource_paths: Vec<String>,
-    // The lease mtime is refreshed on use; keeping the TTL in the immutable
+    // The lease mtime is refreshed on use; keeping the TTL in the
     // manifest lets a later CLI process reap a VM without process-local state.
     idle_ttl_seconds: Option<u64>,
     snapshot_template: Option<SnapshotTemplateReference>,
@@ -515,6 +633,10 @@ struct FirecrackerVmConfiguration {
     network_interfaces: Vec<FirecrackerNetworkInterface>,
     vsock: FirecrackerVsock,
     entropy: FirecrackerEntropy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    balloon: Option<balloon::Configuration>,
+    #[serde(rename = "memory-hotplug", skip_serializing_if = "Option::is_none")]
+    memory_hotplug: Option<balloon::HotplugConfiguration>,
 }
 
 #[derive(Serialize)]
@@ -545,6 +667,8 @@ struct FirecrackerMachineConfiguration {
     mem_size_mib: u32,
     smt: bool,
     track_dirty_pages: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    huge_pages: Option<&'static str>,
 }
 
 #[derive(Clone, Serialize)]
@@ -627,6 +751,12 @@ impl MachineLifecycleLocks {
         self.lock_key(machine_lifecycle_key(machine_id)).await
     }
 
+    fn try_lock_machine(&self, machine_id: &str) -> Option<OwnedMutexGuard<()>> {
+        self.mutex_for_key(machine_lifecycle_key(machine_id))
+            .try_lock_owned()
+            .ok()
+    }
+
     async fn lock_sandbox(&self, sandbox_id: &str) -> OwnedMutexGuard<()> {
         self.lock_key(sandbox_lifecycle_key(sandbox_id)).await
     }
@@ -652,21 +782,22 @@ impl MachineLifecycleLocks {
     }
 
     async fn lock_key(&self, key: String) -> OwnedMutexGuard<()> {
-        let lock = {
-            let mut locks = self
-                .locks
-                .lock()
-                .expect("Firecracker lifecycle lock map must not be poisoned");
-            locks.retain(|_, lock| lock.strong_count() > 0);
-            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
-                lock
-            } else {
-                let lock = Arc::new(Mutex::new(()));
-                locks.insert(key, Arc::downgrade(&lock));
-                lock
-            }
-        };
-        lock.lock_owned().await
+        self.mutex_for_key(key).lock_owned().await
+    }
+
+    fn mutex_for_key(&self, key: String) -> Arc<Mutex<()>> {
+        let mut locks = self
+            .locks
+            .lock()
+            .expect("Firecracker lifecycle lock map must not be poisoned");
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(Mutex::new(()));
+            locks.insert(key, Arc::downgrade(&lock));
+            lock
+        }
     }
 }
 
@@ -1044,7 +1175,10 @@ impl FirecrackerSandboxBackend {
         .await
         .context("joining Firecracker stale-machine scan")??;
         for machine_id in capacity.dead_machine_ids {
-            let _lifecycle_guard = self.shared.lifecycle_locks.lock_machine(&machine_id).await;
+            let Some(_lifecycle_guard) = self.shared.lifecycle_locks.try_lock_machine(&machine_id)
+            else {
+                continue;
+            };
             self.shared.cleanup_stale_machine(&machine_id).await?;
         }
         Ok(())
@@ -1074,7 +1208,10 @@ impl FirecrackerSandboxBackend {
 
         let expired = expired.into_iter().collect::<HashSet<_>>();
         for machine_id in expired {
-            let _lifecycle_guard = self.shared.lifecycle_locks.lock_machine(&machine_id).await;
+            let Some(_lifecycle_guard) = self.shared.lifecycle_locks.try_lock_machine(&machine_id)
+            else {
+                continue;
+            };
             let state_root = self.shared.config.state_root.clone();
             let machine_id_for_check = machine_id.clone();
             let still_expired = tokio::task::spawn_blocking(move || {
@@ -1146,10 +1283,9 @@ impl FirecrackerSandboxBackend {
                 anyhow::anyhow!("Firecracker snapshot source specification changed").into(),
             );
         }
-        if source.runtime
-            != shared
-                .host_fingerprint
-                .for_resources(request.spec.resources.unwrap_or_default())
+        if !shared
+            .host_fingerprint
+            .matches_runtime(&source.runtime, request.spec.resources.unwrap_or_default())
         {
             return Err(anyhow::anyhow!(
                 "Firecracker snapshot source runtime does not match the configured runtime"
@@ -1183,9 +1319,11 @@ impl FirecrackerSandboxBackend {
         let lease = captured?;
         clock?;
 
+        let resource_grant = source.live_resource_grant()?;
         Ok(CapturedSnapshot {
             manifest: FirecrackerSnapshotManifest {
                 format_version: SNAPSHOT_FORMAT_VERSION,
+                resource_grant,
                 template: false,
                 template_key,
                 spec_hash: source.spec_hash,
@@ -1205,20 +1343,31 @@ impl FirecrackerSandboxBackend {
     ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         let spec_hash = sandbox_spec_hash(&request.spec);
         let machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
-        let _lifecycle_guard = self
+        let lifecycle_guard = self
             .shared
             .lifecycle_locks
             .lock_sandbox(request.sandbox_id.as_str())
             .await;
-        self.restore_snapshot_locked(
-            request,
-            manifest,
-            lifecycle,
-            captured_lease,
-            spec_hash,
-            machine_id,
+        let backend = self.clone();
+        tokio::spawn(
+            async move {
+                // Readiness retains lifecycle ownership after caller cancellation.
+                let _lifecycle_guard = lifecycle_guard;
+                backend
+                    .restore_snapshot_locked(
+                        request,
+                        manifest,
+                        lifecycle,
+                        captured_lease,
+                        spec_hash,
+                        machine_id,
+                    )
+                    .await
+            }
+            .in_current_span(),
         )
         .await
+        .map_err(anyhow::Error::from)?
     }
 
     // The caller holds the target machine family's lifecycle lock. Fork holds
@@ -1282,12 +1431,10 @@ impl FirecrackerSandboxBackend {
                 }
                 .into());
             }
-            if manifest.runtime
-                != self
-                    .shared
-                    .host_fingerprint
-                    .for_resources(request.spec.resources.unwrap_or_default())
-            {
+            if !self.shared.host_fingerprint.matches_runtime(
+                &manifest.runtime,
+                request.spec.resources.unwrap_or_default(),
+            ) {
                 return Err(crate::SandboxFailure::SnapshotUnavailable {
                     message: "Firecracker snapshot runtime does not match the configured runtime"
                         .into(),
@@ -1298,7 +1445,7 @@ impl FirecrackerSandboxBackend {
             let capacity_reservation = self.shared.reserve_machine_capacity(&machine_id).await?;
             let config = self.shared.config.clone();
             let key = template_key.clone();
-            let memory_mib = manifest.runtime.memory_mib;
+            let memory_mib = manifest.runtime.mapped_memory_mib();
             let template_ready = tokio::task::spawn_blocking(move || {
                 snapshot_template_ready(&config, &key, memory_mib)
             })
@@ -1329,17 +1476,20 @@ impl FirecrackerSandboxBackend {
                     &request,
                     &machine_id,
                     &spec_hash,
-                    Some(SnapshotMachineRecord {
-                        template: SnapshotTemplateReference {
-                            key: template_key.clone(),
-                            lifecycle,
+                    Some((
+                        SnapshotMachineRecord {
+                            template: SnapshotTemplateReference {
+                                key: template_key.clone(),
+                                lifecycle,
+                            },
+                            source_network_slot: manifest.source_network_slot,
                         },
-                        source_network_slot: manifest.source_network_slot,
-                    }),
+                        manifest.runtime.clone(),
+                    )),
+                    manifest.resource_grant,
                 )
                 .await?;
             drop(snapshot_lease);
-
             match self
                 .acquire_resolved_locked(
                     request,
@@ -1394,13 +1544,23 @@ impl FirecrackerSandboxBackend {
         } else {
             machine_id(request.sandbox_id.as_str(), &spec_hash)
         };
-        let _lifecycle_guard = self
+        let lifecycle_guard = self
             .shared
             .lifecycle_locks
             .lock_sandbox(request.sandbox_id.as_str())
             .await;
-        self.acquire_resolved_locked(request, spec_hash, machine_id, one_shot, None, false)
-            .await
+        let backend = self.clone();
+        tokio::spawn(
+            async move {
+                let _lifecycle_guard = lifecycle_guard;
+                backend
+                    .acquire_resolved_locked(request, spec_hash, machine_id, one_shot, None, false)
+                    .await
+            }
+            .in_current_span(),
+        )
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     // The caller holds this machine family's lifecycle lock. The capacity
@@ -1417,6 +1577,22 @@ impl FirecrackerSandboxBackend {
     ) -> crate::SandboxResult<FirecrackerSandboxHandle> {
         let stable_machine_id = machine_id(request.sandbox_id.as_str(), &spec_hash);
         let machine_key_prefix = format!("fc-{}-", stable_id(request.sandbox_id.as_str()));
+        let resources = request.spec.resources.unwrap_or_default();
+        let existing = self.shared.load_machine_record(&target_machine_id).await?;
+        if existing.as_ref().is_none_or(|record| {
+            record.spec_hash != spec_hash
+                || !self
+                    .shared
+                    .host_fingerprint
+                    .matches_runtime(&record.runtime, resources)
+        }) {
+            self.shared
+                .host_fingerprint
+                .validate_resources(resources)
+                .map_err(|error| crate::SandboxFailure::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        }
 
         if let Some(state) = request
             .provider_state
@@ -1538,6 +1714,39 @@ impl FirecrackerSandboxBackend {
 
 #[async_trait]
 impl ManagedSandboxBackend for FirecrackerSandboxBackend {
+    fn host_resource_reservation(
+        &self,
+        resources: SandboxResourceShape,
+        snapshot: Option<&SnapshotPayload>,
+    ) -> Result<SandboxResourceShape> {
+        let saved = match snapshot {
+            Some(payload) if payload.format == SnapshotFormat::FirecrackerFilesystemRef => {
+                filesystem::resource_grant(payload)?
+            }
+            Some(payload) => {
+                let manifest = FirecrackerSnapshotManifest::from_payload(payload.clone())?;
+                Some(balloon::validate_grant(
+                    &manifest.runtime,
+                    manifest.resource_grant,
+                )?)
+            }
+            None => None,
+        };
+        let resources = saved.map_or(resources, |grant| SandboxResourceShape {
+            vcpu_count: grant.vcpu_count.max(resources.vcpu_count),
+            memory_mib: grant.memory_mib.max(resources.memory_mib),
+        });
+        SandboxResourceShape::new(
+            resources.vcpu_count.get(),
+            u32::try_from(
+                self.shared
+                    .config
+                    .memory_footprint_mib(resources.memory_mib.get()),
+            )?,
+        )
+        .context("Firecracker host memory reservation overflow")
+    }
+
     fn with_external_proxy(
         &self,
         proxy: crate::egress::ExternalProxyConfig,
@@ -1679,7 +1888,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         }
         let target_spec_hash = sandbox_spec_hash(&target.spec);
         let target_machine_id = machine_id(&target.sandbox_id, &target_spec_hash);
-        let (_first_lifecycle_guard, _second_lifecycle_guard) = self
+        let lifecycle_guards = self
             .shared
             .lifecycle_locks
             .lock_sandbox_pair(&source.sandbox_id, &target.sandbox_id)
@@ -1715,17 +1924,26 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             SnapshotTemplateLifecycle::Machine,
         )
         .await?;
-        Ok(Arc::new(
-            self.restore_snapshot_locked(
-                target,
-                captured.manifest,
-                SnapshotTemplateLifecycle::Machine,
-                Some(captured.lease),
-                target_spec_hash,
-                target_machine_id,
-            )
-            .await?,
-        ))
+        let backend = self.clone();
+        tokio::spawn(
+            async move {
+                let _lifecycle_guards = lifecycle_guards;
+                Ok(Arc::new(
+                    backend
+                        .restore_snapshot_locked(
+                            target,
+                            captured.manifest,
+                            SnapshotTemplateLifecycle::Machine,
+                            Some(captured.lease),
+                            target_spec_hash,
+                            target_machine_id,
+                        )
+                        .await?,
+                ) as Arc<dyn ManagedSandboxHandle>)
+            }
+            .in_current_span(),
+        )
+        .await?
     }
 
     #[tracing::instrument(name = "firecracker.restore", skip_all)]
@@ -1815,11 +2033,6 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             };
         }
         {
-            let _lifecycle_guard = self
-                .shared
-                .lifecycle_locks
-                .lock_machine(&self.machine.record.machine_id)
-                .await;
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
@@ -1841,11 +2054,6 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             .start_process(&self.request.spec, command, cleanup_machine_id)
             .await?;
         if !self.one_shot {
-            let _lifecycle_guard = self
-                .shared
-                .lifecycle_locks
-                .lock_machine(&self.machine.record.machine_id)
-                .await;
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
@@ -1871,11 +2079,6 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
             .start_terminal(&self.request.spec, command, size, cleanup_machine_id)
             .await?;
         if !self.one_shot {
-            let _lifecycle_guard = self
-                .shared
-                .lifecycle_locks
-                .lock_machine(&self.machine.record.machine_id)
-                .await;
             touch_machine(
                 &self.shared,
                 &self.shared.warm_machines,
@@ -1898,6 +2101,84 @@ impl ManagedSandboxHandle for FirecrackerSandboxHandle {
         }
         let address = (self.machine.record.network().guest_ip, port);
         Ok(Some(Box::pin(TcpStream::connect(address).await?)))
+    }
+
+    fn live_resource_ceiling(&self) -> Option<SandboxResourceShape> {
+        self.machine
+            .record
+            .runtime
+            .growth_capacity
+            .map(|capacity| capacity.resources)
+    }
+
+    async fn live_resource_grant(&self) -> Result<Option<SandboxResourceShape>> {
+        let _guard = self
+            .shared
+            .lifecycle_locks
+            .lock_machine(&self.machine.record.machine_id)
+            .await;
+        let record = self
+            .shared
+            .load_machine_record(&self.machine.record.machine_id)
+            .await?
+            .context("Firecracker allocation is missing")?;
+        Ok(Some(balloon::resources(&record)?))
+    }
+
+    async fn expand_resources(
+        &self,
+        resources: SandboxResourceShape,
+    ) -> crate::SandboxResult<crate::SandboxResourceUpdate> {
+        let shared = Arc::clone(&self.shared);
+        let machine_id = self.machine.record.machine_id.clone();
+        // Grant queries must not overtake growth that has already been dispatched.
+        let guard = shared.lifecycle_locks.lock_machine(&machine_id).await;
+        let task = async move {
+            let _guard = guard;
+            let record = shared
+                .load_machine_record(&machine_id)
+                .await?
+                .context("Firecracker expansion source is missing")?;
+            let guest = GuestClient::new(
+                Arc::clone(&shared),
+                machine_from_record(&shared.config, record.clone()).vsock_path,
+            );
+            let config = shared.config.clone();
+            let host_capacity = shared
+                .host_fingerprint
+                .growth_capacity
+                .ok_or_else(|| crate::SandboxFailure::InvalidRequest {
+                    message: "Firecracker live resource growth is disabled".into(),
+                })?
+                .resources;
+            let deadline = balloon::deadline(resources.memory_mib.get());
+            let span = tracing::Span::current();
+            let update = tokio::task::spawn_blocking(move || {
+                span.in_scope(|| {
+                    balloon::expand(&config, &record, resources, host_capacity, deadline)
+                })
+            })
+            .await
+            .map_err(anyhow::Error::from)??;
+            if !matches!(update, crate::SandboxResourceUpdate::Applied { .. }) {
+                return Ok(update);
+            }
+            Ok(
+                match guest
+                    .ensure_online_cpus(resources.vcpu_count.get(), deadline)
+                    .await
+                {
+                    Ok(()) => update,
+                    Err(error) => crate::SandboxResourceUpdate::Incomplete {
+                        reservation: resources,
+                        error: error.into(),
+                    },
+                },
+            )
+        };
+        tokio::spawn(task.in_current_span())
+            .await
+            .map_err(anyhow::Error::from)?
     }
 
     #[tracing::instrument(name = "firecracker.stop", skip_all)]
@@ -1971,6 +2252,9 @@ impl FirecrackerSandboxHandle {
                 .into());
             }
         }
+        // TODO: Retain lifecycle ownership through blocking capture after cancellation.
+        // A queued capture can outlive this guard, letting growth make its saved grant
+        // and disk-space estimate stale.
         let _lifecycle_guard = self
             .shared
             .lifecycle_locks
@@ -2147,10 +2431,18 @@ impl Shared {
         spec_hash: &str,
         pre_staged: bool,
     ) -> Result<Machine> {
-        let runtime = self
-            .host_fingerprint
-            .for_resources(request.spec.resources.unwrap_or_default());
+        let resources = request.spec.resources.unwrap_or_default();
         let existing = self.load_machine_record(machine_id).await?;
+        let runtime = existing
+            .as_ref()
+            .filter(|record| {
+                self.host_fingerprint
+                    .matches_runtime(&record.runtime, resources)
+            })
+            .map_or_else(
+                || self.host_fingerprint.for_resources(resources),
+                |record| record.runtime.clone(),
+            );
         let reusing_existing_machine = existing
             .as_ref()
             .is_some_and(|record| record.spec_hash == spec_hash && record.runtime == runtime);
@@ -2186,8 +2478,14 @@ impl Shared {
                         .await??;
                     }
 
+                    // TODO: Reapply memory limits on warm adoption even when nothing grew.
+                    // Changing memory_overhead_percent across restarts can leave memory.max
+                    // inconsistent with host_resource_reservation.
+                    self.initialize_resources(&machine.record).await?;
                     return Ok(machine);
                 }
+                self.host_fingerprint
+                    .validate_resources(balloon::resources(record)?)?;
                 self.cleanup_machine(machine_id, false).await?;
             }
         }
@@ -2195,7 +2493,7 @@ impl Shared {
         let record = match existing {
             Some(record) if record.spec_hash == spec_hash && record.runtime == runtime => record,
             _ => {
-                self.new_machine_record(request, machine_id, spec_hash, None)
+                self.new_machine_record(request, machine_id, spec_hash, None, None)
                     .await?
             }
         };
@@ -2221,7 +2519,9 @@ impl Shared {
             }
             GuestClient::new(Arc::clone(self), machine.vsock_path.clone())
                 .sync_clock()
-                .await
+                .await?;
+            self.initialize_resources(&machine.record).await?;
+            Ok::<_, anyhow::Error>(())
         }
         .await;
         if let Err(error) = ready {
@@ -2271,6 +2571,41 @@ impl Shared {
         Ok(machine)
     }
 
+    async fn initialize_resources(self: &Arc<Self>, record: &MachineRecord) -> Result<()> {
+        if record.runtime.growth_capacity.is_some() {
+            let resources = balloon::resources(record)?;
+            let deadline = balloon::deadline(resources.memory_mib.get());
+            let config = self.config.clone();
+            let record_for_limits = record.clone();
+            let span = tracing::Span::current();
+            tokio::task::spawn_blocking(move || {
+                span.in_scope(|| {
+                    let record = &record_for_limits;
+                    let cgroup = firecracker_cgroup_dir(&config, &record.machine_id);
+                    if resources.memory_mib.get() > record.runtime.memory_mib {
+                        // A journaled expansion can precede the host-limit writes.
+                        balloon::apply_host_memory_limits(&config, &cgroup, resources)?;
+                    }
+                    if resources.vcpu_count.get() > record.runtime.vcpu_count {
+                        fs::write(
+                            cgroup.join("cpu.max"),
+                            balloon::cpu_quota(resources.vcpu_count.get()),
+                        )?;
+                    }
+                    balloon::initialize_until(&config, record, deadline)
+                })
+            })
+            .await??;
+            GuestClient::new(
+                Arc::clone(self),
+                machine_from_record(&self.config, record.clone()).vsock_path,
+            )
+            .ensure_online_cpus(resources.vcpu_count.get(), deadline)
+            .await?;
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(name = "firecracker.restore_network", skip_all)]
     async fn reconfigure_restored_network(self: &Arc<Self>, machine: &Machine) -> Result<()> {
         // Snapshot memory contains the source guest's configured IP, while each
@@ -2314,7 +2649,8 @@ impl Shared {
         request: &FirecrackerRequest,
         machine_id: &str,
         spec_hash: &str,
-        snapshot: Option<SnapshotMachineRecord>,
+        snapshot: Option<(SnapshotMachineRecord, FirecrackerRuntimeFingerprint)>,
+        resource_grant: Option<SandboxResourceShape>,
     ) -> Result<MachineRecord> {
         let state_root = self.config.state_root.clone();
         let machine_id = machine_id.to_string();
@@ -2344,12 +2680,24 @@ impl Shared {
             .map(|m| m.guest_path.clone())
             .collect();
         let idle_ttl_seconds = request.lifecycle.idle_ttl.map(|ttl| ttl.as_secs());
-        let runtime = self
-            .host_fingerprint
-            .for_resources(request.spec.resources.unwrap_or_default());
+        let resources = request.spec.resources.unwrap_or_default();
+        self.host_fingerprint.validate_resources(resources)?;
+        let runtime = snapshot.as_ref().map_or_else(
+            || self.host_fingerprint.for_resources(resources),
+            |(_, runtime)| runtime.clone(),
+        );
+        let resource_grant = resource_grant
+            .or_else(|| runtime.growth_capacity.map(|_| resources))
+            .map(|grant| SandboxResourceShape {
+                vcpu_count: grant.vcpu_count.max(resources.vcpu_count),
+                memory_mib: grant.memory_mib.max(resources.memory_mib),
+            });
+        balloon::validate_grant(&runtime, resource_grant)?;
+        self.host_fingerprint
+            .validate_resources(resource_grant.unwrap_or(resources))?;
         tokio::task::spawn_blocking(move || {
             let (slot, snapshot_template, snapshot_network_slot) = match snapshot {
-                Some(snapshot) => {
+                Some((snapshot, _)) => {
                     validate_snapshot_key(&snapshot.template.key)?;
                     (
                         allocate_resource_slot_from(&state_root, &machine_id, 0)?,
@@ -2367,6 +2715,7 @@ impl Shared {
                 machine_id,
                 spec_hash,
                 runtime,
+                resource_grant,
                 resolved_image,
                 slot,
                 network_enabled,
@@ -2757,6 +3106,13 @@ fn validate_host_blocking(config: &FirecrackerConfig) -> Result<String> {
             "Firecracker and jailer versions must match: {firecracker_version} != {jailer_version}"
         );
     }
+    if config.live_resource_growth {
+        ensure!(
+            semver::Version::parse(firecracker_version.trim_start_matches('v'))?
+                >= semver::Version::new(1, 17, 0),
+            "live memory growth requires Firecracker and jailer 1.17 or newer"
+        );
+    }
     Ok(firecracker_version)
 }
 
@@ -2764,7 +3120,12 @@ fn firecracker_host_fingerprint(
     config: &FirecrackerConfig,
     firecracker_version: String,
 ) -> Result<FirecrackerHostFingerprint> {
+    let growth_capacity = config
+        .live_resource_growth
+        .then(|| balloon::host_growth_capacity(config))
+        .transpose()?;
     Ok(FirecrackerHostFingerprint {
+        growth_capacity,
         architecture: std::env::consts::ARCH.to_string(),
         protocol_version: PROTOCOL_VERSION,
         firecracker_version,
@@ -3074,6 +3435,12 @@ fn hash_runtime_fingerprint(hasher: &mut Sha256, runtime: &FirecrackerRuntimeFin
     hash_snapshot_string(hasher, &runtime.initramfs_sha256);
     hasher.update(runtime.vcpu_count.to_le_bytes());
     hasher.update(runtime.memory_mib.to_le_bytes());
+    if let Some(capacity) = runtime.growth_capacity {
+        hash_snapshot_string(hasher, "growth_capacity");
+        hasher.update(capacity.resources.vcpu_count.get().to_le_bytes());
+        hasher.update(capacity.resources.memory_mib.get().to_le_bytes());
+        hasher.update(capacity.memory_slot_size_mib.to_le_bytes());
+    }
     hasher.update([u8::from(runtime.allow_guest_root)]);
     hash_snapshot_string(
         hasher,
@@ -3098,6 +3465,13 @@ fn machine_from_record(config: &FirecrackerConfig, record: MachineRecord) -> Mac
 }
 
 impl MachineRecord {
+    fn live_resource_grant(&self) -> Result<Option<SandboxResourceShape>> {
+        if self.runtime.growth_capacity.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(balloon::resources(self)?))
+    }
+
     fn network(&self) -> NetworkConfig {
         network_config(self.slot)
     }
@@ -3355,6 +3729,18 @@ fn write_manifest(state_root: &Path, record: &MachineRecord) -> Result<()> {
     if let Err(error) = fs::remove_file(&temporary) {
         tracing::warn!(%error, path = %temporary.display(), "failed to remove temporary Firecracker manifest");
     }
+    Ok(())
+}
+
+fn replace_manifest(state_root: &Path, record: &MachineRecord) -> Result<()> {
+    let path = manifest_path(state_root, &record.machine_id);
+    ensure!(path.is_file(), "Firecracker allocation is missing");
+    let directory = path.parent().context("missing manifest directory")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(&mut temporary, record)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(&path)?;
+    File::open(directory)?.sync_all()?;
     Ok(())
 }
 
@@ -4359,12 +4745,34 @@ fn spawn_jailed_firecracker(
     firecracker_arguments: &[&str],
 ) -> Result<()> {
     let host_uid = jailer_uid(config, record)?;
-    let memory_max = config.memory_footprint_mib(record.runtime.memory_mib) * 1024 * 1024;
-    let cpu_max = format!("{} 100000", u32::from(record.runtime.vcpu_count) * 100_000);
+    let resources = balloon::resources(record)?;
+    let memory_max = config.memory_footprint_mib(resources.memory_mib.get()) * 1024 * 1024;
+    let cpu_max = balloon::cpu_quota(resources.vcpu_count.get());
     // Always use the matching jailer: it creates the mount/PID namespaces and
     // cgroup, then drops to a unique unprivileged UID before execing Firecracker.
     // https://github.com/firecracker-microvm/firecracker/blob/main/docs/jailer.md#jailer-operation
     let mut command = Command::new(&config.jailer_bin);
+    #[cfg(target_os = "linux")]
+    if record.runtime.growth_capacity.is_some() {
+        // Clear inherited daemon-thread pinning; cgroups constrain the VMM to its allocation.
+        let mut cpus = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+        for cpu in balloon::online_cpu_ids()? {
+            ensure!(
+                cpu < libc::CPU_SETSIZE as usize,
+                "host CPU ID exceeds affinity mask"
+            );
+            unsafe { libc::CPU_SET(cpu, &mut cpus) };
+        }
+        // SAFETY: only an async-signal-safe syscall runs after fork; the mask is prepared above.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::sched_setaffinity(0, std::mem::size_of_val(&cpus), &cpus) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     command
         .arg("--id")
         .arg(&record.machine_id)
@@ -4391,6 +4799,9 @@ fn spawn_jailed_firecracker(
         .arg("memory.high=max")
         .arg("--cgroup")
         .arg(format!("cpu.max={cpu_max}"));
+    if record.runtime.growth_capacity.is_some() {
+        command.arg("--cgroup").arg("memory.swap.max=0");
+    }
     // The API socket path is injected here, next to the constant that
     // validate_jailed_socket_paths budgets, so no call site can drift from
     // the path the rest of the code waits on.
@@ -4446,6 +4857,12 @@ fn firecracker_vm_configuration(
         String::from("reboot=k panic=1 pci=off rdinit=/init 8250.nr_uarts=0 quiet loglevel=1");
     if record.runtime.allow_guest_root {
         boot_args.push_str(" exo_allow_guest_root=1");
+    }
+    if record.runtime.growth_capacity.is_some() {
+        boot_args.push_str(&format!(
+            " maxcpus={} memory_hotplug.memmap_on_memory=1 memhp_default_state=online",
+            record.runtime.vcpu_count
+        ));
     }
     if record.network_enabled {
         boot_args.push_str(&format!(
@@ -4550,6 +4967,8 @@ fn firecracker_vm_configuration(
         Vec::new()
     };
     Ok(FirecrackerVmConfiguration {
+        balloon: balloon::configuration(record)?,
+        memory_hotplug: balloon::hotplug_configuration(&record.runtime),
         boot_source: FirecrackerBootSource {
             kernel_image_path: "/vmlinux",
             initrd_path: "/initramfs.cpio",
@@ -4557,10 +4976,16 @@ fn firecracker_vm_configuration(
         },
         drives,
         machine_config: FirecrackerMachineConfiguration {
-            vcpu_count: record.runtime.vcpu_count,
-            mem_size_mib: record.runtime.memory_mib,
+            vcpu_count: balloon::ceiling(&record.runtime)
+                .context("invalid Firecracker CPU capacity")?
+                .vcpu_count
+                .get(),
+            mem_size_mib: record.runtime.boot_memory_mib(),
             smt: false,
-            track_dirty_pages: true,
+            // Swap-free growth uses resident-page diff snapshots, allowing huge
+            // KVM mappings that dirty logging would split into 4 KiB pages.
+            track_dirty_pages: record.runtime.growth_capacity.is_none(),
+            huge_pages: record.runtime.growth_capacity.map(|_| "Transparent"),
         },
         network_interfaces,
         vsock: FirecrackerVsock {
@@ -4831,17 +5256,134 @@ fn firecracker_api_request<T: Serialize>(
     body: &T,
     timeout: Duration,
 ) -> Result<()> {
-    let body = serde_json::to_vec(body)?;
-    let mut stream = StdUnixStream::connect(socket)
+    firecracker_api_response(socket, method, path, &serde_json::to_vec(body)?, timeout).map(|_| ())
+}
+
+struct FirecrackerApiStream {
+    stream: StdUnixStream,
+    deadline: Instant,
+}
+
+impl FirecrackerApiStream {
+    fn connect(path: &Path, timeout: Duration) -> std::io::Result<Self> {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+        let deadline = Instant::now() + timeout;
+        let address = SocketAddrUnix::new(path)?;
+        loop {
+            #[cfg(target_os = "linux")]
+            let fd = rustix::net::socket_with(
+                AddressFamily::UNIX,
+                SocketType::STREAM,
+                rustix::net::SocketFlags::CLOEXEC | rustix::net::SocketFlags::NONBLOCK,
+                None,
+            )?;
+            #[cfg(not(target_os = "linux"))]
+            let fd = {
+                let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
+                rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+                fd
+            };
+            let stream = Self {
+                stream: StdUnixStream::from(fd),
+                deadline,
+            };
+            stream.stream.set_nonblocking(true)?;
+            match rustix::net::connect(&stream.stream, &address) {
+                Ok(()) => {}
+                Err(rustix::io::Errno::AGAIN) => {
+                    std::thread::sleep(stream.remaining()?.min(Duration::from_millis(1)));
+                    continue;
+                }
+                Err(rustix::io::Errno::INPROGRESS | rustix::io::Errno::ALREADY) => {
+                    stream.wait(rustix::event::PollFlags::OUT)?;
+                    rustix::net::sockopt::socket_error(&stream.stream)??;
+                }
+                Err(error) => return Err(error.into()),
+            }
+            return Ok(stream);
+        }
+    }
+
+    fn wait(&self, events: rustix::event::PollFlags) -> std::io::Result<()> {
+        loop {
+            let timeout = rustix::event::Timespec::try_from(self.remaining()?)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+            let mut sockets = [rustix::event::PollFd::new(&self.stream, events)];
+            match rustix::event::poll(&mut sockets, Some(&timeout)) {
+                Ok(0) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Firecracker API wait timed out",
+                    ));
+                }
+                Ok(_) => return Ok(()),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    fn retry_io(
+        &mut self,
+        events: rustix::event::PollFlags,
+        mut operation: impl FnMut(&mut StdUnixStream) -> std::io::Result<usize>,
+    ) -> std::io::Result<usize> {
+        loop {
+            self.remaining()?;
+            match operation(&mut self.stream) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    self.wait(events)?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => return result,
+            }
+        }
+    }
+
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Firecracker API deadline expired",
+                )
+            })
+    }
+}
+
+impl Read for FirecrackerApiStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.retry_io(rustix::event::PollFlags::IN, |stream| stream.read(buffer))
+    }
+}
+
+impl Write for FirecrackerApiStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.retry_io(rustix::event::PollFlags::OUT, |stream| stream.write(buffer))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+fn firecracker_api_response(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let mut stream = FirecrackerApiStream::connect(socket, timeout)
         .with_context(|| format!("connecting to Firecracker API {}", socket.display()))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
-    stream.write_all(&body)?;
+    stream.write_all(body)?;
     stream.flush()?;
     // Read::take bounds every byte read from the VMM, status line and headers
     // included; see FIRECRACKER_API_MAX_RESPONSE_BYTES.
@@ -4882,7 +5424,7 @@ fn firecracker_api_request<T: Serialize>(
     let mut response_body = vec![0_u8; content_length];
     reader.read_exact(&mut response_body)?;
     if (200..300).contains(&status) {
-        return Ok(());
+        return Ok(response_body);
     }
     bail!(
         "Firecracker API {method} {path} failed with status {status}: {}",
@@ -5108,7 +5650,17 @@ fn capture_snapshot_template(
     reap_orphaned_fork_snapshot_templates_blocking(config)?;
     let root = jail_root(config, &source.machine_id);
     let disk_bytes = fs::metadata(root.join("overlay.ext4"))?.len();
-    let capture_bytes = u64::from(source.runtime.memory_mib)
+    let memory_mib = source.runtime.mapped_memory_mib();
+    // Untouched hotplug slots remain sparse. A partially plugged slot is fully
+    // accessible to the guest, so include its unused tail in the dirty budget.
+    let boot = source.runtime.boot_memory_mib();
+    let slot = source
+        .runtime
+        .growth_capacity
+        .map_or(128, |capacity| capacity.memory_slot_size_mib);
+    let hotplugged = source.runtime.physical_memory_mib(balloon::grant(source)?) - boot;
+    let dirty_memory_mib = boot + hotplugged.div_ceil(slot) * slot;
+    let capture_bytes = u64::from(dirty_memory_mib)
         .checked_mul(1024 * 1024)
         .and_then(|bytes| bytes.checked_add(SNAPSHOT_STATE_RESERVE_BYTES))
         .and_then(|bytes| bytes.checked_mul(2))
@@ -5274,7 +5826,7 @@ fn capture_snapshot_template(
         }
         return Err(error);
     }
-    validate_snapshot_template(config, &destination, source.runtime.memory_mib)?;
+    validate_snapshot_template(config, &destination, memory_mib)?;
     replace_hard_link(&destination.join("memory"), &memory_base)?;
     fs::remove_file(&capture_pending)?;
     Ok(open_snapshot_template_lease(config, template_key)?)
@@ -5339,7 +5891,7 @@ fn launch_snapshot_clone(
                 backend_path: "/snapshot/memory",
                 backend_type: "File",
             },
-            track_dirty_pages: true,
+            track_dirty_pages: record.runtime.growth_capacity.is_none(),
             resume_vm: false,
         },
         FIRECRACKER_API_TIMEOUT,
@@ -5522,6 +6074,23 @@ impl GuestClient {
 
     async fn ping(&self) -> Result<()> {
         self.ping_with_timeout(Duration::from_secs(2)).await
+    }
+
+    async fn ensure_online_cpus(&self, vcpu_count: u8, deadline: Instant) -> Result<()> {
+        let response: GuestResponse = self
+            .invoke_with_timeout(
+                &GuestRequest::EnsureOnlineCpus { vcpu_count },
+                balloon::api_timeout(deadline)?,
+            )
+            .await?;
+        guest_response_result(&response, "onlining Firecracker guest CPUs")?;
+        ensure!(
+            response
+                .online_vcpu_count
+                .is_some_and(|online| online >= vcpu_count),
+            "Firecracker guest did not confirm {vcpu_count} online CPUs"
+        );
+        Ok(())
     }
 
     async fn sync_clock(&self) -> Result<()> {
@@ -6069,7 +6638,16 @@ async fn touch_machine(
         }
     };
     if touched {
-        shared.touch_machine_lease(machine_id).await?;
+        let path = lease_path(&shared.config.state_root, machine_id);
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            match File::open(path) {
+                Ok(file) => file.set_modified(SystemTime::now())?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            Ok(())
+        })
+        .await??;
     }
     Ok(())
 }
@@ -6077,3 +6655,11 @@ async fn touch_machine(
 #[cfg(test)]
 #[path = "firecracker_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "firecracker_live_memory_tests.rs"]
+mod live_memory_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "firecracker_live_cpu_tests.rs"]
+mod live_cpu_tests;

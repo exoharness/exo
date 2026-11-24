@@ -2,6 +2,7 @@ use super::*;
 
 fn fixture(config: &FirecrackerConfig) -> Result<SnapshotPayload> {
     let manifest = FilesystemManifest {
+        resource_grant: None,
         template: false,
         key: "a".repeat(64),
         sandbox_id: "filesystem-test".into(),
@@ -46,6 +47,38 @@ fn duplicate_restore_destinations_are_rejected() -> Result<()> {
     );
     assert_eq!(fs::read(&target)?, b"existing disk");
     assert!(!target.with_extension("lock").exists());
+    Ok(())
+}
+
+#[test]
+fn restore_reservation_reads_the_saved_grant_before_admission() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let config = FirecrackerConfig {
+        state_root: root.path().into(),
+        memory_overhead_percent: 25,
+        ..Default::default()
+    };
+    let mut manifest = FilesystemManifest::from_payload(&fixture(&config)?)?;
+    manifest.resource_grant = SandboxResourceShape::new(2, 8192);
+    let payload = manifest.payload()?;
+    let backend = FirecrackerSandboxBackend {
+        external_proxy: None,
+        shared: super::super::tests::test_shared(config, HashMap::new())?,
+        egress: Arc::new(EgressRuntime::new(None, Arc::new(PublicUpstreamResolver))),
+    };
+    for (request, expected) in [
+        ((1, 512), (2, 10240)),
+        ((4, 4096), (4, 10240)),
+        ((1, 16384), (2, 20480)),
+    ] {
+        assert_eq!(
+            backend.host_resource_reservation(
+                SandboxResourceShape::new(request.0, request.1).unwrap(),
+                Some(&payload),
+            )?,
+            SandboxResourceShape::new(expected.0, expected.1).unwrap()
+        );
+    }
     Ok(())
 }
 
@@ -252,7 +285,11 @@ fn malformed_references_fail_before_accessing_host_paths() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn native_request(config: &FirecrackerConfig, id: &str, image: &str) -> Result<SandboxRequest> {
+pub(in super::super) fn native_request(
+    config: &FirecrackerConfig,
+    id: &str,
+    image: &str,
+) -> Result<SandboxRequest> {
     let agent_id = crate::Uuid7::now();
     let thread_id = crate::Uuid7::now();
     let directory = config
@@ -310,7 +347,10 @@ fn native_request(config: &FirecrackerConfig, id: &str, image: &str) -> Result<S
 }
 
 #[cfg(target_os = "linux")]
-async fn shell(handle: &Arc<dyn ManagedSandboxHandle>, script: &str) -> Result<String> {
+pub(in super::super) async fn shell(
+    handle: &Arc<dyn ManagedSandboxHandle>,
+    script: &str,
+) -> Result<String> {
     let output = handle
         .exec(&SandboxCommand {
             argv: vec!["/bin/sh".into(), "-ec".into(), script.into()],

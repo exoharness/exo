@@ -165,12 +165,67 @@ use forks, the guest kernel must additionally be 5.18 or newer with
 `CONFIG_HW_RANDOM_VIRTIO=y` lets the guest draw extra entropy from the
 attached virtio-rng device.
 
-Exo enables dirty-page tracking and captures sparse memory snapshots instead
-of writing the entire configured RAM size. Each capture merges changes into a
-private reflink of the machine's latest captured memory, or its original restore
+Live growth is opt-in through `FirecrackerConfig.live_resource_growth`.
+The request remains the initial grant; memory capacity is detected from host RAM
+and the jailer's allocation cgroups, accounting for the configured memory overhead. Daemon-thread
+affinity and daemon-only quotas do not define sandbox capacity. A VM boots at its requested
+memory size, rounded up by at most 1 MiB, with the remaining range unplugged.
+Growth uses `virtio-mem`; a small balloon preserves exact odd-MiB grants.
+Matching Firecracker/jailer 1.17 or newer and guest `CONFIG_VIRTIO_MEM=y`,
+`CONFIG_MHP_MEMMAP_ON_MEMORY=y`, and `CONFIG_VIRTIO_BALLOON=y` are required.
+New memory is automatically onlined with its metadata in the added memory,
+so a large growth range does not consume the initial grant at boot.
+Boot RAM uses transparent huge pages when growth is enabled.
+Only the requested CPUs are online at boot (`maxcpus=<grant>`), while the VM
+reserves its CPU topology for growth; `CONFIG_HOTPLUG_CPU=y` is required.
+CPU growth raises the host quota before the guest agent onlines additional CPUs,
+and completes only after the guest confirms the requested online count.
+Capacity is bounded by the jailer allocation, KVM, and Firecracker's 32-vCPU maximum.
+Existing VMs and RAM snapshots retain their boot geometry when detected capacity changes.
+
+Call `host_resource_reservation(resources, None)` before acquisition or growth.
+It returns the full host reservation using `memory_overhead_percent` (10% by default).
+Before restore, pass `Some(&snapshot)` to reserve at least its saved CPU and memory
+grant, even when the original request was smaller. Keep that original request
+shape when restoring; the quote does not change snapshot identity or resize it.
+The cgroup hard limit enforces that reservation, `memory.high` remains unlimited,
+and swap and automatic OOM balloon deflation are disabled. A guest can consume
+the whole headroom; the balloon's page counts are guest-reported.
+See Firecracker's [hotplug](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/memory-hotplug.md)
+and [balloon security guidance](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/ballooning.md#security-disclaimer).
+
+Growth persists the grant and raises host limits before changing guest resources.
+`SandboxResourceUpdate::Applied` confirms convergence; `Incomplete` carries the
+reservation to retain and the error. Shrinking and over-capacity
+requests are rejected before mutation. Keep the reservation after failure or
+disconnect until `live_resource_grant` reconciles it or terminate the VM;
+retrying the same target is safe. Filesystem and RAM captures retain both grants
+separately from request identity.
+
+Lease renewal updates existing leases without waiting for the lifecycle lock, so
+exec stays responsive during growth. This also applies when live growth is
+disabled; a deleted lease is never recreated by an exec.
+
+After boot and clock synchronization, one convergence deadline covers memory
+adjustment and CPU onlining: 30 seconds plus one second per 128 MiB of the target
+grant, capped at two minutes. The reaper skips busy VMs so one stalled guest does
+not delay cleanup of others. Each API wait is capped at the lesser
+of five seconds and the remaining budget; convergence is polled every 100 ms.
+Device page counts are read on demand; guest statistics are polled once an hour.
+
+This is a native Linux Rust API. The CLI and macOS bridge do not expose live
+resource updates; invoke the native backend inside Lima for local validation.
+
+Exo captures sparse memory snapshots. Live growth uses Firecracker's
+[resident-page snapshots](https://github.com/firecracker-microvm/firecracker/blob/v1.18.0/docs/snapshotting/snapshot-support.md#creating-diff-snapshots)
+with host swap disabled, allowing huge KVM mappings. These snapshots may include
+unchanged resident pages. VMs with growth disabled retain KVM dirty-page tracking.
+Each capture merges changes into a private reflink of the machine's latest
+captured memory, or its original restore
 template on the first capture. The result is independently restorable. Published
 templates remain read-only and shared by restored VMs; disk and memory are
-captured while the guest is paused.
+captured while the guest is paused. RAM files retain the mapped capacity as
+their logical size; copies must preserve sparse holes.
 
 The latest memory base is retained outside the writable jail, counted against
 the snapshot budget, and removed with the machine. An interrupted capture blocks
