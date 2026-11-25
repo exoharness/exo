@@ -59,9 +59,9 @@ use crate::{
 };
 
 use super::capture_store::{self, allocated_files as snapshot_directory_bytes};
-use super::firecracker_image::resolve_image;
 #[cfg(test)]
 use super::firecracker_image::validate_ext4_image;
+use super::firecracker_image::{prepare_image_cache, resolve_image};
 use super::snapshot_lease::SnapshotLease;
 
 #[cfg(target_os = "linux")]
@@ -944,6 +944,8 @@ impl FirecrackerSandboxBackend {
         self.reap_stale_machines().await?;
         self.reap_expired_machines().await?;
         self.shared.reap_orphaned_fork_snapshot_templates().await;
+        let _image_lease =
+            prepare_image_cache(&self.shared.config, Some(&request.spec.image)).await?;
         let request = self.resolve_request(request).await?;
         self.acquire_resolved(request).await
     }
@@ -1687,6 +1689,9 @@ impl FirecrackerSandboxBackend {
                     };
                     let mut handle = match snapshot {
                         Some(snapshot) => {
+                            let _image_lease =
+                                prepare_image_cache(&self.shared.config, Some(&request.spec.image))
+                                    .await?;
                             self.restore_snapshot(
                                 self.resolve_request(request).await?,
                                 snapshot,
@@ -1806,6 +1811,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
     }
 
     async fn resolve_image(&self, image: &str) -> Result<crate::ResolvedSandboxImage> {
+        let image_lease = prepare_image_cache(&self.shared.config, Some(image)).await?;
         let path = resolve_image(
             &self.shared.config.state_root,
             image,
@@ -1815,6 +1821,7 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
         )
         .await?;
         tokio::task::spawn_blocking(move || {
+            let _image_lease = image_lease;
             let file = File::open(path.with_extension("config.json"))?;
             let configuration = serde_json::from_reader(std::io::Read::take(file, 65_536))?;
             Ok(crate::ResolvedSandboxImage {
@@ -1882,6 +1889,8 @@ impl ManagedSandboxBackend for FirecrackerSandboxBackend {
             .policy
             .validate_basic("Firecracker snapshot target")?;
         let mut source = prepare_request(source.into())?;
+        let _image_lease =
+            prepare_image_cache(&self.shared.config, Some(&target.spec.image)).await?;
         let target = self.resolve_request(target.into()).await?;
         if source.sandbox_id == target.sandbox_id {
             bail!("Firecracker fork source and target must be different sandboxes")
@@ -5546,6 +5555,14 @@ fn retained_snapshot_bytes(config: &FirecrackerConfig) -> Result<u64> {
     Ok(retained)
 }
 
+pub(super) fn available_disk_bytes(state_root: &Path) -> Result<u64> {
+    let filesystem = rustix::fs::statvfs(state_root)?;
+    let available = filesystem.f_bavail.saturating_mul(filesystem.f_frsize);
+    let reserve =
+        (filesystem.f_blocks.saturating_mul(filesystem.f_frsize) / 10).max(1024 * 1024 * 1024);
+    Ok(available.saturating_sub(reserve))
+}
+
 fn enforce_snapshot_budget(config: &FirecrackerConfig) -> crate::SandboxResult<()> {
     let accounted_bytes = retained_snapshot_bytes(config)?;
     if accounted_bytes > config.snapshot_budget_bytes {
@@ -5670,11 +5687,10 @@ fn capture_snapshot_template(
         let _budget = snapshot_budget_lock(config)?;
         enforce_snapshot_budget(config)?;
     }
-    let filesystem = rustix::fs::statvfs(&config.state_root).map_err(anyhow::Error::from)?;
-    let available = filesystem.f_bavail.saturating_mul(filesystem.f_frsize);
-    let reserve =
-        (filesystem.f_blocks.saturating_mul(filesystem.f_frsize) / 10).max(1024 * 1024 * 1024);
-    let available_bytes = available.saturating_sub(reserve);
+    super::firecracker_image::evict_image_cache(&config.state_root, None, || {
+        Ok(available_disk_bytes(&config.state_root)? >= capture_bytes)
+    })?;
+    let available_bytes = available_disk_bytes(&config.state_root)?;
     if capture_bytes > available_bytes {
         return Err(crate::SandboxFailure::DiskSpaceExhausted {
             required_bytes: capture_bytes,

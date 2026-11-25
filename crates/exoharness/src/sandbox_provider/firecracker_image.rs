@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::fs::{self, File, Permissions};
+use std::fs::{self, File, Permissions, TryLockError};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -18,6 +18,7 @@ use std::process::{Command, Stdio};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, SystemTime};
 
+use super::snapshot_lease::SnapshotLease;
 use crate::SandboxImageConfiguration;
 use anyhow::{Context, Result, anyhow, bail};
 use docker_credential::{CredentialRetrievalError, DockerCredential};
@@ -113,6 +114,58 @@ enum Whiteout {
     Opaque(PathBuf),
 }
 
+pub(super) async fn prepare_image_cache(
+    config: &super::firecracker::FirecrackerConfig,
+    source: Option<&str>,
+) -> Result<SnapshotLease> {
+    let root = config.state_root.clone();
+    let required_bytes = config
+        .image_size_gib
+        .checked_mul(1024 * 1024 * 1024)
+        .context("Firecracker image size overflow")?;
+    let keep = match source.filter(|source| !source.trim().is_empty()) {
+        Some(source) if looks_like_local_image(source) => Some(PathBuf::from(source)),
+        Some(source) => {
+            let reference = source.parse::<Reference>()?;
+            immutable_reference_digest(&reference)?
+                .map(|digest| cache_image_dir(&root.join("images"), &current_platform()?, digest))
+                .transpose()?
+                .map(|directory| directory.join("rootfs.ext4"))
+        }
+        None => None,
+    };
+    tokio::task::spawn_blocking(move || {
+        fs::create_dir_all(root.join("images"))?;
+        evict_image_cache(&root, keep.as_deref(), || {
+            Ok(super::firecracker::available_disk_bytes(&root)? >= required_bytes)
+        })?;
+        Ok(SnapshotLease::shared(File::open(root.join("images"))?)?)
+    })
+    .await
+    .context("joining Firecracker image cache eviction")?
+}
+
+fn cached_image_source(state_root: &Path, source: &str) -> Result<Option<String>> {
+    let path = Path::new(source);
+    if path.file_name() != Some(OsStr::new("rootfs.ext4")) || path.try_exists()? {
+        return Ok(None);
+    }
+    let directory = fs::canonicalize(path.parent().context("image cache parent missing")?)?;
+    if !is_cached_local_image(state_root, &directory) {
+        return Ok(None);
+    }
+    let metadata: CachedImageMetadata =
+        serde_json::from_reader(File::open(directory.join("metadata.json"))?.take(1_048_576))?;
+    let reference = metadata.source.parse::<Reference>()?;
+    sha256_hex(&metadata.source_digest)?;
+    Ok(Some(format!(
+        "{}/{}@{}",
+        reference.registry(),
+        reference.repository(),
+        metadata.source_digest
+    )))
+}
+
 #[tracing::instrument(
     name = "firecracker.resolve_image",
     skip_all,
@@ -125,6 +178,8 @@ pub(super) async fn resolve_image(
     allowed_local_images: &[PathBuf],
     allowed_registries: &[String],
 ) -> Result<PathBuf> {
+    let original_source = cached_image_source(state_root, source)?;
+    let source = original_source.as_deref().unwrap_or(source);
     if looks_like_local_image(source) {
         let state_root = state_root.to_path_buf();
         let source_path = source.to_string();
@@ -157,7 +212,7 @@ pub(super) async fn resolve_image(
     // https://github.com/opencontainers/distribution-spec/blob/main/spec.md#pulling-manifests
     if let Some(source_digest) = immutable_reference_digest(&reference)? {
         let cache_dir = cache_image_dir(&cache_root, &platform, source_digest)?;
-        if cache_dir.try_exists()? {
+        if cache_dir.join("rootfs.ext4").try_exists()? {
             tracing::Span::current().record("cache_hit", true);
             return validate_cache_entry(&cache_dir, source_digest, None, &platform);
         }
@@ -197,7 +252,7 @@ pub(super) async fn resolve_image(
         .with_context(|| format!("decoding OCI image configuration for {source}"))?;
     validate_platform(&image_config)?;
     let cache_dir = cache_image_dir(&cache_root, &platform, &source_digest)?;
-    if cache_dir.try_exists()? {
+    if cache_dir.join("rootfs.ext4").try_exists()? {
         tracing::Span::current().record("cache_hit", true);
         return validate_cache_entry(
             &cache_dir,
@@ -828,6 +883,14 @@ fn build_and_publish_image(
     if let Some(parent) = cache_dir.parent() {
         prepare_private_dir(parent)?;
     }
+    if cache_dir.try_exists()? {
+        match fs::hard_link(&image, cache_dir.join("rootfs.ext4")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).context("republishing evicted Firecracker image"),
+        }
+        return validate_cache_entry(cache_dir, &metadata.source_digest, None, &metadata.platform);
+    }
     let temporary_path = temporary.keep();
     match fs::rename(&temporary_path, cache_dir) {
         Ok(()) => {}
@@ -1344,6 +1407,75 @@ pub(super) fn validate_ext4_image(path: &Path) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn evict_image_cache(
+    state_root: &Path,
+    keep: Option<&Path>,
+    mut enough_space: impl FnMut() -> Result<bool>,
+) -> Result<()> {
+    if enough_space()? {
+        return Ok(());
+    }
+    let images = state_root.join("images");
+    // A shared directory lease covers resolution through the VM's base-image
+    // hardlink, including layer downloads and materialization.
+    let _lease = match SnapshotLease::try_exclusive(File::open(&images)?) {
+        Ok(lease) => lease,
+        Err(TryLockError::WouldBlock) => return Ok(()),
+        Err(TryLockError::Error(error)) => return Err(error.into()),
+    };
+    struct Candidate {
+        path: PathBuf,
+        modified: SystemTime,
+    }
+    let mut candidates = Vec::new();
+    let mut directories = vec![images];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name.as_bytes().starts_with(b".")
+                || name.as_bytes().starts_with(b"image-build-")
+                || name == "local"
+            {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                directories.push(path);
+            } else if metadata.is_file()
+                && metadata.nlink() == 1
+                && keep != Some(path.as_path())
+                && (directory.ends_with("blobs/sha256")
+                    || directory.ends_with("images/filesystem")
+                    || (name == "rootfs.ext4" && directory.join("metadata.json").try_exists()?))
+            {
+                candidates.push(Candidate {
+                    path,
+                    modified: metadata.modified()?,
+                });
+            }
+        }
+    }
+    candidates.sort_unstable_by_key(|candidate| candidate.modified);
+    for candidate in candidates {
+        if enough_space()? {
+            return Ok(());
+        }
+        fs::remove_file(&candidate.path).with_context(|| {
+            format!(
+                "evicting Firecracker image cache {}",
+                candidate.path.display()
+            )
+        })?;
+        tracing::info!(path = %candidate.path.display(), "evicted unused Firecracker image cache file");
+    }
+    if !enough_space()? {
+        tracing::warn!("Firecracker image cache could not reclaim enough disk headroom");
+    }
+    Ok(())
+}
+
 // Removes leftovers of materializations that died between staging and their
 // atomic publish rename. Only entries older than STALE_TEMPORARY_MAX_AGE are
 // touched so a concurrent in-flight build is never deleted, and the sweep is
@@ -1841,6 +1973,74 @@ mod tests {
         assert!(validate_allowed_local_image(&state_root, &canonical(&cache), &[]).is_ok());
         assert!(validate_allowed_local_image(&state_root, &canonical(&denied), &[]).is_err());
         assert!(validate_allowed_local_image(&state_root, &canonical(&workspace), &[]).is_err());
+    }
+
+    // Pressure must reclaim completed cache files, without deleting shared base
+    // images or racing an in-flight image resolution.
+    #[test]
+    fn image_cache_pressure_reclaims_unused_files_and_preserves_shared_images() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let images = root.path().join("images");
+        let platform = images.join(format!("v{MATERIALIZER_VERSION}/linux-arm64"));
+        let old = platform.join("a".repeat(64)).join("rootfs.ext4");
+        let shared = platform.join("b".repeat(64)).join("rootfs.ext4");
+        let recent = platform.join("c".repeat(64)).join("rootfs.ext4");
+        let blob = images.join("blobs/sha256").join("d".repeat(64));
+        let imported = images
+            .join("filesystem")
+            .join(format!("{}.ext4", "f".repeat(64)));
+        fs::create_dir_all(imported.parent().unwrap())?;
+        fs::write(&imported, b"unused imported base")?;
+        fs::create_dir_all(blob.parent().unwrap())?;
+        fs::write(&blob, b"compressed layer")?;
+        for image in [&old, &shared, &recent] {
+            let directory = image.parent().unwrap();
+            fs::create_dir_all(directory)?;
+            fs::write(image, b"image")?;
+            fs::write(
+                directory.join("metadata.json"),
+                serde_json::to_vec(&CachedImageMetadata {
+                    materializer_version: MATERIALIZER_VERSION,
+                    source: "registry.example/image:latest".into(),
+                    source_digest: format!(
+                        "sha256:{}",
+                        directory.file_name().unwrap().to_str().unwrap()
+                    ),
+                    manifest_digest: format!("sha256:{}", "e".repeat(64)),
+                    platform: "linux-arm64".into(),
+                    configuration: SandboxImageConfiguration::default(),
+                })?,
+            )?;
+        }
+        let now = SystemTime::now();
+        File::open(&blob)?.set_modified(now - Duration::from_secs(3))?;
+        File::open(&old)?.set_modified(now - Duration::from_secs(2))?;
+        fs::hard_link(&shared, root.path().join("checkpoint-base.ext4"))?;
+        let inflight = images.join("image-build-active");
+        fs::create_dir(&inflight)?;
+        fs::write(inflight.join("rootfs.ext4"), b"building")?;
+        let lease = SnapshotLease::shared(File::open(&images)?)?;
+        evict_image_cache(root.path(), None, || Ok(false))?;
+        assert!(blob.exists());
+        assert!(old.exists());
+        drop(lease);
+
+        evict_image_cache(root.path(), None, || Ok(!old.exists()))?;
+        assert!(!blob.exists());
+        assert!(!old.exists());
+        assert!(old.with_file_name("metadata.json").exists());
+        assert!(shared.exists());
+        assert!(recent.exists());
+        assert!(inflight.join("rootfs.ext4").exists());
+        assert_eq!(
+            cached_image_source(root.path(), old.to_str().unwrap())?,
+            Some(format!("registry.example/image@sha256:{}", "a".repeat(64)))
+        );
+        evict_image_cache(root.path(), Some(&recent), || Ok(false))?;
+        assert!(!imported.exists());
+        assert!(recent.exists());
+        assert!(shared.exists());
+        Ok(())
     }
 
     #[test]

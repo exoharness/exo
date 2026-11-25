@@ -234,6 +234,10 @@ fn capture_disks(
     mut manifest: FilesystemManifest,
     suspend: bool,
 ) -> crate::SandboxResult<SnapshotPayload> {
+    super::super::firecracker_image::evict_image_cache(&config.state_root, None, || {
+        Ok(available_disk_bytes(&config.state_root)?
+            >= config.image_size_gib.saturating_mul(1024 * 1024 * 1024))
+    })?;
     let (temporary, staging_lease) = manifest.staging_directory(config)?;
     let root = jail_root(config, &source.machine_id);
     fs::hard_link(root.join("rootfs.ext4"), temporary.path().join("base.ext4"))?;
@@ -288,7 +292,11 @@ impl FirecrackerSandboxBackend {
         disks: Vec<PathBuf>,
     ) -> crate::SandboxResult<SnapshotPayload> {
         let config = self.shared.config.clone();
+        let image_lease =
+            super::super::firecracker_image::prepare_image_cache(&config, base_image.to_str())
+                .await?;
         tokio::task::spawn_blocking(move || {
+            let _image_lease = image_lease;
             let mut manifest = FilesystemManifest::from_payload(&payload)?;
             if disks.len() != manifest.disk_sizes.len() {
                 return Err(anyhow::anyhow!("filesystem import disk set is incomplete").into());
@@ -388,6 +396,11 @@ impl FirecrackerSandboxBackend {
             return Err(anyhow::anyhow!("filesystem restore mount layout does not match").into());
         }
         let capture = Arc::new(self.filesystem_snapshot_files(payload).await?);
+        let _image_lease = super::super::firecracker_image::prepare_image_cache(
+            &self.shared.config,
+            capture.base_image.to_str(),
+        )
+        .await?;
         let mut resolved = prepare_request(request)?;
         validate_resource_shape(resolved.spec.resources.unwrap_or_default())?;
         let config = self.shared.config.clone();
