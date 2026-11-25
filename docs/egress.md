@@ -362,7 +362,7 @@ Protected credentials require a backend adapter that enforces interception
 outside the guest. Exo does not configure `HTTPS_PROXY` as a substitute for that
 adapter. E2B and Daytona retain their enabled / disabled networking support and
 reject credential bindings and limited networking. Local processes, Sprites,
-and AWS AgentCore only accept unrestricted networking. Docker attachments also
+boxd, and AWS AgentCore only accept unrestricted networking. Docker attachments also
 reject disabled networking because Exo does not control the attached container's
 network.
 

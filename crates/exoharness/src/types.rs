@@ -1057,6 +1057,7 @@ impl SandboxProvider {
     pub const Daytona: Self = Self::from_static("daytona");
     pub const E2b: Self = Self::from_static("e2b");
     pub const Sprites: Self = Self::from_static("sprites");
+    pub const Boxd: Self = Self::from_static("boxd");
     pub const Vercel: Self = Self::from_static("vercel");
     pub const AwsAgentCore: Self = Self::from_static("aws_agentcore");
     pub const AppleContainer: Self = Self::from_static("apple_container");
@@ -1491,6 +1492,19 @@ pub enum SandboxProviderConfig {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         labels: Vec<String>,
     },
+    Boxd {
+        /// Vault secret reference for the boxd API key.
+        api_key_secret: SecretReference,
+        /// gRPC endpoint; `https://nyc.boxd.sh:9443` for machines in New York.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        api_url: Option<String>,
+        /// Org name or id when it is not the API key's own org.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        org: Option<String>,
+        /// Extra `key=value` machine labels on create (exo resume labels are added automatically).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        labels: Vec<String>,
+    },
     #[serde(rename = "aws_agentcore", alias = "aws-agentcore")]
     AwsAgentCore {
         runtime_arn: String,
@@ -1522,6 +1536,7 @@ impl SandboxProviderConfig {
             Self::Daytona { .. } => SandboxProvider::Daytona,
             Self::E2b { .. } => SandboxProvider::E2b,
             Self::Sprites { .. } => SandboxProvider::Sprites,
+            Self::Boxd { .. } => SandboxProvider::Boxd,
             Self::Vercel { .. } => SandboxProvider::Vercel,
             Self::Docker { .. } => SandboxProvider::Docker,
             Self::Smolvm { .. } => SandboxProvider::Smolvm,
@@ -1540,7 +1555,7 @@ impl SandboxProviderConfig {
             | Self::Firecracker { default_image, .. }
             | Self::E2b { default_image, .. }
             | Self::AwsAgentCore { default_image, .. } => Some(default_image),
-            Self::Sprites { .. } => None,
+            Self::Sprites { .. } | Self::Boxd { .. } => None,
         }
     }
 }

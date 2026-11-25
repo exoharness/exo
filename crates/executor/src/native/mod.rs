@@ -61,8 +61,8 @@ pub use exoharness::{
     serve_exoharness_http_listener_with_options,
 };
 pub use exoharness::{
-    DaytonaBackendSpec, E2bBackendSpec, FirecrackerBackendSpec, SpritesBackendSpec,
-    VercelBackendSpec,
+    BoxdBackendSpec, DaytonaBackendSpec, E2bBackendSpec, FirecrackerBackendSpec,
+    SpritesBackendSpec, VercelBackendSpec,
 };
 
 #[cfg(test)]

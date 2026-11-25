@@ -171,6 +171,7 @@ fn sandbox_backend_registration_resolves_builtin_providers() {
     for provider in [
         SandboxProvider::AppleContainer,
         SandboxProvider::AwsAgentCore,
+        SandboxProvider::Boxd,
         SandboxProvider::Daytona,
         SandboxProvider::Docker,
         SandboxProvider::E2b,

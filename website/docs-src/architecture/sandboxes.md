@@ -43,6 +43,7 @@ the managed-agent default is a separate sandbox per thread.
 | `sprites` | Hosted | Sprites sandbox |
 | `vercel` | Hosted | Vercel Sandbox |
 | `aws_agentcore` | Hosted | Amazon Bedrock AgentCore |
+| `boxd` | Hosted | Isolated boxd machine; stopping hibernates it |
 
 Codex, Claude Code, and Pi default to digest-pinned devbox images containing
 the harness, Python, and Node.js/TypeScript. Custom harnesses default to

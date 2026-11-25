@@ -1,0 +1,135 @@
+// The subset of the boxd public API (package boxd.api.v1) that the boxd
+// sandbox backend calls. Field numbers and names match the published proto at
+// https://github.com/boxd-sh/sdk/blob/main/proto/api.proto; fields the backend
+// doesn't use are left out, which protobuf decoding ignores.
+//
+// `api.rs` next to this file is generated from it. To regenerate, see the
+// module docs in `../boxd.rs`.
+syntax = "proto3";
+package boxd.api.v1;
+
+service BoxdApi {
+  rpc CreateVm(CreateVmRequest) returns (CreateVmResponse);
+  rpc DestroyVm(DestroyVmRequest) returns (DestroyVmResponse);
+  rpc StartVm(StartVmRequest) returns (StartVmResponse);
+  rpc GetVm(GetVmRequest) returns (GetVmResponse);
+  rpc ListVms(ListVmsRequest) returns (ListVmsResponse);
+  rpc Exec(stream ExecChunk) returns (stream ExecChunk);
+  rpc ForkVm(ForkVmRequest) returns (ForkVmResponse);
+  rpc ResumeVm(ResumeVmRequest) returns (ResumeVmResponse);
+  rpc HibernateVm(HibernateVmRequest) returns (HibernateVmResponse);
+  rpc WakeVm(WakeVmRequest) returns (WakeVmResponse);
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+  rpc CreateVmFromSnapshot(CreateVmFromSnapshotRequest) returns (CreateVmResponse);
+}
+
+message VmConfig {
+  uint32 vcpu = 1;
+  uint64 memory_bytes = 2;
+}
+
+message CreateVmRequest {
+  string name = 1;
+  VmConfig config = 8;
+  string org = 9;
+  bool isolated = 12;
+  map<string, string> labels = 14;
+}
+
+message CreateVmResponse {
+  string vm_id = 1;
+  string name = 2;
+  string status = 6;
+}
+
+message DestroyVmRequest { string vm_id = 1; }
+message DestroyVmResponse {}
+
+message StartVmRequest { string vm_id = 1; }
+message StartVmResponse {}
+
+message GetVmRequest { string vm_id = 1; }
+message GetVmResponse {
+  string vm_id = 1;
+  string name = 2;
+  string status = 5;
+  bool isolated = 26;
+  map<string, string> labels = 34;
+}
+
+message ListVmsRequest {
+  string org = 1;
+  repeated string label_selector = 3;
+}
+message ListVmsResponse { repeated GetVmResponse vms = 1; }
+
+message ExecChunk {
+  bytes data = 1;
+  bool stdin = 2;
+  bool tty = 3;
+  string command = 4;
+  string vm_id = 5;
+  int32 exit_code = 6;
+  bool is_stderr = 10;
+}
+
+message ForkVmRequest {
+  string source_vm_id = 1;
+  string name = 2;
+  bool isolated = 6;
+  map<string, string> labels = 7;
+}
+message ForkVmResponse {
+  string vm_id = 1;
+  string name = 2;
+  string status = 6;
+}
+
+message ResumeVmRequest { string vm_id = 1; }
+message ResumeVmResponse {}
+
+message HibernateVmRequest { string vm_id = 1; }
+message HibernateVmResponse {}
+
+message WakeVmRequest { string vm_id = 1; }
+message WakeVmResponse {}
+
+message CreateSnapshotRequest {
+  string vm = 1;
+  string name = 2;
+}
+message CreateSnapshotResponse {
+  string snapshot_id = 1;
+  string name = 2;
+  string status = 4;
+}
+
+message GetSnapshotRequest {
+  string name = 1;
+  string org = 2;
+}
+message GetSnapshotResponse { SnapshotInfo snapshot = 1; }
+
+message DeleteSnapshotRequest {
+  string name = 1;
+  string org = 2;
+}
+message DeleteSnapshotResponse {}
+
+message CreateVmFromSnapshotRequest {
+  string snapshot = 1;
+  string name = 2;
+  string org = 4;
+  bool isolated = 5;
+  map<string, string> labels = 6;
+}
+
+message SnapshotInfo {
+  string snapshot_id = 1;
+  string name = 2;
+  uint64 version = 3;
+  string status = 4;
+  string failure_reason = 14;
+}

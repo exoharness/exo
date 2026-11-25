@@ -57,7 +57,7 @@ Set `config.provider` in the environment file to choose a backend:
   Use it only when you trust the agent and the task.
 :::
 
-Remote sandbox providers (Daytona, E2B, Vercel, Sprites, AWS AgentCore) are
+Remote sandbox providers (Daytona, E2B, Vercel, Sprites, AWS AgentCore, boxd) are
 configured as *provider bindings*:
 
 ```bash

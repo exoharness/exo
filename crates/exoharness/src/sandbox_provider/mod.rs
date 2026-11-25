@@ -18,6 +18,8 @@ mod docker;
 mod snapshot_lease;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+mod boxd;
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 mod daytona;
 #[cfg(not(all(not(target_arch = "wasm32"), feature = "basic-backend")))]
 mod daytona {
@@ -79,6 +81,11 @@ pub use aws_agentcore::default_aws_agentcore_image;
     feature = "aws-agentcore"
 ))]
 pub use aws_agentcore::{AwsAgentCoreConfig, AwsAgentCoreCredentials, AwsAgentCoreSandboxBackend};
+#[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
+pub use boxd::{
+    BoxdConfig, BoxdSandboxBackend, DEFAULT_BOXD_API_URL, DEFAULT_BOXD_NAME_PREFIX,
+    DEFAULT_BOXD_TOKEN_URL,
+};
 pub use daytona::default_daytona_image;
 #[cfg(all(not(target_arch = "wasm32"), feature = "basic-backend"))]
 pub use daytona::{

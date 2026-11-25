@@ -1,6 +1,6 @@
 # Sandbox Snapshots
 
-Status: implemented for Docker, Daytona, E2B, Sprites, SmolVM, and
+Status: implemented for Docker, Daytona, E2B, Sprites, boxd, SmolVM, and
 Firecracker. Daytona can additionally restore a Docker snapshot (the
 cross-provider "teleport" bridge).
 
@@ -130,6 +130,7 @@ format name includes a version when its wire representation can evolve.
 | `daytona-ref`                   | Daytona                           | Daytona                            |
 | `e2b-ref`                       | E2B                               | E2B                                |
 | `sprites-ref`                   | Sprites                           | Sprites                            |
+| `boxd-ref`                      | boxd                              | boxd                               |
 | `smolvm-machine-pack`           | SmolVM (legacy)                   | SmolVM                             |
 | `smolvm-filesystem-ref-v1`      | SmolVM                            | SmolVM                             |
 | `firecracker-host-ref`          | Firecracker                       | Firecracker, Firecracker-over-Lima |
@@ -329,8 +330,8 @@ Backends reject unsupported kinds instead of silently changing these semantics.
 Both `ManagedSandboxHandle::snapshot(kind)` and
 `SnapshotHandle::snapshot_sandbox(id, kind)` require a `SnapshotKind`.
 The HTTP request requires `snapshot_kind` (`filesystem` or `full`).
-Docker, Daytona, Sprites, and SmolVM support filesystem snapshots; E2B's
-current adapter supports full snapshots. Docker rejects writable mounted volumes.
+Docker, Daytona, Sprites, and SmolVM support filesystem snapshots; the E2B
+and boxd adapters support full snapshots. Docker rejects writable mounted volumes.
 SmolVM captures writable directories and managed APFS resource volumes; Linux
 capture requires a filesystem with reflink support. Restore replaces each
 caller's host mount path with the captured contents. Callers must stop every

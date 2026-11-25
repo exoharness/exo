@@ -51,6 +51,7 @@ impl SandboxBackendRegistration {
             "local_process" => Ok(Self::local_process()),
             "smolvm" => Ok(Self::smolvm()),
             "sprites" => Ok(Self::sprites(SpritesBackendSpec::default())),
+            "boxd" => Ok(Self::boxd(BoxdBackendSpec::default())),
             "vercel" => Ok(Self::vercel(VercelBackendSpec::with_conventional_secrets())),
             _ => bail!("sandbox provider {provider} is not built into exoharness"),
         }
@@ -182,6 +183,20 @@ impl SandboxBackendRegistration {
         })
     }
 
+    pub fn boxd(spec: BoxdBackendSpec) -> Self {
+        Self::from_factory(SandboxProvider::Boxd, false, false, move |inner| {
+            let spec = spec.clone();
+            Box::pin(async move {
+                let config = match inner.boxd_config_from_binding().await? {
+                    Some(config) => config,
+                    None => inner.boxd_config_from_spec(&spec).await?,
+                };
+                Ok(Arc::new(crate::BoxdSandboxBackend::new(config)?)
+                    as Arc<dyn ManagedSandboxBackend>)
+            })
+        })
+    }
+
     pub fn vercel(spec: VercelBackendSpec) -> Self {
         Self::from_factory(SandboxProvider::Vercel, false, false, move |inner| {
             let spec = spec.clone();
@@ -302,6 +317,27 @@ impl Default for SpritesBackendSpec {
             token_secret: "SPRITES_TOKEN".to_string(),
             url_auth: None,
             organization: None,
+            labels: Vec::new(),
+        }
+    }
+}
+
+/// boxd connection config plus the secret-store name for the API key,
+/// resolved lazily on first use.
+#[derive(Debug, Clone)]
+pub struct BoxdBackendSpec {
+    pub api_url: String,
+    pub api_key_secret: String,
+    pub org: Option<String>,
+    pub labels: Vec<String>,
+}
+
+impl Default for BoxdBackendSpec {
+    fn default() -> Self {
+        Self {
+            api_url: crate::DEFAULT_BOXD_API_URL.to_string(),
+            api_key_secret: "BOXD_API_KEY".to_string(),
+            org: None,
             labels: Vec::new(),
         }
     }
@@ -487,6 +523,69 @@ impl BasicExoHarnessInner {
             api_url: api_url.unwrap_or_else(|| crate::DEFAULT_SPRITES_API_URL.to_string()),
             url_auth,
             organization,
+            extra_labels: labels,
+        }))
+    }
+
+    pub(super) async fn boxd_config_from_spec(
+        &self,
+        spec: &BoxdBackendSpec,
+    ) -> Result<crate::BoxdConfig> {
+        let api_key = self
+            .secret_key(&spec.api_key_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "boxd sandbox requested but secret {:?} is not set",
+                    spec.api_key_secret
+                )
+            })?;
+        Ok(crate::BoxdConfig {
+            api_key,
+            api_url: spec.api_url.clone(),
+            token_url: crate::DEFAULT_BOXD_TOKEN_URL.to_string(),
+            org: spec.org.clone(),
+            name_prefix: crate::DEFAULT_BOXD_NAME_PREFIX.to_string(),
+            extra_labels: spec.labels.clone(),
+        })
+    }
+
+    pub(super) async fn boxd_config_from_binding(&self) -> Result<Option<crate::BoxdConfig>> {
+        let bindings = list_binding_records(&self.storage, Path::new("bindings")).await?;
+        let Some((api_key_secret, api_url, org, labels)) =
+            bindings
+                .into_iter()
+                .rev()
+                .find_map(|record| match record.binding {
+                    Binding::Sandbox {
+                        config:
+                            SandboxProviderConfig::Boxd {
+                                api_key_secret,
+                                api_url,
+                                org,
+                                labels,
+                            },
+                        ..
+                    } => Some((api_key_secret, api_url, org, labels)),
+                    _ => None,
+                })
+        else {
+            return Ok(None);
+        };
+        let api_key = self
+            .secret_key_by_id(&api_key_secret)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "boxd sandbox binding references secret id {api_key_secret:?}, which is not set"
+                )
+            })?;
+        Ok(Some(crate::BoxdConfig {
+            api_key,
+            api_url: api_url.unwrap_or_else(|| crate::DEFAULT_BOXD_API_URL.to_string()),
+            token_url: crate::DEFAULT_BOXD_TOKEN_URL.to_string(),
+            org,
+            name_prefix: crate::DEFAULT_BOXD_NAME_PREFIX.to_string(),
             extra_labels: labels,
         }))
     }

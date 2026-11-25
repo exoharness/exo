@@ -150,6 +150,8 @@ impl SnapshotFormat {
     pub const E2bRef: Self = Self::from_static("e2b-ref");
     /// Reference to a Sprites checkpoint id.
     pub const SpritesRef: Self = Self::from_static("sprites-ref");
+    /// Reference to a boxd snapshot id.
+    pub const BoxdRef: Self = Self::from_static("boxd-ref");
     /// Reference to a `.smolmachine` pack on the local disk.
     pub const SmolvmMachinePack: Self = Self::from_static("smolvm-machine-pack");
     pub const SmolvmFilesystemRef: Self = Self::from_static("smolvm-filesystem-ref-v1");
@@ -176,6 +178,7 @@ impl SnapshotFormat {
             "daytona-ref" | "DaytonaSnapshot" | "daytona_snapshot" => Self::DaytonaRef,
             "e2b-ref" | "E2bSnapshot" | "e2b_snapshot" => Self::E2bRef,
             "sprites-ref" | "SpritesSnapshot" | "sprites_snapshot" => Self::SpritesRef,
+            "boxd-ref" => Self::BoxdRef,
             "smolvm-machine-pack" | "SmolMachinePack" | "smol_machine_pack" => {
                 Self::SmolvmMachinePack
             }

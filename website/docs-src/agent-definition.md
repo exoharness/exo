@@ -336,7 +336,7 @@ Host mounts refer to paths on the runtime host and can be read-only or writable.
 Unlike resources, host mounts expose the host's files directly.
 
 In addition to SmolVM, Exo supports a variety of local options including Apple Containers, Docker, Firecracker (with Lima
-on macOS), and hosted sandboxes including AWS AgentCore, Daytona, E2B, Sprites, and Vercel. Support varies by provider.
+on macOS), and hosted sandboxes including AWS AgentCore, boxd, Daytona, E2B, Sprites, and Vercel. Support varies by provider.
 Exo's credential substitution and proxy-based network controls currently require SmolVM or Firecracker. Firecracker and
 AWS AgentCore require optional Cargo features. Snapshot support also depends on the sandbox configuration; see
 [Sandbox snapshots](architecture/sandboxes#snapshots).
