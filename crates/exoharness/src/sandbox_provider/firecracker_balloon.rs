@@ -419,6 +419,7 @@ mod tests {
             spec_hash: "spec".to_owned(),
             runtime,
             resource_grant: SandboxResourceShape::new(2, 4096),
+            external_disks: false,
             resolved_image: "image".to_owned(),
             slot: 1,
             network_enabled: false,
