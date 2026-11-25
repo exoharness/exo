@@ -124,6 +124,7 @@ enum BackendArg {
     #[value(name = "e2b")]
     E2b,
     Sprites,
+    Boxd,
     Vercel,
     #[value(name = "aws-agentcore")]
     AwsAgentCore,
@@ -138,6 +139,7 @@ impl From<BackendArg> for SandboxProvider {
             BackendArg::Daytona => Self::Daytona,
             BackendArg::E2b => Self::E2b,
             BackendArg::Sprites => Self::Sprites,
+            BackendArg::Boxd => Self::Boxd,
             BackendArg::Vercel => Self::Vercel,
             BackendArg::AwsAgentCore => Self::AwsAgentCore,
             BackendArg::Docker => Self::Docker,
@@ -163,7 +165,7 @@ pub struct ProviderConfigureArgs {
     /// Region/target. Daytona: us | eu | experimental.
     #[arg(long)]
     region: Option<String>,
-    /// Daytona organization id, or Sprites organization slug.
+    /// Daytona organization id, Sprites organization slug, or boxd org.
     #[arg(long)]
     organization_id: Option<String>,
     #[arg(long)]
@@ -197,7 +199,7 @@ pub struct ProviderConfigureArgs {
     /// Sprites sprite HTTP URL auth: sprite | public.
     #[arg(long)]
     url_auth: Option<String>,
-    /// Extra Sprites labels (repeatable). Exo resume labels are added on create.
+    /// Extra Sprites or boxd labels (repeatable). Exo resume labels are added on create.
     #[arg(long = "label")]
     labels: Vec<String>,
 }
@@ -316,6 +318,15 @@ async fn configure_provider(state: &dyn ExoHarness, command: ProviderCommands) -
                         api_url,
                         url_auth,
                         organization: organization_id,
+                        labels,
+                    }
+                }
+                BackendArg::Boxd => {
+                    let secret_id = required_secret(state, &vault, secret, "boxd").await?;
+                    SandboxProviderConfig::Boxd {
+                        api_key_secret: secret_id,
+                        api_url,
+                        org: organization_id,
                         labels,
                     }
                 }

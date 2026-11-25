@@ -35,13 +35,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use executor::{
     AgentHandle, AgentHarnessKind, AttachSandboxRequest, BasicExoHarnessConfig, BasicToolRuntime,
-    BraintrustProject, BraintrustTracingConfig, ConversationHandle, ConversationModelConfig,
-    CreateConversationRequest, DaytonaBackendSpec, E2bBackendSpec, EventKind, EventQuery,
-    EventQueryDirection, FileSystemMount, FileSystemMountMode, FirecrackerBackendSpec,
-    ForkConversationRequest, HOST_EVENT_REBUILD_AND_RESTART, Runtime, SANDBOX_MAIN_MOUNT_DIR,
-    SandboxAttachment, SandboxBackendRegistration, SandboxProvider, SandboxScope,
-    SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, Uuid7, VercelBackendSpec,
-    effective_sandbox_scope, finalize_rebuild_update_file, record_host_event,
+    BoxdBackendSpec, BraintrustProject, BraintrustTracingConfig, ConversationHandle,
+    ConversationModelConfig, CreateConversationRequest, DaytonaBackendSpec, E2bBackendSpec,
+    EventKind, EventQuery, EventQueryDirection, FileSystemMount, FileSystemMountMode,
+    FirecrackerBackendSpec, ForkConversationRequest, HOST_EVENT_REBUILD_AND_RESTART, Runtime,
+    SANDBOX_MAIN_MOUNT_DIR, SandboxAttachment, SandboxBackendRegistration, SandboxProvider,
+    SandboxScope, SecretBackendChoice, SpritesBackendSpec, ToolRequest, ToolRuntime, Uuid7,
+    VercelBackendSpec, effective_sandbox_scope, finalize_rebuild_update_file, record_host_event,
     send_conversation_wakeup,
 };
 use serde::Deserialize;
@@ -375,6 +375,7 @@ enum SandboxProviderArg {
     E2b,
     #[value(name = "sprites")]
     Sprites,
+    Boxd,
     Vercel,
     #[value(name = "aws-agentcore")]
     AwsAgentCore,
@@ -393,6 +394,7 @@ impl From<SandboxProviderArg> for SandboxProvider {
             SandboxProviderArg::Daytona => Self::Daytona,
             SandboxProviderArg::E2b => Self::E2b,
             SandboxProviderArg::Sprites => Self::Sprites,
+            SandboxProviderArg::Boxd => Self::Boxd,
             SandboxProviderArg::Vercel => Self::Vercel,
             SandboxProviderArg::AwsAgentCore => Self::AwsAgentCore,
             SandboxProviderArg::AppleContainer => Self::AppleContainer,
@@ -479,6 +481,7 @@ fn default_sandbox_backends(
         SandboxBackendRegistration::daytona(DaytonaBackendSpec::default()),
         SandboxBackendRegistration::e2b(E2bBackendSpec::default()),
         SandboxBackendRegistration::sprites(SpritesBackendSpec::default()),
+        SandboxBackendRegistration::boxd(BoxdBackendSpec::default()),
         SandboxBackendRegistration::vercel(VercelBackendSpec::with_conventional_secrets()),
         SandboxBackendRegistration::aws_agentcore(),
     ]
