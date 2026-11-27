@@ -185,6 +185,14 @@ async fn fire_once(
     run.task_id = task.id.clone();
     store.put_run(&run).await?;
     store.put_task(task).await?;
+    // The slot is decided once its run and the advanced task record are
+    // durable, so free the claim now: a catch-up burst can claim the next slot
+    // without waiting out the lease, and markers do not accumulate for the life
+    // of a long-running schedule. A failed release is not fatal — the marker
+    // still expires and is swept by the next claimant.
+    if let Err(error) = store.release_claim(&run.task_id, slot_ms).await {
+        tracing::warn!(%error, task_id = %run.task_id, slot_ms, "failed to release scheduler claim");
+    }
     Ok(run)
 }
 
