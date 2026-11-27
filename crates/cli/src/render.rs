@@ -100,7 +100,9 @@ impl TranscriptFold {
             match message {
                 Message::Tool { content } => {
                     for part in content {
-                        let ToolContentPart::ToolResult(result) = part;
+                        let ToolContentPart::ToolResult(result) = part else {
+                            continue;
+                        };
                         statuses.insert(
                             result.tool_call_id.clone(),
                             compact_result_status(&to_workspace_json(&result.output)),
@@ -162,13 +164,31 @@ fn render_message_lines(
                 render_user_content(content)
             )]
         }
+        Message::AdditionalTools { tools, .. } => {
+            if verbosity == Verbosity::Full {
+                vec![format!("{timestamp} additional tools: {}", tools.len())]
+            } else {
+                Vec::new()
+            }
+        }
         Message::Assistant { content, .. } => {
             render_assistant_message_lines(&timestamp, content, verbosity, fold)
         }
         Message::Tool { content } => content
             .iter()
             .filter_map(|part| {
-                let ToolContentPart::ToolResult(result) = part;
+                let result = match part {
+                    ToolContentPart::ToolResult(result) => result,
+                    ToolContentPart::ToolDiscoveryResult(result) => {
+                        return (verbosity == Verbosity::Full).then(|| {
+                            format!(
+                                "{timestamp} tool discovery {}: {} tools",
+                                result.discovery_tool_name,
+                                result.tools.len()
+                            )
+                        });
+                    }
+                };
                 // Folded results already show on their call line.
                 if fold.is_some_and(|fold| fold.calls.contains(&result.tool_call_id)) {
                     return None;
@@ -223,6 +243,9 @@ fn render_assistant_message_lines(
                             Value::Object(map) => map,
                             _ => Map::new(),
                         },
+                        ToolCallArguments::Custom(input) => {
+                            Map::from_iter([("input".to_string(), Value::String(input.clone()))])
+                        }
                         ToolCallArguments::Invalid(_) => Map::new(),
                     };
                     let mut rendered = render_tool_call(tool_name, &arguments, verbosity);
@@ -312,6 +335,22 @@ pub(crate) fn render_assistant_content(content: &AssistantContent, verbosity: Ve
                     tool_name, output, ..
                 } => (verbosity == Verbosity::Full)
                     .then(|| format!("[tool_result {tool_name}] {output}")),
+                AssistantContentPart::Program { code, .. } => {
+                    (verbosity == Verbosity::Full).then(|| format!("[program] {code}"))
+                }
+                AssistantContentPart::ProgramOutput { result, .. } => {
+                    (verbosity == Verbosity::Full).then(|| format!("[program_output] {result}"))
+                }
+                AssistantContentPart::ToolDiscoveryCall {
+                    discovery_tool_name,
+                    query,
+                    ..
+                } => (verbosity == Verbosity::Full).then(|| {
+                    format!(
+                        "[tool_discovery_call {discovery_tool_name}] {}",
+                        query.as_deref().unwrap_or_default()
+                    )
+                }),
                 AssistantContentPart::File { .. } => {
                     (verbosity == Verbosity::Full).then(|| "[file]".to_string())
                 }
@@ -576,6 +615,8 @@ mod tests {
                     tool_call_id: "call-1".to_string(),
                     tool_name: "shell".to_string(),
                     arguments: ToolCallArguments::Valid(arguments),
+                    status: None,
+                    caller: None,
                     encrypted_content: None,
                     provider_options: None,
                     provider_executed: None,
@@ -616,6 +657,8 @@ mod tests {
                 tool_call_id: "call-1".to_string(),
                 tool_name: "shell".to_string(),
                 output: lingua::serde_json::json!({"exit_code": exit_code, "stdout": "out"}),
+                custom_tool_call: None,
+                caller: None,
                 provider_options: None,
             })],
         }

@@ -281,6 +281,8 @@ where
                         tool_call_id: tool_call.tool_call_id,
                         tool_name: tool_call.request.function_name,
                         output: to_lingua_value(result),
+                        custom_tool_call: None,
+                        caller: None,
                         provider_options: None,
                     })],
                 });

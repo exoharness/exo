@@ -322,9 +322,22 @@ fn history_message_from_message(index: usize, message: &Message) -> HistoryMessa
             role: "tool".to_string(),
             content: content
                 .iter()
-                .map(|part| {
-                    let ToolContentPart::ToolResult(result) = part;
-                    format!("{} => {}", result.tool_name, result.output)
+                .map(|part| match part {
+                    ToolContentPart::ToolResult(result) => {
+                        format!("{} => {}", result.tool_name, result.output)
+                    }
+                    ToolContentPart::ToolDiscoveryResult(result) => {
+                        let names = result
+                            .tools
+                            .iter()
+                            .map(|tool| tool.tool_name.as_str())
+                            .collect::<Vec<_>>();
+                        format!(
+                            "[tool_discovery_result {}] {}",
+                            result.discovery_tool_name,
+                            names.join(", ")
+                        )
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
@@ -333,6 +346,11 @@ fn history_message_from_message(index: usize, message: &Message) -> HistoryMessa
             index,
             role: "system".to_string(),
             content: render_user_content(content),
+        },
+        Message::AdditionalTools { tools, .. } => HistoryMessage {
+            index,
+            role: "additional_tools".to_string(),
+            content: format!("{} additional tools", tools.len()),
         },
         Message::Developer { content } => HistoryMessage {
             index,
@@ -376,6 +394,20 @@ fn render_assistant_content(content: &AssistantContent) -> String {
                 AssistantContentPart::ToolResult {
                     tool_name, output, ..
                 } => format!("[tool_result {tool_name}] {output}"),
+                AssistantContentPart::Program { code, .. } => format!("[program] {code}"),
+                AssistantContentPart::ProgramOutput { result, .. } => {
+                    format!("[program_output] {result}")
+                }
+                AssistantContentPart::ToolDiscoveryCall {
+                    discovery_tool_name,
+                    query,
+                    ..
+                } => {
+                    format!(
+                        "[tool_discovery_call {discovery_tool_name}] {}",
+                        query.as_deref().unwrap_or_default()
+                    )
+                }
                 AssistantContentPart::File { .. } => "[file]".to_string(),
             })
             .collect::<Vec<_>>()
@@ -441,7 +473,9 @@ mod tests {
                 let Message::Tool { content } = &messages[1] else {
                     panic!("missing result")
                 };
-                let ToolContentPart::ToolResult(output) = &content[0];
+                let ToolContentPart::ToolResult(output) = &content[0] else {
+                    panic!("expected tool result");
+                };
                 assert_eq!(output.tool_call_id, "call");
                 assert_eq!(output.tool_name, "shell");
                 assert_eq!(

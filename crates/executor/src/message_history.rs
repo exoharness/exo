@@ -32,7 +32,10 @@ pub(crate) fn extend_message_history(
                 for message in messages {
                     match message {
                         Message::Tool { content } => {
-                            for ToolContentPart::ToolResult(result) in content {
+                            for part in content {
+                                let ToolContentPart::ToolResult(result) = part else {
+                                    continue;
+                                };
                                 remove_pending_tool_call(
                                     &mut pending_tool_call_ids,
                                     &result.tool_call_id,
@@ -84,6 +87,8 @@ pub(crate) fn extend_message_history(
                                 .map(|(key, value)| (key.clone(), to_lingua_value(value.clone())))
                                 .collect(),
                         ),
+                        status: None,
+                        caller: None,
                         encrypted_content: None,
                         provider_options: None,
                         provider_executed: None,
@@ -109,6 +114,8 @@ pub(crate) fn extend_message_history(
                         tool_call_id: tool_call_id.clone(),
                         tool_name: tool_name.clone(),
                         output: to_lingua_value(result.clone()),
+                        custom_tool_call: None,
+                        caller: None,
                         provider_options: None,
                     })],
                 });
@@ -144,6 +151,8 @@ fn flush_dangling_tool_results(
                     "ok": false,
                     "error": "tool execution did not complete before the previous turn ended",
                 })),
+                custom_tool_call: None,
+                caller: None,
                 provider_options: None,
             })],
         });
