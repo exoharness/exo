@@ -58,6 +58,17 @@ const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 128 * 1024 * 1024;
 const HTTP_BUFFER_SIZE: usize = 32 * 1024;
 const MAX_CONNECTIONS: usize = 128;
 
+/// Validates a forwarded HTTP request before the proxy resolves credentials or contacts the upstream.
+/// The body is subject to the proxy's normal size and time limits.
+pub trait EgressRequestValidator: Send + Sync {
+    fn validate_request(
+        &self,
+        destination: &EgressDestination,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<(), EgressError>;
+}
+
 pub(crate) struct ResolvedUpstream {
     pub(crate) addresses: Vec<SocketAddr>,
     pub(crate) root_certificate: Option<reqwest::Certificate>,
@@ -127,6 +138,7 @@ pub(crate) struct State {
     identity: EgressIdentity,
     resolver: Option<Arc<dyn EgressCredentialResolver>>,
     redirect_policy: Option<Arc<dyn EgressRedirectPolicy>>,
+    request_validator: Option<Arc<dyn EgressRequestValidator>>,
     upstream: Arc<dyn UpstreamResolver>,
 }
 
@@ -296,6 +308,7 @@ impl State {
             identity,
             resolver,
             redirect_policy: None,
+            request_validator: None,
             upstream,
         })
     }
@@ -347,6 +360,13 @@ impl State {
         sni: Option<&str>,
     ) -> Result<Response<ProxyBody>, EgressError> {
         let (destination, url) = self.destination(&request, sni)?;
+        let validated_body = if let Some(validator) = &self.request_validator {
+            let body = self.read_request_body(request.body_mut()).await?;
+            validator.validate_request(&destination, request.headers(), &body)?;
+            Some(body)
+        } else {
+            None
+        };
         let mut headers = request.headers().clone();
 
         let client = self.client(&destination.host, destination.port).await?;
@@ -360,14 +380,10 @@ impl State {
             &TimedResolver(self.resolver.as_deref().unwrap_or(&NoCredentials)),
         )
         .await?;
-        let body = tokio::time::timeout(
-            IO_TIMEOUT,
-            Limited::new(request.body_mut(), self.max_request_body_bytes).collect(),
-        )
-        .await
-        .context("reading egress request body timed out")?
-        .map_err(|_| anyhow!("invalid or oversized request body"))?
-        .to_bytes();
+        let body = match validated_body {
+            Some(body) => body,
+            None => self.read_request_body(request.body_mut()).await?,
+        };
         let method = request.method().clone();
         let mut response =
             relay(method.clone(), headers, url.clone(), body.clone(), &client).await?;
@@ -401,6 +417,17 @@ impl State {
             }
         }
         self.follow_redirect(&destination, &url, response).await
+    }
+
+    async fn read_request_body(&self, body: &mut Incoming) -> Result<Bytes> {
+        Ok(tokio::time::timeout(
+            IO_TIMEOUT,
+            Limited::new(body, self.max_request_body_bytes).collect(),
+        )
+        .await
+        .context("reading egress request body timed out")?
+        .map_err(|_| anyhow!("invalid or oversized request body"))?
+        .to_bytes())
     }
 
     fn destination(

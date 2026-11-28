@@ -46,6 +46,27 @@ impl ProxySession {
         placeholders: &HashMap<String, String>,
         redirect_policy: Option<Arc<dyn EgressRedirectPolicy>>,
     ) -> Result<Self> {
+        Self::new_with_policies(
+            identity,
+            policy,
+            resolver,
+            tls,
+            placeholders,
+            redirect_policy,
+            None,
+        )
+    }
+
+    /// Configures optional redirect handling and validation of intercepted HTTP requests.
+    pub fn new_with_policies(
+        identity: EgressIdentity,
+        policy: EgressPolicy,
+        resolver: Option<Arc<dyn EgressCredentialResolver>>,
+        tls: TlsAcceptor,
+        placeholders: &HashMap<String, String>,
+        redirect_policy: Option<Arc<dyn EgressRedirectPolicy>>,
+        request_validator: Option<Arc<dyn EgressRequestValidator>>,
+    ) -> Result<Self> {
         let mut state = State::new_with_placeholders(
             identity,
             policy,
@@ -55,6 +76,7 @@ impl ProxySession {
             None,
         )?;
         state.redirect_policy = redirect_policy;
+        state.request_validator = request_validator;
         Ok(Self {
             state: Arc::new(state),
             tls,
