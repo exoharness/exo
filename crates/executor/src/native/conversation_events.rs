@@ -72,8 +72,13 @@ pub fn finalize_rebuild_update_file(
     exit_code: i32,
     completed_at: &str,
 ) -> Result<RebuildUpdateRecord> {
-    if status != "succeeded" && status != "failed" {
-        bail!("rebuild update status must be succeeded or failed, got {status}");
+    if !matches!(
+        status,
+        "succeeded" | "failed" | "preflight_failed" | "spawn_failed"
+    ) {
+        bail!(
+            "rebuild update status must be succeeded, failed, preflight_failed, or spawn_failed, got {status}"
+        );
     }
     let contents = fs::read_to_string(outcome_path).map_err(|error| {
         anyhow!(
