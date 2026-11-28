@@ -936,6 +936,85 @@ async fn proxy_rejects_cleartext_wrong_destinations_and_other_sandboxes() -> Res
     Ok(())
 }
 
+struct RequireBody;
+
+impl EgressRequestValidator for RequireBody {
+    fn validate_request(
+        &self,
+        destination: &EgressDestination,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> Result<(), EgressError> {
+        assert_eq!(destination.method, Method::POST);
+        assert_eq!(destination.path, "/auth");
+        assert_eq!(headers["content-type"], "text/plain");
+        if body != b"allowed" {
+            return Err(EgressError::Rejected("request body rejected".into()));
+        }
+        Ok(())
+    }
+}
+
+// Ensures the CONNECT proxy validates the parsed body before credential lookup and forwarding.
+#[tokio::test]
+async fn connect_proxy_validates_request_body_before_resolving_credentials() -> Result<()> {
+    let upstream = Upstream::start().await?;
+    let resolver = TestResolver::new();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let address = listener.local_addr()?;
+    let (ca_pem, tls) = tls_configuration(vec!["api.test".into()])?;
+    let placeholder = format!("{PLACEHOLDER_PREFIX}0123456789abcdef0123456789abcdef");
+    let mut session = ProxySession::new_with_policies(
+        identity("validate"),
+        policy(),
+        Some(resolver.clone()),
+        tls,
+        &HashMap::from([("TEST_API_KEY".into(), placeholder.clone())]),
+        None,
+        Some(Arc::new(RequireBody)),
+    )?;
+    Arc::get_mut(&mut session.state).unwrap().upstream = Arc::new(upstream.config.clone());
+    let authorizer = Arc::new(TestProxyAuthorizer {
+        sessions: HashMap::from([("password".into(), session)]),
+        ca_pem: ca_pem.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn(serve_connect_proxy(listener, authorizer, cancel.clone()));
+    let client = reqwest::Client::builder()
+        .proxy(
+            reqwest::Proxy::https(format!("http://{address}"))?.basic_auth("sandbox", "password"),
+        )
+        .add_root_certificate(reqwest::Certificate::from_pem(ca_pem.as_bytes())?)
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let request = || {
+        client
+            .post("https://api.test/auth")
+            .header("content-type", "text/plain")
+    };
+    for request in [request(), request().bearer_auth(&placeholder)] {
+        let response = request.body("blocked").send().await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.text().await?, "request body rejected\n");
+    }
+    assert!(resolver.uses.read().await.is_empty());
+    assert_eq!(upstream.connections.load(Ordering::SeqCst), 0);
+
+    let response = request()
+        .bearer_auth(&placeholder)
+        .body("allowed")
+        .send()
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.text().await?, "authenticated-v1");
+    assert_eq!(resolver.uses.read().await.len(), 1);
+    cancel.cancel();
+    task.await??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn connect_stream_uses_supplied_placeholder_and_checks_both_hosts() -> Result<()> {
     let upstream = Upstream::start().await?;
